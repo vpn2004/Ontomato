@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -29,6 +31,7 @@ import io.ontomato.dataengine.config.BusinessConfig;
 import io.ontomato.dataengine.dao.JSONRuleDao;
 import io.ontomato.dataengine.dao.VectorResourceDao;
 import io.ontomato.dataengine.dataAdapter.DataAdapter;
+import io.ontomato.dataengine.dataAdapter.DataAdapterCapabilities;
 import io.ontomato.dataengine.dataAdapter.DataAdapterRegistry;
 import io.ontomato.dataengine.service.BusinessConfigService;
 
@@ -42,7 +45,7 @@ class VectorResourceServiceImplTest {
 	private final VectorResourceServiceImpl service = new VectorResourceServiceImpl();
 	private final VectorResourceDao vectorResourceDao = mock(VectorResourceDao.class);
 	private final DataAdapterRegistry registry = mock(DataAdapterRegistry.class);
-	private final DataAdapter adapter = mock(DataAdapter.class);
+	private final DataAdapter adapter = mock(DataAdapter.class, CALLS_REAL_METHODS);
 	private final BusinessConfig businessConfig = new BusinessConfig();
 	private final Map<String, Object> jsonRule = Map.of("classDef", List.of(PRODUCT));
 
@@ -172,6 +175,30 @@ class VectorResourceServiceImplTest {
 
 		assertThrows(IllegalArgumentException.class,
 				() -> service.deleteAndDetach("/Product", "photos", "P1", "idx/other.png", "d1"));
+		verify(adapter, never()).updateObjects(any(), any(), any(), any());
+	}
+
+	@Test
+	void readOnlyAdaptersRejectAttachBeforeReadingTheObjectOrSavingAResource() throws Exception {
+		doReturn(DataAdapterCapabilities.onnReadOnly()).when(adapter).capabilities();
+
+		assertThrows(UnsupportedOperationException.class,
+				() -> service.saveAndAttach(resource("text"), new ByteArrayInputStream(new byte[] {1}), "png", "d1"));
+
+		verifyNoInteractions(vectorResourceDao);
+		verify(adapter, never()).queryVectorAttr(any(), any(), any());
+		verify(adapter, never()).updateObjects(any(), any(), any(), any());
+	}
+
+	@Test
+	void readOnlyAdaptersRejectDetachBeforeReadingTheObjectOrDeletingAResource() throws Exception {
+		doReturn(DataAdapterCapabilities.onnReadOnly()).when(adapter).capabilities();
+
+		assertThrows(UnsupportedOperationException.class,
+				() -> service.deleteAndDetach("/Product", "photos", "P1", "idx/old.png", "d1"));
+
+		verifyNoInteractions(vectorResourceDao);
+		verify(adapter, never()).queryVectorAttr(any(), any(), any());
 		verify(adapter, never()).updateObjects(any(), any(), any(), any());
 	}
 

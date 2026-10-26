@@ -32,6 +32,7 @@ import io.ontomato.dataengine.dao.QueryExampleConfigDao;
 import io.ontomato.dataengine.dao.VectorResourceDao;
 import io.ontomato.dataengine.dataAdapter.DataAdapter;
 import io.ontomato.dataengine.dataAdapter.DataAdapterRegistry;
+import io.ontomato.dataengine.dataAdapter.OntologySchemaValidator;
 import io.ontomato.dataengine.service.AdminService;
 import io.ontomato.dataengine.service.BusinessConfigService;
 import io.ontomato.dataengine.util.FileUtil;
@@ -101,6 +102,7 @@ public class AdminServiceImpl implements AdminService {
 	
 	@Override
 	public void addRelationship(String relationName, String fromClassName, String toClassName, String relationDesc, String fromField, String toField, String lang, User user) throws Exception {
+		requireSchemaWrite(user.getDomainId());
 		Map<String, Object> jsonRule = getJSONRule(user.getDomainId());
 		List<Map<String, Object>> classDefs = (List<Map<String, Object>>)jsonRule.get("classDef");
 		Map<String, Map<String, String>> relationship_rule = (Map<String, Map<String, String>>)jsonRule.get("relationship_rule");
@@ -134,6 +136,7 @@ public class AdminServiceImpl implements AdminService {
 			relationshipDef.put("toField", toField);
 			relationshipDef.put("fromdesc", "");
 			relationshipDef.put("todesc", "");
+			adapter.createSchemaRelationship(relationName, relationshipDef, dataRagConfig);
 			relationship_rule.put(relationName, relationshipDef);
 			writeJSONRule(jsonRule, user.getDomainId());
 			
@@ -156,9 +159,12 @@ public class AdminServiceImpl implements AdminService {
 	
 	@Override
 	public void delRelationship(String relationName, User user) {
+		requireSchemaWrite(user.getDomainId());
 		Map<String, Object> jsonRule = getJSONRule(user.getDomainId());
 		Map<String, Map<String, String>> relationship_rule = (Map<String, Map<String, String>>)jsonRule.get("relationship_rule");
 		if (relationship_rule.get(relationName) != null) {
+			DataAdapter adapter = dataAdapterRegistry.create(businessConfigService.get(user.getDomainId()), jsonRule);
+			adapter.deleteSchemaRelationship(relationName, relationship_rule.get(relationName), dataRagConfig);
 			relationship_rule.remove(relationName);
 			writeJSONRule(jsonRule, user.getDomainId());
 			
@@ -205,6 +211,7 @@ public class AdminServiceImpl implements AdminService {
 	
 	@Override
 	public void addClass(String className, String primaryKeyName, String showName, String classDesc, boolean classToCard, boolean instanceToCard, boolean inStarChart, String lang, User user) throws Exception {
+		requireSchemaWrite(user.getDomainId());
 		className = className.trim();
 		if (primaryKeyName == null || primaryKeyName.isBlank()) {
 			throw new Exception(langService.get(lang, "Admin.class.primaryKeyRequired"));
@@ -276,6 +283,7 @@ public class AdminServiceImpl implements AdminService {
 	
 	@Override
 	public void delClass(String className, User user) {
+		requireSchemaWrite(user.getDomainId());
 		className = className.trim();
 		Map<String, Object> jsonRule = getJSONRule(user.getDomainId());
 		List<Map<String, Object>> classDefs = (List<Map<String, Object>>)jsonRule.get("classDef");
@@ -392,6 +400,7 @@ public class AdminServiceImpl implements AdminService {
 	
 	@Override
 	public void addClassAttr(String className, String attrName, String showName, String attrDesc, String type, boolean bizzKey, boolean enable, String lang, User user) throws Exception {
+		requireSchemaWrite(user.getDomainId());
 		Map<String, Object> jsonRule = getJSONRule(user.getDomainId());
 		List<Map<String, Object>> classDefs = (List<Map<String, Object>>)jsonRule.get("classDef");
 		Map<String, Object> classDef = null;
@@ -427,6 +436,7 @@ public class AdminServiceImpl implements AdminService {
 				if ("bucket".equals(type)) {
 					attrDef.put("indicators", new ArrayList<Map<String, String>>());
 				}
+				adapter.addSchemaAttribute(className, attrDef, dataRagConfig);
 				attrs.add(attrDef);
 				writeJSONRule(jsonRule, user.getDomainId());
 				
@@ -452,6 +462,7 @@ public class AdminServiceImpl implements AdminService {
 	
 	@Override
 	public void delClassAttr(String className, String attrName, String lang, User user) throws Exception {
+		requireSchemaWrite(user.getDomainId());
 		attrName = attrName.trim();
 		className = className.trim();
 		Map<String, Object> jsonRule = getJSONRule(user.getDomainId());
@@ -509,6 +520,9 @@ public class AdminServiceImpl implements AdminService {
 					if (attrDef.get("name").equals(attr)) {
 						if (!Boolean.valueOf(enable) && Boolean.TRUE.equals(attrDef.get("primaryKey"))) {
 							throw new Exception(langService.get(lang, "Admin.attr.primaryKeyLocked"));
+						}
+						if (Boolean.valueOf(enable) != !Boolean.FALSE.equals(attrDef.get("enable"))) {
+							requireSchemaWrite(user.getDomainId());
 						}
 						attrDef.put("attrDesc", desc);
 						attrDef.put("enable", Boolean.valueOf(enable));
@@ -610,6 +624,11 @@ public class AdminServiceImpl implements AdminService {
 				List<Map<String, Object>> attrs = (List<Map<String, Object>>)classDef.get("attrs");
 				for (Map<String, Object> attrDef : attrs) {
 					if (attrDef.get("name").equals(attr)) {
+						if (shouldReturn && Boolean.FALSE.equals(attrDef.get("enable"))
+								&& !dataAdapterRegistry.create(businessConfigService.get(user.getDomainId()), null)
+								.capabilities().schemaWrite()) {
+							throw new UnsupportedOperationException("Disabled backend attributes cannot be used as business keys");
+						}
 						attrDef.put("bizzkey", shouldReturn);
 						writeJSONRule(jsonRule, user.getDomainId());
 						
@@ -636,6 +655,7 @@ public class AdminServiceImpl implements AdminService {
 
 	@Override
 	public void setClassAttrPrimaryKey(String className, String attr, String lang, User user) throws Exception {
+		requireSchemaWrite(user.getDomainId());
 		Map<String, Object> jsonRule = getJSONRule(user.getDomainId());
 		List<Map<String, Object>> classDefs = (List<Map<String, Object>>)jsonRule.get("classDef");
 		for (Map<String, Object> classDef : classDefs) {
@@ -657,6 +677,7 @@ public class AdminServiceImpl implements AdminService {
 	
 	@Override
 	public void addBucketIndicator(String className, String attrName, String indicatorName, String indicatorDesc, String indicatorUnit, String lang, User user) throws Exception {
+		requireSchemaWrite(user.getDomainId());
 		Map<String, Object> jsonRule = getJSONRule(user.getDomainId());
 		List<Map<String, Object>> classDefs = (List<Map<String, Object>>)jsonRule.get("classDef");
 		Map<String, Object> classDef = null;
@@ -718,6 +739,7 @@ public class AdminServiceImpl implements AdminService {
 	
 	@Override
 	public void delBucketIndicator(String className, String attrName, String indicatorName, User user) {
+		requireSchemaWrite(user.getDomainId());
 		Map<String, Object> jsonRule = getJSONRule(user.getDomainId());
 		List<Map<String, Object>> classDefs = (List<Map<String, Object>>)jsonRule.get("classDef");
 		Map<String, Object> classDef = null;
@@ -848,6 +870,10 @@ public class AdminServiceImpl implements AdminService {
 				break;
 			}
 		}
+	}
+
+	private void requireSchemaWrite(String domainId) {
+		dataAdapterRegistry.create(businessConfigService.get(domainId), null).capabilities().requireSchemaWrite();
 	}
 
 	@Override
@@ -1128,6 +1154,7 @@ public class AdminServiceImpl implements AdminService {
 						attrDefJson.put("showName", attrDef.get("showName"));
 						attrDefJson.put("desc", attrDef.get("attrDesc"));
 						attrDefJson.put("type", attrDef.get("type"));
+						attrDefJson.put("sourceName", attrDef.get("sourceName"));
 						attrDefJson.put("bizzKey", attrDef.get("bizzkey"));
 						attrDefJson.put("enable", attrDef.get("enable"));
 						attrDefJson.put("primaryKey", attrDef.get("primaryKey"));
@@ -1191,6 +1218,7 @@ public class AdminServiceImpl implements AdminService {
 						attrDef.put("showName", ad.get("showName"));
 						attrDef.put("attrDesc", ad.get("desc"));
 						attrDef.put("type", ad.get("type"));
+						attrDef.put("sourceName", ad.get("sourceName"));
 						attrDef.put("bizzkey", ad.get("bizzKey"));
 						attrDef.put("enable", ad.get("enable"));
 						attrDef.put("primaryKey", ad.get("primaryKey"));
@@ -1229,6 +1257,17 @@ public class AdminServiceImpl implements AdminService {
 			}
 		}
 		rule.put("relationship_rule", relationshipDefs);
+		DataAdapter adapter = dataAdapterRegistry.create(businessConfigService.get(domainId), null);
+		if (!adapter.capabilities().schemaWrite()) {
+			adapter.capabilities().requireSchemaRead();
+			try {
+				rule = OntologySchemaValidator.mergeDisplayMetadata(adapter.readOntology(), rule);
+			} catch (RuntimeException e) {
+				throw e;
+			} catch (Exception e) {
+				throw new IllegalStateException("Cannot validate ontology against the current backend schema", e);
+			}
+		}
 		writeJSONRule(rule, domainId);
 	}
 	

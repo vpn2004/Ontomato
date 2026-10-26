@@ -118,7 +118,19 @@ public class HttpRequestUtil {
 		JSONObject rowPermissionDsl = rowPermissionDslResult[0] == null ? null : (JSONObject)rowPermissionDslResult[0];
     	
     	Set<String> nodeIds = new HashSet<String>();
-    	String nodeDslStr = DslUtil.fromQuestionDslToNodeDsl("[" + JSON.toJSONString(rowPermissionDsl, Feature.WriteMapNullValue) + "]");
+        String nodeDslStr = DslUtil.fromQuestionDslToNodeDsl(
+                "[" + JSON.toJSONString(rowPermissionDsl, Feature.WriteMapNullValue) + "]", classDefs, adapter);
+        Map<String, String> evidenceClasses = new HashMap<>();
+        JSONArray patterns = rowPermissionDsl.getJSONObject("answer").getJSONArray("steps").getJSONObject(0)
+                .getJSONObject("graph").getJSONArray("patterns");
+        for (int i = 0; i < patterns.size(); i++) {
+            JSONArray objects = patterns.getJSONObject(i).getJSONArray("objects");
+            if (objects == null) continue;
+            for (int j = 0; j < objects.size(); j++) {
+                JSONObject object = objects.getJSONObject(j);
+                evidenceClasses.put(object.getString("variable") + "_id", object.getString("class"));
+            }
+        }
         try {
 			String nodeResp = adapter.executeDsl(nodeDslStr, null, DslExecutionMode.OPTIMIZED, new ArrayList<String>());
         	for (Map map : JSON.parseArray(nodeResp, Map.class)) {
@@ -265,6 +277,7 @@ public class HttpRequestUtil {
 	}
 
     public static String getSampleDataByClassName(DataAdapter adapter, String className, List<String> attrs) {
+        adapter.capabilities().requireQuery();
     	String sampleDataDirName = "sampleData";
     	String sampleDataFileName = adapter.getSampleDataFileName(sampleDataDirName, className);
     	String sampleDataContent = getSampleDataByClassNameFromCache(sampleDataFileName);

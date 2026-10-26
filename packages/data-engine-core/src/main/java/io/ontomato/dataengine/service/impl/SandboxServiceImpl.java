@@ -43,6 +43,7 @@ public class SandboxServiceImpl implements SandboxService {
 	@Override
 	public void createNamespace(String tmpNamespace, String domainId) {
 		DataAdapter adapter = getDataAdapter(domainId);
+		adapter.capabilities().requireSchemaWrite();
 		adapter.createNamespace(tmpNamespace);
 	}
 
@@ -63,6 +64,7 @@ public class SandboxServiceImpl implements SandboxService {
 	@Override
 	public void createClass(String tmpNamespace, Map<String, Object> classDef, String domainId) {
 		DataAdapter adapter = getDataAdapter(domainId);
+		adapter.capabilities().requireSchemaWrite();
 		adapter.createClass(tmpNamespace, classDef);
 		String vectorTableName = adapter.sandboxClassName(tmpNamespace, ((String) classDef.get("className")).trim());
 		for (String attrName : getVectorAttrNames(classDef)) {
@@ -95,23 +97,26 @@ public class SandboxServiceImpl implements SandboxService {
 	@Override
 	public void createEdge(String tmpNamespace, String edgeName, String domainId) {
 		DataAdapter adapter = getDataAdapter(domainId);
+		adapter.capabilities().requireSchemaWrite();
 		adapter.createEdgeType(tmpNamespace, edgeName);
 	}
 
 	@Override
 	public void insertObjects(String tmpNamespace, Map<String, Object> classDef, JSONArray objs, String domainId) throws Exception {
+		DataAdapter adapter = getDataAdapter(domainId);
+		adapter.capabilities().requireObjectWrite();
 		if (objs == null || objs.size() == 0) {
 			return;
 		}
 		
-		DataAdapter adapter = getDataAdapter(domainId);
 		adapter.insertObjects(tmpNamespace, classDef, objs);
 	}
 
 	@Override
 	public void insertRelations(String tmpNamespace, JSONArray rels, String domainId) throws Exception {
+		DataAdapter adapter = getDataAdapter(domainId);
+		adapter.capabilities().requireEdgeWrite();
 		if (rels != null) {
-			DataAdapter adapter = getDataAdapter(domainId);
 			
 			for (int i = 0; i < rels.size(); i++) {
 				JSONObject rel = rels.getJSONObject(i);

@@ -381,7 +381,7 @@ public class ChatServiceImpl implements ChatService {
 				public void run() {
 					try {
 						String trySessionId = BackendSessionEntrance.derive(sessionId, "try-" + ii);
-						String[] userMessageArray = UserMessageUtil.getQuestionUserMessage(trySessionId, knowledgeDao,bussinessExampleDao, q, classes, subQuery, dataAdapterRegistry.create(businessConfig, null), businessConfigService, jsonRule, dslCookerExample, domainId);
+						String[] userMessageArray = UserMessageUtil.getQuestionUserMessage(trySessionId, knowledgeDao,bussinessExampleDao, q, classes, subQuery, dataAdapterRegistry.create(businessConfig, jsonRule), businessConfigService, jsonRule, dslCookerExample, domainId);
 						String userMessage = userMessageArray[0];
 						String userMessageWithoutExample = userMessageArray[1];
 						String queryJson = multiThreadAIChatService.chat(
@@ -554,7 +554,7 @@ public class ChatServiceImpl implements ChatService {
         		JSONCheckUtil.Result checkResult = illegalCheckResultMap.get(illegalTrySessionId);
         		String strCheckResult = subQuery.getString("subQuestion") + "\n\n" + abcStep + "\n\nPay special attention to the following points:\n" + checkResult.toIllegalContent();
                 log.warn("[" + originSessionId + "] " + strCheckResult);
-			String[] userMessageRetryArray = UserMessageUtil.getQuestionUserMessage(illegalTrySessionId, knowledgeDao,bussinessExampleDao, strCheckResult, classes, subQuery, dataAdapterRegistry.create(businessConfig, null), businessConfigService, jsonRule, dslCookerExample, domainId);
+			String[] userMessageRetryArray = UserMessageUtil.getQuestionUserMessage(illegalTrySessionId, knowledgeDao,bussinessExampleDao, strCheckResult, classes, subQuery, dataAdapterRegistry.create(businessConfig, jsonRule), businessConfigService, jsonRule, dslCookerExample, domainId);
     			String userMessageRetry = userMessageRetryArray[0];
     			String userMessageRetryWithoutExample = userMessageRetryArray[1];
     			evaluation.setUserMessage(userMessageRetry);

@@ -9,6 +9,7 @@ import OntologyAttributeEditor from "./OntologyAttributeEditor.vue";
 import { useManagerClient, useOntologyText } from "../context";
 
 const { ot } = useOntologyText();
+const { capabilities } = useManagerAdapter();
 const { message, confirm } = useManagerFeedback();
 const { deleteOntologyObject, loadOntology, updateOntologyObject } = useManagerClient();
 
@@ -157,7 +158,7 @@ onMounted(() => void loadDetail());
       </span>
       <span class="title-spacer"></span>
       <el-button
-        v-if="object"
+        v-if="object && capabilities.schemaWrite"
         type="danger"
         plain
         :icon="Trash2"
@@ -231,7 +232,7 @@ onMounted(() => void loadDetail());
           <div>
             <h2>{{ ot("attributes") }}</h2>
           </div>
-          <el-button type="primary" :icon="Plus" @click="attributeCreateVisible = true">
+          <el-button v-if="capabilities.schemaWrite" type="primary" :icon="Plus" @click="attributeCreateVisible = true">
             {{ ot("createAttribute") }}
           </el-button>
         </div>

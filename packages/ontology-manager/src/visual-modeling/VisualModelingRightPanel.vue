@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ElButton, ElInput, ElSwitch, ElTag, ElTooltip } from "element-plus";
 import { Plus } from "lucide-vue-next";
-import { useSharedText } from "../context";
+import { useManagerAdapter, useSharedText } from "../context";
 
 interface AttrDef {
   name: string;
@@ -45,6 +45,7 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useSharedText();
+const { capabilities } = useManagerAdapter();
 </script>
 
 <template>
@@ -96,6 +97,7 @@ const { t } = useSharedText();
             <small>{{ selectedNode.attrs.length }}</small>
             <el-tooltip :content="t('hotData.createAttr')" placement="top">
               <el-button
+                v-if="capabilities.schemaWrite"
                 class="add-attr-button"
                 text
                 circle
@@ -126,6 +128,7 @@ const { t } = useSharedText();
               <span class="switch-label">{{ t("common.enable") }}</span>
               <el-switch
                 :model-value="prop.enable"
+                :disabled="!capabilities.schemaWrite"
                 size="small"
                 @update:model-value="emit('updateAttrField', prop, 'enable', Boolean($event))"
                 @change="emit('attrEnableChange', selectedNode, prop)"
@@ -135,6 +138,7 @@ const { t } = useSharedText();
               <span class="switch-label">{{ t("hotData.mustReturn") }}</span>
               <el-switch
                 :model-value="prop.bizzkeyBool"
+                :disabled="!capabilities.schemaWrite && !prop.enable"
                 size="small"
                 @update:model-value="emit('updateAttrField', prop, 'bizzkeyBool', Boolean($event))"
                 @change="emit('attrBizKeyChange', selectedNode, prop)"

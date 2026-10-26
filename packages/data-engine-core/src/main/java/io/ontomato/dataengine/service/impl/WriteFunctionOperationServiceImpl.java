@@ -23,7 +23,6 @@ import io.ontomato.dataengine.dataAdapter.DataAdapterRegistry;
 import io.ontomato.dataengine.service.BusinessConfigService;
 import io.ontomato.dataengine.service.LangService;
 import io.ontomato.dataengine.service.WriteFunctionOperationService;
-import io.ontomato.dataengine.util.DslUtil;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -51,6 +50,9 @@ public class WriteFunctionOperationServiceImpl implements WriteFunctionOperation
 	
 	@Override
 	public void insert(String className, JSONArray objs, String sandboxId, String domainId) throws Exception {
+		DataAdapter adapter = getDataAdapter(domainId);
+		adapter.capabilities().requireObjectWrite();
+		requireSandbox(adapter, sandboxId);
 		Map<String, Object> classDef = getClassDefByClassName(className, domainId);
 		if (classDef != null) {
 			stripVectorAttrs(classDef, objs);
@@ -210,6 +212,9 @@ public class WriteFunctionOperationServiceImpl implements WriteFunctionOperation
 
 	@Override
 	public void update(String className, JSONObject setValues, JSONObject where, String sandboxId, String domainId) throws Exception {
+		DataAdapter adapter = getDataAdapter(domainId);
+		adapter.capabilities().requireObjectWrite();
+		requireSandbox(adapter, sandboxId);
 		Map<String, Object> classDef = getClassDefByClassName(className, domainId);
 		if (classDef != null) {
 			rejectVectorAttrs(classDef, setValues, domainId);
@@ -222,6 +227,9 @@ public class WriteFunctionOperationServiceImpl implements WriteFunctionOperation
 
 	@Override
 	public void delete(String className, JSONObject where, String sandboxId, String domainId) throws Exception {
+		DataAdapter adapter = getDataAdapter(domainId);
+		adapter.capabilities().requireObjectWrite();
+		requireSandbox(adapter, sandboxId);
 		Map<String, Object> classDef = getClassDefByClassName(className, domainId);
 		if (classDef != null) {
 			Map<String, Object> jsonRule = jsonRuleDao.query(domainId);
@@ -235,10 +243,13 @@ public class WriteFunctionOperationServiceImpl implements WriteFunctionOperation
 
 	@Override
 	public void createEdge(String relationName, String sourceClassName, String sourceObjId, String targetClassName, String targetObjId, String sandboxId, String domainId) throws Exception {
+		DataAdapter adapter = getDataAdapter(domainId);
+		adapter.capabilities().requireEdgeWrite();
+		requireSandbox(adapter, sandboxId);
 		Map<String, Object> jsonRule = jsonRuleDao.query(domainId);
 		Map<String, Object> relationship_rule = (Map<String, Object>)jsonRule.get("relationship_rule");
 		if (relationship_rule.get(relationName) != null) {
-			DataAdapter adapter = getDataAdapter(domainId, jsonRule);
+			adapter = getDataAdapter(domainId, jsonRule);
 			adapter.createEdge(sandboxId, relationName, sourceClassName, sourceObjId, targetClassName, targetObjId);
 		} else {
 			throw new Exception(langService.get(businessConfigService.get(domainId).getLang(), "WriteFunctionOperation.relationNotExist") + "[" + relationName + "]");
@@ -247,10 +258,13 @@ public class WriteFunctionOperationServiceImpl implements WriteFunctionOperation
 
 	@Override
 	public void deleteEdge(String relationName, String sourceClassName, String sourceObjId, String targetClassName, String targetObjId, String sandboxId, String domainId) throws Exception {
+		DataAdapter adapter = getDataAdapter(domainId);
+		adapter.capabilities().requireEdgeWrite();
+		requireSandbox(adapter, sandboxId);
 		Map<String, Object> jsonRule = jsonRuleDao.query(domainId);
 		Map<String, Object> relationship_rule = (Map<String, Object>)jsonRule.get("relationship_rule");
 		if (relationship_rule.get(relationName) != null) {
-			DataAdapter adapter = getDataAdapter(domainId, jsonRule);
+			adapter = getDataAdapter(domainId, jsonRule);
 			adapter.deleteEdge(sandboxId, relationName, sourceClassName, sourceObjId, targetClassName, targetObjId);
 		} else {
 			throw new Exception(langService.get(businessConfigService.get(domainId).getLang(), "WriteFunctionOperation.relationNotExist") + "[" + relationName + "]");
@@ -261,9 +275,15 @@ public class WriteFunctionOperationServiceImpl implements WriteFunctionOperation
 	public Map<String, Object> query(JSONObject dsl, String sandboxId, String domainId) throws Exception {
 		Map<String, Object> jsonRule = jsonRuleDao.query(domainId);
 		DataAdapter adapter = getDataAdapter(domainId, jsonRule);
+		adapter.capabilities().requireQuery();
+		requireSandbox(adapter, sandboxId);
 		return adapter.query(dsl, sandboxId, domainId, vectorResourceDao, dataRagConfig);
 	}
 	
+	private void requireSandbox(DataAdapter adapter, String sandboxId) {
+		if (inSandbox(sandboxId)) adapter.capabilities().requireSandbox();
+	}
+
 	private boolean inSandbox(String sandboxId) {
 		return sandboxId != null && !"".equals(sandboxId.trim());
 	}
@@ -289,11 +309,13 @@ public class WriteFunctionOperationServiceImpl implements WriteFunctionOperation
 	
 	@Override
 	public void appendVector(String className, String attrName, String objectId, String content, InputStream is, String suffix, String sandboxId, String domainId) throws Exception {
+		DataAdapter adapter = getDataAdapter(domainId);
+		adapter.capabilities().requireObjectWrite();
+		requireSandbox(adapter, sandboxId);
 		Map<String, Object> classDef = getClassDefByClassName(className, domainId);
 		if (classDef == null) {
 			throw new Exception(langService.get(businessConfigService.get(domainId).getLang(), "WriteFunctionOperation.classNotExist") + "[" + className + "]");
 		}
-		DataAdapter adapter = getDataAdapter(domainId);
 		boolean sandbox = inSandbox(sandboxId);
 		String prefixClassName = sandbox ? adapter.sandboxClassName(sandboxId, className) : className;
 		String prefixObjectId = sandbox ? adapter.sandboxObjectId(sandboxId, objectId) : objectId;
@@ -329,11 +351,13 @@ public class WriteFunctionOperationServiceImpl implements WriteFunctionOperation
 	
 	@Override
 	public void updateVector(String className, String attrName, String objectId, String fileId, String content, InputStream is, String sandboxId, String domainId) throws Exception {
+		DataAdapter adapter = getDataAdapter(domainId);
+		adapter.capabilities().requireObjectWrite();
+		requireSandbox(adapter, sandboxId);
 		Map<String, Object> classDef = getClassDefByClassName(className, domainId);
 		if (classDef == null) {
 			throw new Exception(langService.get(businessConfigService.get(domainId).getLang(), "WriteFunctionOperation.classNotExist") + "[" + className + "]");
 		}
-		DataAdapter adapter = getDataAdapter(domainId);
 		boolean sandbox = inSandbox(sandboxId);
 		String prefixClassName = sandbox ? adapter.sandboxClassName(sandboxId, className) : className;
 		String prefixObjectId = sandbox ? adapter.sandboxObjectId(sandboxId, objectId) : objectId;
@@ -355,11 +379,13 @@ public class WriteFunctionOperationServiceImpl implements WriteFunctionOperation
 	
 	@Override
 	public void deleteVector(String className, String attrName, String objectId, String fileId, String sandboxId, String domainId) throws Exception {
+		DataAdapter adapter = getDataAdapter(domainId);
+		adapter.capabilities().requireObjectWrite();
+		requireSandbox(adapter, sandboxId);
 		Map<String, Object> classDef = getClassDefByClassName(className, domainId);
 		if (classDef == null) {
 			throw new Exception(langService.get(businessConfigService.get(domainId).getLang(), "WriteFunctionOperation.classNotExist") + "[" + className + "]");
 		}
-		DataAdapter adapter = getDataAdapter(domainId);
 		boolean sandbox = inSandbox(sandboxId);
 		String prefixClassName = sandbox ? adapter.sandboxClassName(sandboxId, className) : className;
 		String prefixObjectId = sandbox ? adapter.sandboxObjectId(sandboxId, objectId) : objectId;

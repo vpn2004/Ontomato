@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -69,7 +70,7 @@ class AdminControllerPrimaryKeyTest {
 		BusinessConfigService businessConfigService = mock(BusinessConfigService.class);
 		when(businessConfigService.get("d1")).thenReturn(businessConfig);
 		DataAdapterRegistry registry = mock(DataAdapterRegistry.class);
-		when(registry.create(eq(businessConfig), any())).thenReturn(mock(DataAdapter.class));
+		when(registry.create(eq(businessConfig), any())).thenReturn(mock(DataAdapter.class, CALLS_REAL_METHODS));
 		LangService langService = mock(LangService.class);
 		when(langService.get(any(), anyString())).thenAnswer(call -> call.getArgument(1));
 

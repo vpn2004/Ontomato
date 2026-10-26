@@ -18,7 +18,6 @@ import io.ontomato.dataengine.dataAdapter.DataAdapter;
 import io.ontomato.dataengine.dataAdapter.DataAdapterRegistry;
 import io.ontomato.dataengine.service.BusinessConfigService;
 import io.ontomato.dataengine.service.VectorResourceService;
-import io.ontomato.dataengine.util.DslUtil;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -56,6 +55,7 @@ public class VectorResourceServiceImpl implements VectorResourceService {
 
 		BusinessConfig businessConfig = businessConfigService.get(domainId);
 		DataAdapter adapter = dataAdapterRegistry.create(businessConfig, jsonRule);
+		adapter.capabilities().requireObjectWrite();
 
 		JSONArray current;
 		try {
@@ -105,6 +105,7 @@ public class VectorResourceServiceImpl implements VectorResourceService {
 
 		BusinessConfig businessConfig = businessConfigService.get(domainId);
 		DataAdapter adapter = dataAdapterRegistry.create(businessConfig, jsonRule);
+		adapter.capabilities().requireObjectWrite();
 
 		JSONArray current;
 		try {

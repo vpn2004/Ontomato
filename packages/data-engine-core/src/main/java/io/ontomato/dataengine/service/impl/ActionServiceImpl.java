@@ -31,6 +31,8 @@ import io.ontomato.dataengine.core.bean.User;
 import io.ontomato.dataengine.dao.ActionDao;
 import io.ontomato.dataengine.dao.FunctionDao;
 import io.ontomato.dataengine.dao.KnowledgeDao;
+import io.ontomato.dataengine.dataAdapter.DataAdapter;
+import io.ontomato.dataengine.dataAdapter.DataAdapterRegistry;
 import io.ontomato.dataengine.service.ABCProgramService;
 import io.ontomato.dataengine.service.ActionService;
 import io.ontomato.dataengine.service.AdminService;
@@ -60,6 +62,9 @@ public class ActionServiceImpl implements ActionService {
 	
 	@Autowired
 	private BusinessConfigService businessConfigService;
+
+	@Autowired
+	private DataAdapterRegistry dataAdapterRegistry;
 	
 	@Autowired
 	private SandboxService sandboxService;
@@ -117,6 +122,9 @@ public class ActionServiceImpl implements ActionService {
 	
 	@Override
 	public Action generateFromNatureLanguage(String question, String lang, String domainId, boolean persistence) throws Exception {
+		DataAdapter adapter = dataAdapterRegistry.create(businessConfigService.get(domainId), null);
+		adapter.capabilities().requireObjectWrite();
+		adapter.capabilities().requireSandbox();
 		String sandboxId = "a" + ShortCodeGenerator.gerenate().toLowerCase();
 		
 		try {
@@ -486,6 +494,7 @@ public class ActionServiceImpl implements ActionService {
 
 	@Override
 	public PythonExecuteResult execute(String id, JSONObject param, String lang, User user, UserDataPermission permission, int timeoutMinutes) throws Exception {
+		dataAdapterRegistry.create(businessConfigService.get(user.getDomainId()), null).capabilities().requireObjectWrite();
 		Action action = queryById(id);
 		if (action != null) {
 			if (Action.STATUS_PUBLISHED.equals(action.getStatus())) {

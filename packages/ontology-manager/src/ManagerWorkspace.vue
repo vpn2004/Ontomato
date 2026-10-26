@@ -17,6 +17,7 @@ import OntologyObjectDetail from "./components/OntologyObjectDetail.vue";
 import OntologyRelationDetail from "./components/OntologyRelationDetail.vue";
 import OntologyResourceSidebar from "./components/OntologyResourceSidebar.vue";
 import OntologyWorkspaceHeader from "./components/OntologyWorkspaceHeader.vue";
+import AdapterOntologyImport from "./components/AdapterOntologyImport.vue";
 import {
   emptyOntologyResourceCounts,
   type AssetTab,
@@ -36,7 +37,7 @@ const emit = defineEmits<{
  * when the host changes API entry or credential; on unmount the client stops sending, confirmations end as cancelled and messages close.
  */
 const context = props.context;
-const { loadOntology, loadSmartAssets } = provideManagerContext(context, (status) =>
+const { loadOntology, loadSmartAssets, reloadAdapter } = provideManagerContext(context, (status) =>
   emit("auth-failure", status)
 );
 const shell = ref<HTMLElement>();
@@ -58,6 +59,12 @@ const selectedRelation = ref("");
 const objectCreateVisible = ref(false);
 const browserObjectClass = ref("");
 const objectLabels = ref<Record<string, string>>({});
+const ontologyRevision = ref(0);
+
+async function handleOntologyImported() {
+  ontologyRevision.value++;
+  await loadResourceCounts();
+}
 
 function queryString(params: Record<string, string>) {
   const query = new URLSearchParams(params);
@@ -282,6 +289,7 @@ async function loadResourceCounts() {
 
 onMounted(() => {
   void loadResourceCounts();
+  void reloadAdapter().catch(() => { /* The server still enforces capabilities when a source is unavailable. */ });
 });
 </script>
 
@@ -328,7 +336,7 @@ onMounted(() => {
             @object="openObjectDetail"
           />
         </section>
-        <section v-else-if="activeWorkspace === 'browser'" class="legacy-surface">
+        <section v-else-if="activeWorkspace === 'browser'" :key="`browser-${ontologyRevision}`" class="legacy-surface">
           <DataBrowser :initial-class="browserObjectClass" />
         </section>
         <section v-else-if="activeWorkspace === 'assets'" class="asset-surface">
@@ -348,7 +356,7 @@ onMounted(() => {
             @created="loadResourceCounts"
           />
         </section>
-        <section v-else-if="activeWorkspace === 'visual-modeling'" class="visual-content">
+        <section v-else-if="activeWorkspace === 'visual-modeling'" :key="`visual-${ontologyRevision}`" class="visual-content">
           <VisualModeling
             :focus="route.query.get('focus') || ''"
             :focus-id="route.query.get('id') || ''"
@@ -359,7 +367,7 @@ onMounted(() => {
         <section v-else-if="activeWorkspace === 'knowledge'" class="knowledge-surface">
           <BusinessKnowledge />
         </section>
-        <OntologyPlayground v-else class="playground-surface" @open-modeling="openModelingFocus" />
+        <OntologyPlayground v-else :key="`playground-${ontologyRevision}`" class="playground-surface" @open-modeling="openModelingFocus" />
       </section>
     </div>
     <OntologyObjectCreateDialog v-model="objectCreateVisible" @created="handleObjectCreated" />

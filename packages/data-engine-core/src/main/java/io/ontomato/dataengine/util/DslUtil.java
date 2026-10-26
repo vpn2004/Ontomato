@@ -10,6 +10,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TimeZone;
 import java.util.UUID;
+import java.util.function.Function;
 
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONArray;
@@ -19,6 +20,7 @@ import com.alibaba.fastjson2.JSONWriter.Feature;
 import io.ontomato.dataengine.bean.DslConsanguinity;
 import io.ontomato.dataengine.bean.VectorResource;
 import io.ontomato.dataengine.dao.VectorResourceDao;
+import io.ontomato.dataengine.dataAdapter.DataAdapter;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -328,51 +330,69 @@ public class DslUtil {
     }
     
     public static String fromQuestionDslToNodeDsl(String dslStr) {
-		List<Map> dsl = JSONArray.parseArray(dslStr, Map.class);
-    	for (Map question : dsl) {
-    		if (question.get("answer") != null && question.get("answer") instanceof Map) {
-    			Map answer = (Map)question.get("answer");
-    			if (answer.get("steps") != null && answer.get("steps") instanceof List) {
-    				List steps = (List)answer.get("steps");
-    				if (steps.size() > 0 && steps.get(0) instanceof Map) {
-    					Map firstStep = (Map)steps.get(0);
-    					if (firstStep.get("output") != null && firstStep.get("output") instanceof Map) {
-							Map output = (Map)firstStep.get("output");
-							output.put("to_user", true);
-							output.remove("save_table");
-							
-							Set<String> variables = new HashSet<String>();
-							if (output.get("fields") != null && output.get("fields") instanceof List) {
-								List fields = (List)output.get("fields");
-								for (Object f : fields) {
-									if (f instanceof Map) {
-										Map field = (Map)f;
-										if (field.get("variable") != null && field.get("variable") instanceof String) {
-											variables.add((String)field.get("variable"));
-										}
-									}
-								}
-							}
-							List<Map<String, String>> newFields = new ArrayList<Map<String, String>>();
-							for (String variable : variables) {
-								Map<String, String> field = new HashMap<String, String>();
-								field.put("variable", variable);
-								field.put("field", "id");
-								field.put("as", variable + "_id");
-								newFields.add(field);
-							}
-							output.put("fields", newFields);
-						}
-    				}
-    				while (steps.size() > 1) {
-    					steps.remove(steps.size() - 1);
-    				}
-    			}
-    		}
-    	}
-    	return JSONArray.toJSONString(dsl, Feature.WriteMapNullValue);
-	}
-	
+        return fromQuestionDslToNodeDsl(dslStr, null, null);
+    }
+
+    /** Project evidence using the identity field understood by the executing adapter. */
+    public static String fromQuestionDslToNodeDsl(String dslStr, List<Map<String, Object>> classDefs, DataAdapter adapter) {
+        Map<String, Map<String, Object>> definitions = new HashMap<>();
+        if (classDefs != null) {
+            for (Map<String, Object> definition : classDefs) {
+                definitions.put((String) definition.get("className"), definition);
+            }
+        }
+        JSONArray questions = JSON.parseArray(dslStr);
+        for (int q = 0; q < questions.size(); q++) {
+            JSONObject question = questions.getJSONObject(q);
+            if (question == null || question.getJSONObject("answer") == null) continue;
+            JSONArray steps = question.getJSONObject("answer").getJSONArray("steps");
+            if (steps == null || steps.isEmpty()) continue;
+            JSONObject firstStep = steps.getJSONObject(0);
+            JSONObject output = firstStep.getJSONObject("output");
+            if (output != null) {
+                output.put("to_user", true);
+                output.remove("save_table");
+                Map<String, String> classesByVariable = new HashMap<>();
+                JSONObject graph = firstStep.getJSONObject("graph");
+                JSONArray patterns = graph == null ? null : graph.getJSONArray("patterns");
+                if (patterns != null) {
+                    for (int i = 0; i < patterns.size(); i++) {
+                        JSONArray objects = patterns.getJSONObject(i).getJSONArray("objects");
+                        if (objects == null) continue;
+                        for (int j = 0; j < objects.size(); j++) {
+                            JSONObject object = objects.getJSONObject(j);
+                            classesByVariable.put(object.getString("variable"), object.getString("class"));
+                        }
+                    }
+                }
+                Set<String> variables = new HashSet<>();
+                JSONArray fields = output.getJSONArray("fields");
+                if (fields != null) {
+                    for (int i = 0; i < fields.size(); i++) {
+                        String variable = fields.getJSONObject(i).getString("variable");
+                        if (variable != null) variables.add(variable);
+                    }
+                }
+                JSONArray identityFields = new JSONArray();
+                for (String variable : variables) {
+                    String identityField = "id";
+                    if (adapter != null) {
+                        String className = classesByVariable.get(variable);
+                        Map<String, Object> definition = definitions.get(className);
+                        if (definition == null) {
+                            throw new IllegalArgumentException("Cannot resolve evidence class for variable " + variable);
+                        }
+                        identityField = adapter.objectPrimaryKey(definition);
+                    }
+                    identityFields.add(JSONObject.of("variable", variable, "field", identityField, "as", variable + "_id"));
+                }
+                output.put("fields", identityFields);
+            }
+            while (steps.size() > 1) steps.remove(steps.size() - 1);
+        }
+        return JSON.toJSONString(questions, Feature.WriteMapNullValue);
+    }
+
 	public static String enrichShouldReturnAttr(String dslStr, List<Map<String, Object>> classDefs) {
 		List<Map> dsl = JSONArray.parseArray(dslStr, Map.class);
 		

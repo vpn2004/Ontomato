@@ -12,6 +12,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@ontomato/contracts": "workspace:*",
     "@antv/g6": "5.1.0",
     "@antv/x6": "3.1.7",
     "@ontomato/contracts": "workspace:*",

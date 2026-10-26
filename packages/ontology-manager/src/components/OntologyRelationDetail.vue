@@ -4,9 +4,10 @@ import { ArrowLeft, ArrowRight, Save, Trash2 } from "lucide-vue-next";
 import { ElAlert, ElButton, ElEmpty, ElForm, ElFormItem, ElInput, vLoading } from "element-plus";
 import { useManagerFeedback } from "../feedback";
 import type { OntologyRelation } from "../api";
-import { useManagerClient, useOntologyText } from "../context";
+import { useManagerAdapter, useManagerClient, useOntologyText } from "../context";
 
 const { ot } = useOntologyText();
+const { capabilities } = useManagerAdapter();
 const { message, confirm } = useManagerFeedback();
 const { deleteOntologyRelation, loadOntology, updateOntologyRelation } = useManagerClient();
 
@@ -102,7 +103,7 @@ onMounted(() => void loadDetail());
       </span>
       <span class="title-spacer"></span>
       <el-button
-        v-if="relation"
+        v-if="relation && capabilities.schemaWrite"
         type="danger"
         plain
         :icon="Trash2"

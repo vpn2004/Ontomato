@@ -14,6 +14,11 @@ function interpolate(value: string, params?: TextParams) {
 
 /** The Manager's own English messages; other languages are supplied by the host. */
 const ontologyEn = {
+  adapterSchemaReadOnly: "Source schema is read-only. Display names and descriptions can be edited here.",
+  previewAdapterOntology: "Preview source schema",
+  importAdapterOntology: "Replace model with this schema",
+  adapterOntologyImportNotice: "This replaces the current Ontomato model, including its display names and descriptions, with the reviewed schema. Export any edits you want to keep first. Business data in the source is unchanged.",
+  adapterOntologyImported: "Source schema imported",
   browseObjectData: "Browse Object Data",
   ontologyGraphDesc:
     "Search and inspect objects, properties, and relations in the current Ontology.",

@@ -8,6 +8,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -29,6 +30,7 @@ import io.ontomato.dataengine.config.DataRagConfig;
 import io.ontomato.dataengine.core.exception.ServiceException;
 import io.ontomato.dataengine.dao.VectorResourceDao;
 import io.ontomato.dataengine.dataAdapter.DataAdapter;
+import io.ontomato.dataengine.dataAdapter.DataAdapterCapabilities;
 import io.ontomato.dataengine.service.ai.EmbeddingService;
 import io.ontomato.dataengine.service.sys.bean.permission.UserDataPermission;
 import io.ontomato.dataengine.service.vector.VectorRetrievalGate;
@@ -84,7 +86,7 @@ class HttpRequestUtilVectorTest {
 
 	@Test
 	void dslWithoutVectorAttributesRemainsCompletelyUnchanged() throws Exception {
-		DataAdapter adapter = mock(DataAdapter.class);
+		DataAdapter adapter = mock(DataAdapter.class, CALLS_REAL_METHODS);
 		ArgumentCaptor<String> executed = ArgumentCaptor.forClass(String.class);
 		when(adapter.executeDsl(executed.capture(), anyString(), any(), any())).thenReturn("[{\"answer\":[{\"code\":\"P1\"}]}]");
 
@@ -97,6 +99,23 @@ class HttpRequestUtilVectorTest {
 
 		assertEquals(JSON.parseArray(PLAIN_DSL), JSON.parseArray(executed.getValue()));
 		assertEquals(false, results[1].failed());
+	}
+
+	@Test
+	void disabledQueriesReturnFailureWithoutExecutingTheAdapter() throws Exception {
+		DataAdapter adapter = mock(DataAdapter.class, CALLS_REAL_METHODS);
+		org.mockito.Mockito.doReturn(new DataAdapterCapabilities(false, false, false, false, false, false, false))
+				.when(adapter).capabilities();
+		DataRagConfig config = new DataRagConfig();
+		config.setCardBaseUrl("http://card");
+
+		DslExecutionResult[] results = HttpRequestUtil.getM3Data(config, adapter, PLAIN_DSL, "s1", true,
+				Map.of("classDef", List.of(PRODUCT)), mock(VectorResourceDao.class),
+				mock(UserDataPermission.class), M3Mode.V1, "d1");
+
+		assertTrue(results[1].failed());
+		assertTrue(results[1].failure().cause() instanceof UnsupportedOperationException);
+		verify(adapter, never()).executeDsl(anyString(), anyString(), any(), any());
 	}
 
 	private VectorResourceDao createRealDaoWithFailingEmbedding(String errorMessage) {
@@ -117,7 +136,7 @@ class HttpRequestUtilVectorTest {
 	void vectorSearchFailureReturnsErrorWithoutFallback() throws Exception {
 		VectorResourceDao vectorResourceDao = createRealDaoWithFailingEmbedding("Vector search down");
 
-		DataAdapter adapter = mock(DataAdapter.class);
+		DataAdapter adapter = mock(DataAdapter.class, CALLS_REAL_METHODS);
 		DataRagConfig dataRagConfig = new DataRagConfig();
 		dataRagConfig.setCardBaseUrl("http://card");
 		Map<String, Object> jsonRule = Map.of("classDef", List.of(PRODUCT));
@@ -135,7 +154,7 @@ class HttpRequestUtilVectorTest {
 	void getNodeIdsThrowsOnVectorSearchFailure() {
 		VectorResourceDao vectorResourceDao = createRealDaoWithFailingEmbedding("Vector search down");
 
-		DataAdapter adapter = mock(DataAdapter.class);
+		DataAdapter adapter = mock(DataAdapter.class, CALLS_REAL_METHODS);
 		Map<String, Object> jsonRule = Map.of("classDef", List.of(PRODUCT));
 
 		RuntimeException thrown = assertThrows(RuntimeException.class, () ->
@@ -147,7 +166,7 @@ class HttpRequestUtilVectorTest {
 	@Test
 	void rowPermissionFailureThrowsDirectlyInsteadOfReturningFailureResult() {
 		VectorResourceDao vectorResourceDao = mock(VectorResourceDao.class);
-		DataAdapter adapter = mock(DataAdapter.class);
+		DataAdapter adapter = mock(DataAdapter.class, CALLS_REAL_METHODS);
 		DataRagConfig dataRagConfig = new DataRagConfig();
 		dataRagConfig.setCardBaseUrl("http://card");
 		Map<String, Object> jsonRule = Map.of("classDef", List.of(PRODUCT));

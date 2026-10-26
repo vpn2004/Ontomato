@@ -93,4 +93,20 @@
             <artifactId>hutool-crypto</artifactId>
         </dependency>
     </dependencies>
+
+    <build>
+        <testResources>
+            <testResource>
+                <directory>src/test/resources</directory>
+            </testResource>
+            <!-- Exercise real prompt templates without loading deployment configuration. -->
+            <testResource>
+                <directory>conf-defaults</directory>
+                <includes>
+                    <include>**/*.md</include>
+                    <include>dslExample/**</include>
+                </includes>
+            </testResource>
+        </testResources>
+    </build>
 </project>

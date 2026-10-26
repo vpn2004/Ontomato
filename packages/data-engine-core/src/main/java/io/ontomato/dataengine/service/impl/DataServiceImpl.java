@@ -332,9 +332,9 @@ public class DataServiceImpl implements DataService {
 						&& targetClassDef.get("inStarChart") != null && targetClassDef.get("inStarChart") instanceof Boolean && (Boolean)targetClassDef.get("inStarChart")) {
 					String fromClass = (String)sourceClassDef.get("className");
 					String toClass = (String)targetClassDef.get("className");
-					String fromPk = DslUtil.getPrimaryKey(sourceClassDef);
+					String fromPk = adapter.objectPrimaryKey(sourceClassDef);
 					String fromName = getNameField(sourceClassDef);
-					String toPk = DslUtil.getPrimaryKey(targetClassDef);
+					String toPk = adapter.objectPrimaryKey(targetClassDef);
 					String toName = getNameField(targetClassDef);
 					
 					JSONObject dsl = new JSONObject();
@@ -415,8 +415,8 @@ public class DataServiceImpl implements DataService {
 						String targetId = row.getString("tid");
 						String targetName = row.getString("tname");
 						
-						String sourceNodeId = fromClass + ":" + sourceId;
-						String targetNodeId = toClass + ":" + targetId;
+						String sourceNodeId = adapter.encodeNodeReference(fromClass, sourceId);
+						String targetNodeId = adapter.encodeNodeReference(toClass, targetId);
 						
 						JSONObject sourceObj = new JSONObject();
 						sourceObj.put("id", sourceNodeId);
@@ -699,10 +699,10 @@ public class DataServiceImpl implements DataService {
 		String term = textSearch.get("term").toString();
 		String limit = textSearch.get("limit").toString();
 		int iLimit = Integer.parseInt(limit);
-		
+
 		Map<String, Object> jsonRule = adminService.getJSONRule(domainId);
 		List<Map<String, Object>> classDefs = (List<Map<String, Object>>)jsonRule.get("classDef");
-		
+
 		JSONArray allQueryData = new JSONArray();
 		for(Map<String, Object> classDef : classDefs){
 			String classDesc = (String)classDef.get("showName");
@@ -715,7 +715,7 @@ public class DataServiceImpl implements DataService {
 	        		}
 	        	}
 	        }
-			
+
 			FieldPermission fieldPermission = permission.getFieldPermissionByClassName(className);
 			if (permission.isFullData() || fieldPermission != null && !fieldPermission.isEmpty()) {
 				String sessionId = UUID.randomUUID().toString();
@@ -865,13 +865,18 @@ public class DataServiceImpl implements DataService {
 		JSONArray allQueryData = new JSONArray();
 		Map<String, Object> jsonRule = adminService.getJSONRule(domainId);
 		List<Map<String, Object>> classDefs = (List<Map<String, Object>>)jsonRule.get("classDef");
-		
+
 		for(Map<String, Object> classDef : classDefs) {
 			String className = (String)classDef.get("className");
 			FieldPermission fieldPermission = permission.getFieldPermissionByClassName(className);
-			
+
 			if (permission.isFullData() || fieldPermission != null && !fieldPermission.isEmpty()) {
-				Integer count = getCountByClassName(className, null, jsonRule, permission, domainId);
+				Integer count;
+				try {
+					count = getCountByClassName(className, null, jsonRule, permission, domainId);
+				} catch (Exception e) {
+					return failedQueryResponse(e);
+				}
 				Map<String,Object> classAndCount = new HashMap<String,Object>();
 				classAndCount.put("className", className);
 				classAndCount.put("showName", classDef.get("showName"));
@@ -886,6 +891,23 @@ public class DataServiceImpl implements DataService {
 		return ret;
 	}
 	
+	private static JSONObject successfulQueryResponse(DslExecutionResult result) {
+		if (result.failed()) {
+			Exception cause = result.failure().cause();
+			throw new IllegalStateException(queryFailureMessage(cause), cause);
+		}
+		return result.rawResponse();
+	}
+
+	private static JSONObject failedQueryResponse(Exception cause) {
+		return JSONObject.of("success", false, "message", queryFailureMessage(cause));
+	}
+
+	private static String queryFailureMessage(Exception cause) {
+		return cause.getMessage() == null || cause.getMessage().isBlank()
+				? "Database query failed" : cause.getMessage();
+	}
+
 	static JSONObject buildClassQueryObject(String className, String searchTerm) {
 		JSONObject object = new JSONObject();
 		object.put("idx", 0);
@@ -905,7 +927,6 @@ public class DataServiceImpl implements DataService {
 	}
 
 	private Integer getCountByClassName(String className, String searchTerm, Map<String, Object> jsonRule, UserDataPermission permission, String domainId) {
-		Integer count = 0;
 		List<Map<String, Object>> classDefs = (List<Map<String, Object>>)jsonRule.get("classDef");
 		Map<String, Object> classDef = null;
 		for(Map<String, Object> mapClassDef : classDefs) {
@@ -967,10 +988,14 @@ public class DataServiceImpl implements DataService {
         		&& ((List)((Map)((List)rowPermissionDataMap.get("data")).get(0)).get("answer")).size() > 0) {
         	Map<String, Object> row = (Map<String, Object>)((List)((Map)((List)rowPermissionDataMap.get("data")).get(0)).get("answer")).get(0);
         	try {
-        		count = Integer.parseInt(row.get("count_id") + "");
-        	} catch (Exception e) {}
+				int count = new java.math.BigDecimal(String.valueOf(row.get("count_id"))).intValueExact();
+				if (count < 0) throw new IllegalArgumentException("Negative count");
+				return count;
+			} catch (RuntimeException e) {
+				throw new IllegalStateException("Database returned an invalid count for class " + className, e);
+			}
         }
-        return count;
+        throw new IllegalStateException("Database returned no count for class " + className);
 	}
 	
 	@Override
@@ -986,9 +1011,9 @@ public class DataServiceImpl implements DataService {
 	private JSONObject getClassDataByPage(JSONObject classSearch, String lang, UserDataPermission permission, boolean withBizzKey, String domainId) {
 		BusinessConfig businessConfig = businessConfigService.get(domainId);
 		DataAdapter adapter = dataAdapterRegistry.create(businessConfig, null);
-		
+
 		JSONObject ret = new JSONObject();
-		
+
 		String className = classSearch.get("classname").toString();
 		String searchTerm = classSearch.getString("search");
 		if (searchTerm != null ) {
@@ -1019,7 +1044,7 @@ public class DataServiceImpl implements DataService {
         		}
         	}
         }
-		
+
 		FieldPermission fieldPermission = permission.getFieldPermissionByClassName(className);
 		if (permission.isFullData() || fieldPermission != null && !fieldPermission.isEmpty()) {
 			// Query details by page
@@ -1066,7 +1091,7 @@ public class DataServiceImpl implements DataService {
         		field0.put("as", pk);
         		fields0.add(field0);
             }
-            
+
             output0.put("fields", fields0);
             JSONObject sort0 = new JSONObject();
             JSONArray sortFields0 = new JSONArray();
@@ -1099,9 +1124,14 @@ public class DataServiceImpl implements DataService {
             		rows.add(_row);
             	}
             }
-            
+
 			// Query total record count
-			Integer totalCount = getCountByClassName(className, searchTerm, jsonRule, permission, domainId);
+			Integer totalCount;
+			try {
+				totalCount = getCountByClassName(className, searchTerm, jsonRule, permission, domainId);
+			} catch (Exception e) {
+				return failedQueryResponse(e);
+			}
             int totalPage = totalCount % pagecount == 0 ? totalCount / pagecount : totalCount / pagecount + 1;
             ret.put("data", rows);
     		ret.put("total_count", totalCount);
@@ -1112,7 +1142,7 @@ public class DataServiceImpl implements DataService {
 			ret.put("message", langService.get(lang, "Data.dataPermission.noPermission"));
 			ret.put("success", false);
 		}
-		
+
 		return ret;
 	}
 	

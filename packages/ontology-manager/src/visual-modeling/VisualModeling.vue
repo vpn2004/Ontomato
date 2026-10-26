@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch } from "vue";
+import { computed, ref, onMounted, onUnmounted, watch } from "vue";
 import { ElButton, ElTag, vLoading } from "element-plus";
 import { D3ForceLayout } from "@antv/g6";
 import { graphLayout, initialNodePosition } from "../ontology-graph-layout";
 import { useManagerFeedback } from "../feedback";
 import { ArrowLeft, Box, Link2, Maximize, Minus, Network, Pencil, Plus, Trash2 } from "lucide-vue-next";
 import { Graph, Node, Edge } from "@antv/x6";
-import { useManagerClient, useManagerContext, useOntologyText, useSharedText } from "../context";
+import { useManagerAdapter, useManagerClient, useManagerContext, useOntologyText, useSharedText } from "../context";
 import VisualModelingDialogs from "./VisualModelingDialogs.vue";
 import VisualModelingRightPanel from "./VisualModelingRightPanel.vue";
 import VisualModelingAttributeDialog, {
@@ -20,6 +20,7 @@ const { ot } = useOntologyText();
 const props = defineProps<{ focus: string; focusId: string; backToPlayground: boolean }>();
 const emit = defineEmits<{ back: [] }>();
 const context = useManagerContext();
+const { adapter, capabilities } = useManagerAdapter();
 const {
   createOntologyAttribute,
   createOntologyObject,
@@ -27,7 +28,6 @@ const {
   deleteOntologyObject,
   deleteOntologyRelation,
   getMetas,
-  listDataAdapters,
   updateOntologyAttribute,
   updateOntologyObject,
 } = useManagerClient();
@@ -400,6 +400,7 @@ function initGraph() {
       arrowheadMovable: true,
     },
     connecting: {
+      validateConnection: () => capabilities.value.schemaWrite,
       snap: true,
       allowBlank: false,
       allowLoop: true,
@@ -531,6 +532,7 @@ function initGraph() {
   });
 
   g.on("edge:connected", ({ edge, isNew }: { edge: Edge; isNew: boolean }) => {
+    if (!capabilities.value.schemaWrite) return;
     const source = edge.getSourceCellId();
     const target = edge.getTargetCellId();
     if (!source || !target) return;
@@ -789,6 +791,7 @@ async function loadData() {
 }
 
 function openAddNodeDialog() {
+  if (!capabilities.value.schemaWrite) return;
   newNodeName.value = "";
   newNodeShowName.value = "";
   newNodeDesc.value = "";
@@ -806,11 +809,13 @@ function openPencilNodeDialog(cls: ClassDef) {
 }
 
 function openAddAttrDialog(cls: ClassDef) {
+  if (!capabilities.value.schemaWrite) return;
   attrOwner.value = cls;
   attrDialogVisible.value = true;
 }
 
 async function handleAddAttr(input: NewAttributeInput) {
+  if (!capabilities.value.schemaWrite) return;
   attrSaving.value = true;
   try {
     await createOntologyAttribute({ ...input });
@@ -826,6 +831,7 @@ async function handleAddAttr(input: NewAttributeInput) {
 }
 
 function openAddEdgeDialog() {
+  if (!capabilities.value.schemaWrite) return;
   if (classList.value.length < 2) {
     message.warning(t("hotData.needAtLeastTwoClasses"));
     return;
@@ -858,6 +864,7 @@ function openPencilEdgeDialog(rel: RelationDef) {
 }
 
 async function handleAddNode() {
+  if (!capabilities.value.schemaWrite) return;
   if (!newNodeName.value.trim()) {
     message.warning(t("hotData.enterClassName"));
     return;
@@ -944,6 +951,7 @@ async function handlePencilNode() {
 }
 
 function handleTrash2Node() {
+  if (!capabilities.value.schemaWrite) return;
   if (!selectedNode.value) return;
 
   const nodeToTrash2 = selectedNode.value;
@@ -982,6 +990,7 @@ function handleTrash2Node() {
 }
 
 async function handleAddEdge() {
+  if (!capabilities.value.schemaWrite) return;
   if (!editingEdge.value) return;
 
   if (!newEdgeDesc.value.trim()) {
@@ -1087,6 +1096,7 @@ function handlePencilEdge() {
 }
 
 function handleTrash2Edge() {
+  if (!capabilities.value.schemaWrite) return;
   if (!selectedEdge.value) return;
 
   const edgeToTrash2 = selectedEdge.value;
@@ -1194,7 +1204,6 @@ async function onRelayout() {
 }
 
 onMounted(() => {
-  loadAdapterConfig();
   loadData();
 });
 
@@ -1318,6 +1327,7 @@ async function saveAttrShowName(cls: ClassDef, prop: AttrDef) {
 }
 
 async function onAttrEnableChange(cls: ClassDef, prop: AttrDef) {
+  if (!capabilities.value.schemaWrite) return;
   try {
     await updateOntologyAttribute(cls.className, prop, {
       attrDesc: prop.attrDesc,
@@ -1424,10 +1434,10 @@ async function saveClassDesc(cls: ClassDef) {
         <el-button v-if="backToPlayground" :icon="ArrowLeft" @click="emit('back')">
           {{ ot("backToGraph") }}
         </el-button>
-        <el-button type="primary" :icon="Box" @click="openAddNodeDialog">
+        <el-button v-if="capabilities.schemaWrite" type="primary" :icon="Box" @click="openAddNodeDialog">
           {{ t("hotData.addClass") }}
         </el-button>
-        <el-button :icon="Link2" @click="openAddEdgeDialog">
+        <el-button v-if="capabilities.schemaWrite" :icon="Link2" @click="openAddEdgeDialog">
           {{ t("hotData.addRelation") }}
         </el-button>
       </div>
@@ -1451,7 +1461,7 @@ async function saveClassDesc(cls: ClassDef) {
         <div class="toolbar-group toolbar-group-selection">
           <el-button
             :icon="Pencil"
-            :disabled="!selectedNode && !selectedEdge"
+            :disabled="(!selectedNode && !selectedEdge) || (!capabilities.schemaWrite && !!selectedEdge)"
             @click="
               selectedNode
                 ? openPencilNodeDialog(selectedNode)
@@ -1463,6 +1473,7 @@ async function saveClassDesc(cls: ClassDef) {
             {{ t("common.edit") }}
           </el-button>
           <el-button
+            v-if="capabilities.schemaWrite"
             type="danger"
             :icon="Trash2"
             :disabled="!selectedNode && !selectedEdge"

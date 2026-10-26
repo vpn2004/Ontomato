@@ -1,4 +1,5 @@
-import { inject, onUnmounted, provide, type InjectionKey } from "vue";
+import { computed, inject, onUnmounted, provide, shallowRef, type InjectionKey } from "vue";
+import type { DataAdapterCapabilities, DataAdapterInfo } from "@ontomato/contracts/data-adapters";
 import {
   createManagerClient,
   type ManagerAuthFailureStatus,
@@ -73,6 +74,27 @@ export interface ManagerHostContext {
 const contextKey: InjectionKey<Readonly<ManagerHostContext>> = Symbol("ontology-manager-context");
 const clientKey: InjectionKey<ManagerClient> = Symbol("ontology-manager-client");
 
+const unavailable: DataAdapterCapabilities = {
+  query: false, schemaRead: false, schemaWrite: false, objectWrite: false,
+  edgeWrite: false, sandbox: false, graphRead: false,
+};
+const legacy: DataAdapterCapabilities = {
+  query: true, schemaRead: false, schemaWrite: true, objectWrite: true,
+  edgeWrite: true, sandbox: true, graphRead: false,
+};
+
+function createAdapterState(client: ManagerClient) {
+  const adapter = shallowRef<DataAdapterInfo | null>(null);
+  const capabilities = computed(() => adapter.value?.capabilities ?? (adapter.value ? legacy : unavailable));
+  async function reloadAdapter() {
+    adapter.value = null;
+    const [config, installed] = await Promise.all([client.getBusinessConfig(), client.listDataAdapters()]);
+    adapter.value = installed.data.find((item) => item.type === config.data?.dataAdapter) ?? null;
+  }
+  return { adapter, capabilities, reloadAdapter };
+}
+const adapterKey: InjectionKey<ReturnType<typeof createAdapterState>> = Symbol("ontology-manager-adapter");
+
 /**
  * Called once by the Manager workspace in setup; context is the root component's reactive props.
  * The client lives as long as that workspace: no requests are sent after it unmounts.
@@ -84,8 +106,10 @@ export function provideManagerContext(
   const client = createManagerClient(context, onAuthFailure);
   provide(contextKey, context);
   provide(clientKey, client);
+  const adapterState = createAdapterState(client);
+  provide(adapterKey, adapterState);
   onUnmounted(client.dispose);
-  return client;
+  return { ...client, ...adapterState };
 }
 
 function injectFromHost<T>(key: InjectionKey<T>): T {
@@ -100,6 +124,10 @@ export function useManagerContext() {
 
 export function useManagerClient() {
   return injectFromHost(clientKey);
+}
+
+export function useManagerAdapter() {
+  return injectFromHost(adapterKey);
 }
 
 /** Component text reads the messages the host supplied for its current locale; Manager-owned and workbench-shared messages are looked up separately. */

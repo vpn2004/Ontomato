@@ -2,6 +2,7 @@ package io.ontomato.dataengine.service.impl;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -31,6 +32,7 @@ import io.ontomato.dataengine.core.bean.User;
 import io.ontomato.dataengine.dao.AuditLogDao;
 import io.ontomato.dataengine.dao.JSONRuleDao;
 import io.ontomato.dataengine.dataAdapter.DataAdapter;
+import io.ontomato.dataengine.dataAdapter.DataAdapterCapabilities;
 import io.ontomato.dataengine.dataAdapter.DataAdapterRegistry;
 import io.ontomato.dataengine.service.BusinessConfigService;
 import io.ontomato.dataengine.service.LangService;
@@ -44,14 +46,15 @@ class AdminServiceImplPrimaryKeyTest {
 
 	private static final String RULE = """
 			{"datasetdesc":"","classlist":["/ns/device"],"relationship_rule":{},"classDef":[{"className":"/ns/device","attrs":[
-			  {"name":"id","type":"varchar","enable":true,"primaryKey":true},
-			  {"name":"code","type":"varchar","enable":true,"primaryKey":false},
-			  {"name":"size","type":"int","enable":true,"primaryKey":false},
-			  {"name":"old","type":"varchar","enable":false,"primaryKey":false}]}]}""";
+			  {"name":"id","type":"varchar","enable":true,"primaryKey":true,"sourceName":"@identity"},
+			  {"name":"code","type":"varchar","enable":true,"primaryKey":false,"sourceName":"code"},
+			  {"name":"size","type":"int","enable":true,"primaryKey":false,"sourceName":"size"},
+			  {"name":"old","type":"varchar","enable":false,"primaryKey":false,"sourceName":"old"}]}]}""";
 
 	private final AdminServiceImpl service = new AdminServiceImpl();
 	private final JSONRuleDao jsonRuleDao = mock(JSONRuleDao.class);
-	private final DataAdapter adapter = mock(DataAdapter.class);
+	private final DataAdapter adapter = mock(DataAdapter.class, CALLS_REAL_METHODS);
+	private final AuditLogDao auditLogDao = mock(AuditLogDao.class);
 	private final User user = mock(User.class);
 	private JSONObject rule;
 
@@ -167,6 +170,201 @@ class AdminServiceImplPrimaryKeyTest {
 		assertThrows(IllegalArgumentException.class,
 				() -> service.addClassAttr("/ns/device", "note", "Note", "", "text", false, true, "en", user));
 		verify(jsonRuleDao, never()).save(any(), any());
+	}
+
+	@Test
+	void readOnlyAdaptersRejectSchemaEditsBeforeChangingTheOntomapOrWritingExternally() {
+		doReturn(DataAdapterCapabilities.onnReadOnly()).when(adapter).capabilities();
+		rule.getJSONObject("relationship_rule").put("linked", Map.of(
+				"fromclass", "/ns/device", "toclass", "/ns/device", "fromField", "id", "toField", "code"));
+		String originalRule = rule.toJSONString();
+
+		assertThrows(UnsupportedOperationException.class,
+				() -> service.addClass("/ns/pump", "pump_no", "Pump", "A pump", false, false, false, "en", user));
+		assertThrows(UnsupportedOperationException.class, () -> service.delClass("/ns/device", user));
+		assertThrows(UnsupportedOperationException.class,
+				() -> service.addClassAttr("/ns/device", "note", "Note", "", "text", false, true, "en", user));
+		assertThrows(UnsupportedOperationException.class,
+				() -> service.delClassAttr("/ns/device", "code", "en", user));
+		assertThrows(UnsupportedOperationException.class,
+				() -> service.addRelationship("new_link", "/ns/device", "/ns/device", "", "id", "code", "en", user));
+		assertThrows(UnsupportedOperationException.class, () -> service.delRelationship("linked", user));
+
+		assertEquals(originalRule, rule.toJSONString());
+		verifyNoInteractions(jsonRuleDao, auditLogDao);
+		m3.verifyNoInteractions();
+	}
+
+	@Test
+	void readOnlyImportsReadCurrentSchemaAndPreserveBackendMappings() throws Exception {
+		doReturn(DataAdapterCapabilities.onnReadOnly()).when(adapter).capabilities();
+		JSONObject backend = JSON.parseObject(RULE);
+		backend.put("nativeVersion", "current");
+		backend.getJSONArray("classDef").getJSONObject(0).put("nativeClass", "device-v2");
+		backend.getJSONArray("classDef").getJSONObject(0).getJSONArray("attrs").getJSONObject(1)
+				.put("nativeAttribute", "current-code");
+		doReturn(backend).when(adapter).readOntology();
+		JSONObject pretty = service.getPrettyJSONRule("d1");
+		pretty.put("datasetDesc", "Our devices");
+		pretty.getJSONArray("classDefs").getJSONObject(0).put("desc", "Operational equipment");
+		JSONObject code = pretty.getJSONArray("classDefs").getJSONObject(0).getJSONArray("attrs").getJSONObject(1);
+		code.put("desc", "Device code");
+		code.put("bizzKey", true);
+
+		service.setPrettyJSONRule(pretty, "d1");
+
+		ArgumentCaptor<Map<String, Object>> saved = ArgumentCaptor.forClass(Map.class);
+		verify(jsonRuleDao).save(saved.capture(), eq("d1"));
+		JSONObject result = JSON.parseObject(JSON.toJSONString(saved.getValue()));
+		assertEquals("current", result.getString("nativeVersion"));
+		assertEquals("Our devices", result.getString("datasetdesc"));
+		assertEquals("device-v2", result.getJSONArray("classDef").getJSONObject(0).getString("nativeClass"));
+		JSONObject savedCode = result.getJSONArray("classDef").getJSONObject(0).getJSONArray("attrs").getJSONObject(1);
+		assertEquals("current-code", savedCode.getString("nativeAttribute"));
+		assertEquals("code", savedCode.getString("sourceName"));
+		assertEquals("@identity", result.getJSONArray("classDef").getJSONObject(0).getJSONArray("attrs").getJSONObject(0).getString("sourceName"));
+		assertEquals("Device code", savedCode.getString("attrDesc"));
+		assertEquals(true, savedCode.getBoolean("bizzkey"));
+		verify(adapter).readOntology();
+		m3.verifyNoInteractions();
+	}
+
+	@Test
+	void importedSourceMappingsSurviveMetadataEditsExportAndReimport() throws Exception {
+		doReturn(DataAdapterCapabilities.onnReadOnly()).when(adapter).capabilities();
+		JSONObject backend = JSON.parseObject(RULE);
+		backend.getJSONArray("classDef").getJSONObject(0).getJSONArray("attrs").add(
+				JSONObject.of("name", "onn_attr_id", "type", "varchar", "enable", true, "sourceName", "id"));
+		rule = JSON.parseObject(backend.toJSONString());
+		when(jsonRuleDao.query("d1")).thenAnswer(call -> rule);
+		org.mockito.Mockito.doAnswer(call -> {
+			rule = JSON.parseObject(JSON.toJSONString(call.getArgument(0)));
+			return null;
+		}).when(jsonRuleDao).save(any(), eq("d1"));
+		doReturn(backend).when(adapter).readOntology();
+
+		service.setPrettyJSONRule(service.getPrettyJSONRule("d1"), "d1");
+		service.setClassAttrDesc("/ns/device", "onn_attr_id", "Native identifier", "true", "en", user);
+		JSONObject exported = JSON.parseObject(service.getPrettyJSONRule("d1").toJSONString());
+		service.setPrettyJSONRule(exported, "d1");
+
+		JSONArray attrs = exported.getJSONArray("classDefs").getJSONObject(0).getJSONArray("attrs");
+		assertEquals("@identity", attrs.getJSONObject(0).getString("sourceName"));
+		assertEquals("id", attrs.getJSONObject(4).getString("sourceName"));
+		assertEquals("Native identifier", rule.getJSONArray("classDef").getJSONObject(0).getJSONArray("attrs")
+				.getJSONObject(4).getString("attrDesc"));
+		assertEquals("id", rule.getJSONArray("classDef").getJSONObject(0).getJSONArray("attrs")
+				.getJSONObject(4).getString("sourceName"));
+		m3.verifyNoInteractions();
+	}
+
+	@Test
+	void sourceMappingRemovalOrTamperingIsRejectedBeforeSaving() throws Exception {
+		doReturn(DataAdapterCapabilities.onnReadOnly()).when(adapter).capabilities();
+		doReturn(JSON.parseObject(RULE)).when(adapter).readOntology();
+		for (String mapping : new String[] {null, "id"}) {
+			JSONObject pretty = service.getPrettyJSONRule("d1");
+			JSONObject id = pretty.getJSONArray("classDefs").getJSONObject(0).getJSONArray("attrs").getJSONObject(0);
+			if (mapping == null) id.remove("sourceName");
+			else id.put("sourceName", mapping);
+			assertThrows(UnsupportedOperationException.class, () -> service.setPrettyJSONRule(pretty, "d1"));
+		}
+		verify(jsonRuleDao, never()).save(any(), any());
+		m3.verifyNoInteractions();
+	}
+
+	@Test
+	void readOnlyImportsRejectChangesAgainstTheBackendBeforeSaving() throws Exception {
+		doReturn(DataAdapterCapabilities.onnReadOnly()).when(adapter).capabilities();
+		doReturn(JSON.parseObject(RULE)).when(adapter).readOntology();
+		JSONObject pretty = service.getPrettyJSONRule("d1");
+		pretty.getJSONArray("classDefs").getJSONObject(0).getJSONArray("attrs").getJSONObject(1).put("type", "int");
+
+		assertThrows(UnsupportedOperationException.class, () -> service.setPrettyJSONRule(pretty, "d1"));
+
+		verify(adapter).readOntology();
+		verify(jsonRuleDao, never()).save(any(), any());
+		verifyNoInteractions(auditLogDao);
+		m3.verifyNoInteractions();
+	}
+
+	@Test
+	void aStaleOntomapCannotOverwriteAChangedBackendSchema() throws Exception {
+		doReturn(DataAdapterCapabilities.onnReadOnly()).when(adapter).capabilities();
+		JSONObject backend = JSON.parseObject(RULE);
+		backend.getJSONArray("classDef").getJSONObject(0).getJSONArray("attrs").getJSONObject(1).put("type", "text");
+		doReturn(backend).when(adapter).readOntology();
+		JSONObject stale = service.getPrettyJSONRule("d1");
+
+		assertThrows(UnsupportedOperationException.class, () -> service.setPrettyJSONRule(stale, "d1"));
+
+		verify(jsonRuleDao, never()).save(any(), any());
+	}
+
+	@Test
+	void readOnlyDescriptionsStayEditableButEnablingFieldsDoesNot() throws Exception {
+		doReturn(DataAdapterCapabilities.onnReadOnly()).when(adapter).capabilities();
+		service.setClassAttrDesc("/ns/device", "code", "Updated description", "true", "en", user);
+		assertEquals("Updated description", savedClass("/ns/device").get("attrs") instanceof List<?> attrs
+				? ((Map<?, ?>) attrs.get(1)).get("attrDesc") : null);
+
+		assertThrows(UnsupportedOperationException.class,
+				() -> service.setClassAttrDesc("/ns/device", "old", "Should not enable", "true", "en", user));
+		verify(jsonRuleDao, times(1)).save(any(), any());
+		m3.verifyNoInteractions();
+	}
+
+	@Test
+	void disabledReadOnlyAttributesCannotBecomeBusinessKeys() {
+		doReturn(DataAdapterCapabilities.onnReadOnly()).when(adapter).capabilities();
+		String originalRule = rule.toJSONString();
+
+		UnsupportedOperationException failure = assertThrows(UnsupportedOperationException.class,
+				() -> service.setClassAttrShouldReturn("/ns/device", "old", true, user));
+
+		assertEquals("Disabled backend attributes cannot be used as business keys", failure.getMessage());
+		assertEquals(originalRule, rule.toJSONString());
+		verify(jsonRuleDao, never()).save(any(), any());
+		verifyNoInteractions(auditLogDao);
+		m3.verifyNoInteractions();
+	}
+
+	@Test
+	void enabledReadOnlyBusinessKeysAndClearingDisabledBusinessKeysStayEditable() {
+		doReturn(DataAdapterCapabilities.onnReadOnly()).when(adapter).capabilities();
+		rule.getJSONArray("classDef").getJSONObject(0).getJSONArray("attrs").getJSONObject(3).put("bizzkey", true);
+
+		service.setClassAttrShouldReturn("/ns/device", "code", true, user);
+		service.setClassAttrShouldReturn("/ns/device", "old", false, user);
+
+		List<Map<String, Object>> attrs = (List<Map<String, Object>>) savedClass("/ns/device").get("attrs");
+		assertEquals(true, attrs.get(1).get("bizzkey"));
+		assertEquals(false, attrs.get(3).get("bizzkey"));
+		verify(jsonRuleDao, times(2)).save(any(), eq("d1"));
+		m3.verifyNoInteractions();
+	}
+
+	@Test
+	void writableAdaptersKeepExistingDisabledBusinessKeySemantics() {
+		service.setClassAttrShouldReturn("/ns/device", "old", true, user);
+
+		List<Map<String, Object>> attrs = (List<Map<String, Object>>) savedClass("/ns/device").get("attrs");
+		assertEquals(true, attrs.get(3).get("bizzkey"));
+		m3.verifyNoInteractions();
+	}
+
+	@Test
+	void displayOnlyImportsRejectDisabledBusinessKeysBeforeSaving() throws Exception {
+		doReturn(DataAdapterCapabilities.onnReadOnly()).when(adapter).capabilities();
+		doReturn(JSON.parseObject(RULE)).when(adapter).readOntology();
+		JSONObject pretty = service.getPrettyJSONRule("d1");
+		pretty.getJSONArray("classDefs").getJSONObject(0).getJSONArray("attrs").getJSONObject(3).put("bizzKey", true);
+
+		assertThrows(UnsupportedOperationException.class, () -> service.setPrettyJSONRule(pretty, "d1"));
+
+		verify(jsonRuleDao, never()).save(any(), any());
+		verifyNoInteractions(auditLogDao);
+		m3.verifyNoInteractions();
 	}
 
 	private void assertRefused(String messageKey, org.junit.jupiter.api.function.Executable operation) {

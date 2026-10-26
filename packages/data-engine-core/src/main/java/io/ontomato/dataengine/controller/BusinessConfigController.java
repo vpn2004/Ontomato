@@ -490,6 +490,94 @@ public class BusinessConfigController {
     	ret.put("success", true);
 		return ret;
 	}
+
+	/** Preview the saved business source schema; this never changes the source backend. */
+	@GetMapping("/businessConfig/adapterOntology")
+	public JSONObject adapterOntology() {
+		JSONObject ret = new JSONObject();
+		try {
+			BusinessConfig config = businessConfigService.get(SystemUtils.getCurUser().getDomainId());
+			DataAdapter adapter = dataAdapterRegistry.create(config, null);
+			adapter.capabilities().requireSchemaRead();
+			JSONObject ontology = prettyOntology(adapter.readOntology());
+			ret.put("data", JSONObject.of("type", config.getDataAdapter(), "ontology", ontology,
+					"connectionFingerprint", connectionFingerprint(config)));
+			ret.put("success", true);
+		} catch (Exception e) {
+			ret.put("success", false); ret.put("message", e.getMessage());
+		}
+		return ret;
+	}
+
+	/** Only imports the current backend schema into platform ontology metadata. */
+	@PostMapping("/businessConfig/importAdapterOntology")
+	public JSONObject importAdapterOntology(@RequestBody JSONObject input) {
+		JSONObject ret = new JSONObject();
+		try {
+			String domain = SystemUtils.getCurUser().getDomainId();
+			BusinessConfig config = businessConfigService.get(domain);
+			if (!config.getDataAdapter().equals(input.getString("type"))
+					|| !connectionFingerprint(config).equals(input.getString("connectionFingerprint")))
+				throw new IllegalArgumentException("Saved data source changed; preview its schema again");
+			DataAdapter adapter = dataAdapterRegistry.create(config, null);
+			adapter.capabilities().requireSchemaRead();
+			JSONObject current = prettyOntology(adapter.readOntology());
+			// Import the reviewed definition. Admin revalidates its structure against the live schema.
+			JSONObject reviewed = input.getJSONObject("ontology");
+			if (reviewed == null || !current.equals(reviewed))
+				throw new IllegalArgumentException("Backend schema changed; preview its schema again");
+			adminService.setPrettyJSONRule(current, domain);
+			ret.put("data", current); ret.put("success", true);
+		} catch (Exception e) {
+			ret.put("success", false); ret.put("message", e.getMessage());
+		}
+		return ret;
+	}
+
+	private static String connectionFingerprint(BusinessConfig config) {
+		DataAdapterConnection connection = config.getDataAdapterConnections().get(config.getDataAdapter());
+		String content = config.getDataAdapter() + "\n" + JSON.toJSONString(connection);
+		try { return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+				.digest(content.getBytes(java.nio.charset.StandardCharsets.UTF_8))); }
+		catch (java.security.NoSuchAlgorithmException e) { throw new IllegalStateException(e); }
+	}
+
+	private static JSONObject prettyOntology(Map<String, Object> raw) {
+		JSONObject source = JSONObject.from(raw), pretty = new JSONObject();
+		pretty.put("datasetDesc", source.get("datasetdesc")); pretty.put("classList", source.get("classlist"));
+		JSONArray classes = new JSONArray();
+		for (Object value : source.getJSONArray("classDef")) {
+			JSONObject cls = JSONObject.from(value);
+			JSONObject out = JSONObject.of("name", cls.get("className"), "showName", cls.get("showName"), "desc", cls.get("classDesc"),
+					"classToCard", cls.get("classToCard"), "instanceToCard", cls.get("instanceToCard"), "inStarChart", cls.get("inStarChart"));
+			JSONArray attrs = new JSONArray();
+			for (Object attribute : cls.getJSONArray("attrs")) {
+				JSONObject a = JSONObject.from(attribute);
+				JSONObject attr = JSONObject.of("name", a.get("name"), "showName", a.get("showName"), "desc", a.get("attrDesc"), "type", a.get("type"),
+						"bizzKey", a.get("bizzkey"), "enable", a.get("enable"), "permissionField", a.get("permissionField"), "primaryKey", a.get("primaryKey"), "sourceName", a.get("sourceName"));
+				if (a.get("indicators") != null) {
+					JSONArray indicators = new JSONArray();
+					for (Object indicator : a.getJSONArray("indicators")) {
+						JSONObject i = JSONObject.from(indicator);
+						indicators.add(JSONObject.of("name", i.get("name"), "desc", i.get("desc"), "unit", i.get("unit")));
+					}
+					attr.put("indicators", indicators);
+				}
+				attrs.add(attr);
+			}
+			out.put("attrs", attrs); classes.add(out);
+		}
+		pretty.put("classDefs", classes); JSONObject relationships = new JSONObject();
+		JSONObject rules = source.getJSONObject("relationship_rule");
+		for (String name : rules.keySet()) {
+			JSONObject r = rules.getJSONObject(name);
+			relationships.put(name, JSONObject.of("fromClass", r.get("fromclass"), "toClass", r.get("toclass"), "desc", r.get("desc"),
+					"fromField", r.get("fromField"), "toField", r.get("toField")));
+		}
+		pretty.put("relationshipDefs", relationships);
+		// Match the JSON sent to the browser: serialization omits null-valued fields.
+		return JSON.parseObject(pretty.toJSONString());
+	}
 	
 	@PostMapping("/businessConfig/useDataAdapter")
     @ResponseBody

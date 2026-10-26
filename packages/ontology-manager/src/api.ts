@@ -1,5 +1,6 @@
 import type { DataAdaptersData } from "@ontomato/contracts/data-adapters";
 import { ontologyText, type ManagerMessages } from "./i18n";
+import type { AdapterOntologyPreview, DataAdapterInfo } from "@ontomato/contracts/data-adapters";
 
 export type ManagerCredential =
   | { type: "token"; token: string }
@@ -382,7 +383,7 @@ export function createManagerClient(
         })
       );
     }
-    if (changes.primaryKey) {
+    if (changes.primaryKey && !attr.primaryKey) {
       requests.push(post("/admin/editClassAttrPrimaryKey", { className, attr: attr.name }));
     }
     await Promise.all(requests);
@@ -534,6 +535,15 @@ export function createManagerClient(
     return (await send("/businessConfig/dataAdapters", { method: "GET" })).data;
   }
 
+  async function previewAdapterOntology(): Promise<AdapterOntologyPreview> {
+    const response = await send("/businessConfig/adapterOntology", { method: "GET" });
+    return response.data;
+  }
+
+  function importAdapterOntology(preview: AdapterOntologyPreview) {
+    return post("/businessConfig/importAdapterOntology", { ...preview });
+  }
+
   /** Business knowledge list: the data engine returns an object keyed by knowledgeID; older entries may have no tags. */
   async function listKnowledge(): Promise<BusinessKnowledge[]> {
     const response = await post("/admin/getBussinessKnowledge", {});
@@ -588,6 +598,8 @@ export function createManagerClient(
     refreshStarChartData,
     queryInstanceInfo,
     listDataAdapters,
+    previewAdapterOntology,
+    importAdapterOntology,
     listKnowledge,
     saveKnowledge,
     deleteKnowledge,

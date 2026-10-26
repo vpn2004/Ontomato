@@ -7,9 +7,10 @@ import OntologyAttributeCreateDialog from "./OntologyAttributeCreateDialog.vue";
 import OntologyAttributeEditor from "./OntologyAttributeEditor.vue";
 import OntologyRelationCreateDialog from "./OntologyRelationCreateDialog.vue";
 import type { ModelResource } from "../workspace";
-import { useManagerClient, useOntologyText } from "../context";
+import { useManagerAdapter, useManagerClient, useOntologyText } from "../context";
 
 const { ot } = useOntologyText();
+const { capabilities } = useManagerAdapter();
 const { loadOntology } = useManagerClient();
 
 const props = defineProps<{ resource: ModelResource }>();
@@ -147,7 +148,7 @@ onMounted(() => {
         <h1>{{ meta.title }}</h1>
         <p>{{ meta.description }}</p>
       </div>
-      <div class="title-actions">
+      <div v-if="capabilities.schemaWrite" class="title-actions">
         <el-button
           v-if="resource === 'objects'"
           type="primary"
