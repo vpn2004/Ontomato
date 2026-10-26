@@ -32,6 +32,11 @@ ARG APPLICATION
 ARG TARGETPLATFORM
 ARG PNPM_VERSION=9.15.9
 RUN npm install -g pnpm@${PNPM_VERSION}
+# The notice generator is shared with the runtime stages and is Python-based.
+# Keep this dependency explicit because the Node builder image does not include it.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 \
+ && rm -rf /var/lib/apt/lists/*
 ENV npm_config_store_dir=/pnpm/store
 
 WORKDIR /build
