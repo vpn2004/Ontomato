@@ -26,6 +26,11 @@
         <!-- Installed data adapters: this list alone decides which ones the edition reports and offers. -->
         <dependency>
             <groupId>io.ontomato</groupId>
+            <artifactId>data-adapter-onn-core</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.ontomato</groupId>
             <artifactId>data-adapter-postgresql</artifactId>
             <version>${project.version}</version>
         </dependency>

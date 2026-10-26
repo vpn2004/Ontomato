@@ -13,6 +13,45 @@ import io.ontomato.dataengine.dao.VectorResourceDao;
 
 public interface DataAdapter {
 
+	/** Product capabilities independent of the source query language. */
+	default DataAdapterCapabilities capabilities() {
+		return DataAdapterCapabilities.legacy();
+	}
+
+	/** Kept as a compatibility marker for callers that distinguish the historical M3 path. */
+	default boolean useM3() {
+		return false;
+	}
+
+	/** Read a backend schema projected into Ontomato's ontology document. */
+	default Map<String, Object> readOntology() throws Exception {
+		throw new UnsupportedOperationException("This adapter does not support ontology schema reads");
+	}
+
+	/** One-hop graph exploration, when the source exposes it. */
+	default JSONObject queryNeighbors(String className, String objectId) throws Exception {
+		throw new UnsupportedOperationException("This adapter does not support graph neighbors");
+	}
+
+	/** Resolve the identity field used by object detail/evidence paths. */
+	default String objectPrimaryKey(Map<String, Object> classDef) {
+		return io.ontomato.dataengine.util.DslUtil.getPrimaryKey(classDef);
+	}
+
+	/** Encode a product node reference without assuming the source ID is numeric. */
+	default String encodeNodeReference(String className, String storedId) {
+		return className + ":" + storedId;
+	}
+
+	/** Decode a node reference while preserving colons inside the stored ID. */
+	default String decodeNodeReference(String className, String nodeReference) {
+		String prefix = className + ":";
+		if (nodeReference == null || !nodeReference.startsWith(prefix)) {
+			throw new IllegalArgumentException("Node reference does not belong to class " + className);
+		}
+		return nodeReference.substring(prefix.length());
+	}
+
 	/**
 	 * Open a new JDBC connection from this adapter's own connection.
 	 * Driver choice and URL rewriting stay in each adapter module.

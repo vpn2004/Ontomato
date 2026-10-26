@@ -20,6 +20,7 @@
         <module>packages/data-engine-core</module>
         <module>packages/data-adapter-test-support</module>
         <module>packages/data-adapters/postgresql</module>
+        <module>packages/data-adapters/onn-core</module>
         <module>packages/data-adapters/mysql</module>
         <module>packages/data-adapters/sqlserver</module>
         <module>packages/data-adapters/gaussdb</module>

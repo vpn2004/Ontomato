@@ -12,6 +12,11 @@ import io.ontomato.dataengine.config.DataRagConfig;
  */
 public interface DataAdapterProvider {
 
+	/** Product capabilities independent of the source query language. */
+	default DataAdapterCapabilities capabilities() {
+		return DataAdapterCapabilities.legacy();
+	}
+
 	/** The saved and API value, e.g. "postgresql". */
 	String type();
 
