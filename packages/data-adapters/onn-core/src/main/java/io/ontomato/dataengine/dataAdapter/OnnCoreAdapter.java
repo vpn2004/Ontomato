@@ -26,6 +26,34 @@ public final class OnnCoreAdapter implements DataAdapter {
     }
     public boolean useM3() { return false; }
     public Connection openConnection() throws SQLException { throw new UnsupportedOperationException("ONN Core is not a JDBC data source"); }
+    /** Probe the authenticated ONN HTTP API instead of routing a non-JDBC source through JDBC metadata. */
+    @Override
+    public JSONObject testConnection() throws Exception {
+        return new DataAdapterConnectionTester().test(() -> {
+            long started = System.nanoTime();
+            OnnCoreSchema schema = new OnnCoreSchema(client.schema());
+            Map<String, Object> ontology = schema.ontology();
+            List<?> classes = (List<?>) ontology.getOrDefault("classlist", List.of());
+            Map<?, ?> relationships = (Map<?, ?>) ontology.getOrDefault("relationship_rule", Map.of());
+            JSONArray tables = new JSONArray();
+            for (Object className : classes) {
+                tables.add(JSONObject.of("name", className.toString(), "type", "TABLE"));
+            }
+            JSONObject report = new JSONObject();
+            report.put("kind", "catalog");
+            report.put("databaseProduct", "ONN Core");
+            report.put("databaseVersion", "");
+            report.put("driverName", "ONN Core HTTP");
+            report.put("driverVersion", "");
+            report.put("catalog", client.baseUrl());
+            report.put("schema", schema.fingerprint);
+            report.put("tables", tables);
+            report.put("classes", classes.size());
+            report.put("relationships", relationships.size());
+            report.put("elapsedMs", (System.nanoTime() - started) / 1_000_000);
+            return report;
+        });
+    }
     public DataAdapterCapabilities capabilities() { return DataAdapterCapabilities.onnReadOnly(); }
     public Map<String, Object> readOntology() throws Exception { return new OnnCoreSchema(client.schema()).ontology(); }
     public String objectPrimaryKey(Map<String, Object> classDef) { return "id"; }

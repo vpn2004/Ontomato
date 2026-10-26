@@ -206,6 +206,21 @@ class OnnCoreAdapterTest {
     }
 
     @Test
+    void connectionTestUsesAuthenticatedOnnSchemaProbe() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            JSONObject report = fixture.adapter().testConnection();
+            assertEquals("catalog", report.getString("kind"));
+            assertEquals("ONN Core", report.getString("databaseProduct"));
+            assertEquals("ONN Core HTTP", report.getString("driverName"));
+            assertEquals(CLASS, report.getJSONArray("tables").getJSONObject(0).getString("name"));
+            assertEquals("TABLE", report.getJSONArray("tables").getJSONObject(0).getString("type"));
+            assertEquals(1, report.getIntValue("classes"));
+            assertEquals(0, report.getIntValue("relationships"));
+            assertEquals(List.of("GET " + SCHEMA), fixture.operations());
+        }
+    }
+
+    @Test
     void writesSandboxVectorsAndGraphReadsRefuseWithoutAnyHttp() throws Exception {
         try (Fixture fixture = new Fixture()) {
             OnnCoreAdapter adapter = fixture.adapter();
