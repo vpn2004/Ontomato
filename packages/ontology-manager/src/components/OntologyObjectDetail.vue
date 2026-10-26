@@ -6,7 +6,7 @@ import { useManagerFeedback } from "../feedback";
 import type { OntologyObject, OntologyRelation } from "../api";
 import OntologyAttributeCreateDialog from "./OntologyAttributeCreateDialog.vue";
 import OntologyAttributeEditor from "./OntologyAttributeEditor.vue";
-import { useManagerClient, useOntologyText } from "../context";
+import { useManagerAdapter, useManagerClient, useOntologyText } from "../context";
 
 const { ot } = useOntologyText();
 const { capabilities } = useManagerAdapter();

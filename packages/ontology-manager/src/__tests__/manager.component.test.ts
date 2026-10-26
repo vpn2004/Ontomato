@@ -138,7 +138,6 @@ beforeEach(() => {
   metasFor = () => metas(["Order", "Item"]);
   functions = [];
   dataAdapter = "mysql";
-  importError = null;
   dataAdapters = [
     { type: "m3", label: "M3", requiresJoinFields: false, fields: [], examples: {} },
     { type: "mysql", label: "MySQL", requiresJoinFields: true, fields: ["url", "user", "password"], examples: {} },

@@ -88,8 +88,8 @@ function createAdapterState(client: ManagerClient) {
   const capabilities = computed(() => adapter.value?.capabilities ?? (adapter.value ? legacy : unavailable));
   async function reloadAdapter() {
     adapter.value = null;
-    const [config, installed] = await Promise.all([client.getBusinessConfig(), client.listDataAdapters()]);
-    adapter.value = installed.data.find((item) => item.type === config.data?.dataAdapter) ?? null;
+    const installed = await client.listDataAdapters();
+    adapter.value = installed.adapters.find((item) => item.type === installed.currentType) ?? null;
   }
   return { adapter, capabilities, reloadAdapter };
 }

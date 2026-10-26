@@ -6,6 +6,24 @@ export type DataAdapterField = "url" | "company" | "user" | "password";
 /** Values of the connection fields an adapter type declares; the single-source connections and each data source of a multi-source definition hold one. */
 export type DataAdapterConnection = Partial<Record<DataAdapterField, string>>;
 
+/** Operations exposed by a business-data adapter. Older servers omit this field. */
+export interface DataAdapterCapabilities {
+  query: boolean;
+  schemaRead: boolean;
+  schemaWrite: boolean;
+  objectWrite: boolean;
+  edgeWrite: boolean;
+  sandbox: boolean;
+  graphRead: boolean;
+}
+
+/** Schema preview returned by an adapter before importing it into Ontomato. */
+export interface AdapterOntologyPreview {
+  type: string;
+  connectionFingerprint: string;
+  ontology: Record<string, unknown>;
+}
+
 /** Body of POST /businessConfig/useDataAdapter and /businessConfig/testDataAdapter: an adapter type and its connection field values. */
 export type DataAdapterRequest = { type: string } & DataAdapterConnection;
 
@@ -57,8 +75,12 @@ export const multiDataSourceRejectionSchema = z.object({
 export interface DataAdapterInfo {
   type: string;
   label: string;
+  /** Whether the adapter speaks SQL; omitted by older servers. */
+  sql?: boolean;
   /** Whether relations name the source and target join fields (fromField/toField) the adapter joins on; false for native graph relations. */
-  requiresJoinFields: boolean;
+  requiresJoinFields?: boolean;
+  /** Capability flags returned by newer servers; absent on older servers. */
+  capabilities?: DataAdapterCapabilities;
   fields: DataAdapterField[];
   /** Input examples (only for fields that have one), declared by the adapter module. */
   examples: Partial<Record<DataAdapterField, string>>;

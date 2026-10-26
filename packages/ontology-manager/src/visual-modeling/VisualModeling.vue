@@ -147,21 +147,11 @@ let graph: Graph | null = null;
 const classList = ref<ClassDef[]>([]);
 const relationList = ref<RelationDef[]>([]);
 // Relations take join fields when the current data adapter requires them (its requiresJoinFields in the backend adapter list).
-const showJoinFields = ref(false);
+const showJoinFields = computed(() => adapter.value?.requiresJoinFields ?? false);
 
 const selectedNode = ref<ClassDef | null>(null);
 const selectedEdge = ref<RelationDef | null>(null);
 
-async function loadAdapterConfig() {
-  try {
-    const { currentType, adapters } = await listDataAdapters();
-    showJoinFields.value = adapters.some(
-      ({ type, requiresJoinFields }) => type === currentType && requiresJoinFields
-    );
-  } catch {
-    showJoinFields.value = false;
-  }
-}
 const loading = ref(false);
 const layouting = ref(false);
 let activeLayout: D3ForceLayout | null = null;
