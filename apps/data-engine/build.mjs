@@ -5,7 +5,7 @@ import { buildJavaApp, JAVA_FLAGS, parseJavaArgs } from "../../scripts/data-engi
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)));
 const repoRoot = resolve(appRoot, "../..");
 // Every public adapter module is in the reactor (the root pom lists them all); this app installs postgresql, mysql, sqlserver, duckdb, and neo4j.
-const PUBLIC_ADAPTERS = ["postgresql", "mysql", "sqlserver", "gaussdb", "duckdb", "neo4j", "elasticsearch"];
+const PUBLIC_ADAPTERS = ["postgresql", "onn-core", "mysql", "sqlserver", "gaussdb", "duckdb", "neo4j", "elasticsearch"];
 const HELP =
   "Use make data-engine [ARCH=amd64|arm64] [PROMPT_LANG=en].\nBuilds the final datarag-opensource image, which runs as it is.";
 
@@ -21,6 +21,7 @@ export const app = {
   appLibModules: [
     "packages/data-engine-core",
     "packages/data-adapters/postgresql",
+    "packages/data-adapters/onn-core",
     "packages/data-adapters/mysql",
     "packages/data-adapters/sqlserver",
     "packages/data-adapters/duckdb",
@@ -28,7 +29,7 @@ export const app = {
     "packages/data-adapters/elasticsearch",
     "apps/data-engine",
   ],
-  excludeArtifactIds: "data-engine-core,data-adapter-postgresql,data-adapter-mysql,data-adapter-sqlserver,data-adapter-duckdb,data-adapter-neo4j,data-adapter-elasticsearch,data-engine-app",
+  excludeArtifactIds: "data-engine-core,data-adapter-postgresql,data-adapter-onn-core,data-adapter-mysql,data-adapter-sqlserver,data-adapter-duckdb,data-adapter-neo4j,data-adapter-elasticsearch,data-engine-app",
   contextTrees: [
     {
       dest: "ontomato",
