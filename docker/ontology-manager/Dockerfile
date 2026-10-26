@@ -14,6 +14,9 @@
 # WORKSPACE (source id of the workspace root) and APPLICATION (the selected
 # app's package name) always come from the builder; they have no default.
 ARG NODE_BUILDER_IMAGE=docker.io/library/node:24.21.0@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4
+ARG PYTHON_RUNTIME_IMAGE=docker.io/library/python:3.10-slim-bookworm@sha256:2559be987fd64d61badbdafd303ea58a9ccab36d6c3c08bce219e762177d2eca
+
+FROM ${PYTHON_RUNTIME_IMAGE} AS python-tools
 
 # Builder runs on the build host: frozen install of the selected application
 # and its workspace dependencies (dev included: the web build needs Vite),
@@ -25,6 +28,10 @@ ARG APPLICATION
 
 ARG PNPM_VERSION=9.15.9
 RUN npm install -g pnpm@${PNPM_VERSION}
+COPY --from=python-tools /usr/local/bin/python3.10 /usr/local/bin/python3.10
+COPY --from=python-tools /usr/local/lib/libpython3.10.so* /usr/local/lib/
+COPY --from=python-tools /usr/local/lib/python3.10 /usr/local/lib/python3.10
+RUN ln -sf python3.10 /usr/local/bin/python3
 # pnpm's package store persists on the build machine across builds (a BuildKit
 # cache mount): packages are downloaded once and still installed exactly by the
 # frozen lock with integrity checks, so image contents do not depend on it.
