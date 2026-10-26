@@ -7,6 +7,11 @@ ARG PIP_INDEX_URL=https://pypi.org/simple
 ARG DEBIAN_MIRROR=https://deb.debian.org/debian
 ARG DEBIAN_SECURITY_MIRROR=https://deb.debian.org/debian-security
 
+# The app-builder only needs Python's standard library for the notice generator.
+# Keep it sourced from the already selected runtime image so builds do not need
+# a package-manager network request in the Node image.
+FROM ${PYTHON_RUNTIME_IMAGE} AS python-tools
+
 # Stage 1: Install production dependencies into /opt/runtime/node_modules.
 # Inputs: metadata context under /src only (package.json, workspace yaml, pnpm lock).
 # Source code changes do not invalidate this layer.
@@ -32,11 +37,10 @@ ARG APPLICATION
 ARG TARGETPLATFORM
 ARG PNPM_VERSION=9.15.9
 RUN npm install -g pnpm@${PNPM_VERSION}
-# The notice generator is shared with the runtime stages and is Python-based.
-# Keep this dependency explicit because the Node builder image does not include it.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 \
- && rm -rf /var/lib/apt/lists/*
+COPY --from=python-tools /usr/local/bin/python3.10 /usr/local/bin/python3.10
+COPY --from=python-tools /usr/local/lib/libpython3.10.so* /usr/local/lib/
+COPY --from=python-tools /usr/local/lib/python3.10 /usr/local/lib/python3.10
+RUN ln -sf python3.10 /usr/local/bin/python3
 ENV npm_config_store_dir=/pnpm/store
 
 WORKDIR /build
