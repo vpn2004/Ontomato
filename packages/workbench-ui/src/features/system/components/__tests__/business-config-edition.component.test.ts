@@ -56,8 +56,8 @@ async function mountPage() {
 const t = workbenchI18n().global.t as (key: string) => string;
 
 describe("open-source system config page", () => {
-  it("offers only the backend languages the data engine ships; a stored unsupported value shows en and is saved only on request", async () => {
-    expect(businessConfig.languageOptions.map(({ value }) => value)).toEqual(shippedLanguages);
+  it("offers only the backend languages the data engine ships; a stored unsupported value shows Chinese and is saved only on request", async () => {
+    expect(businessConfig.languageOptions.map(({ value }) => value).sort()).toEqual(shippedLanguages.sort());
     const page = await mountPage();
     const languageRow = page
       .findAll(".el-form-item")
@@ -67,14 +67,14 @@ describe("open-source system config page", () => {
     // The dropdown list is teleported; the select's input names it through aria-controls.
     const list = document.getElementById(languageRow.find("input").attributes("aria-controls")!)!;
     const options = [...list.querySelectorAll(".el-select-dropdown__item")].map((item) => item.textContent?.trim());
-    expect(options).toEqual(["English"]);
-    expect(list.querySelector(".el-select-dropdown__item.is-selected")?.textContent?.trim()).toBe("English");
+    expect(options).toEqual(["简体中文", "English"]);
+    expect(list.querySelector(".el-select-dropdown__item.is-selected")?.textContent?.trim()).toBe("简体中文");
     expect(sent.some((request) => request.url.endsWith("/businessConfig/saveLang"))).toBe(false);
 
     await languageRow.find("button.el-button--primary").trigger("click");
     await flushPromises();
     expect(sent.find((request) => request.url.endsWith("/businessConfig/saveLang"))?.body).toEqual({
-      lang: "en",
+      lang: "zh-CN",
     });
   });
 

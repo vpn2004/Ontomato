@@ -1,0 +1,386 @@
+[
+  {
+    "key": "lang",
+    "value": "简体中文"
+  },
+  {
+    "key": "Abc.notInService",
+    "value": "ABC 暂时不可用"
+  },
+  {
+    "key": "Auth.register.success",
+    "value": "授权已成功激活"
+  },
+  {
+    "key": "Data.query.error",
+    "value": "查询数据源失败"
+  },
+  {
+    "key": "Data.dataPermission.noPermission",
+    "value": "您没有数据权限"
+  },
+  {
+    "key": "Data.object.notExist",
+    "value": "未找到对象"
+  },
+  {
+    "key": "Dashboard.data.error",
+    "value": "获取数据失败"
+  },
+  {
+    "key": "Dashboard.param.error",
+    "value": "自定义参数无效"
+  },
+  {
+    "key": "Admin.relationship.nameError",
+    "value": "关系名称格式无效"
+  },
+  {
+    "key": "Admin.relationship.fromClassNotFound",
+    "value": "未找到来源对象类"
+  },
+  {
+    "key": "Admin.relationship.toClassNotFound",
+    "value": "未找到目标对象类"
+  },
+  {
+    "key": "Admin.relationship.exist",
+    "value": "关系已存在"
+  },
+  {
+    "key": "Admin.class.exist",
+    "value": "对象类已存在"
+  },
+  {
+    "key": "Admin.class.notFound",
+    "value": "未找到对象类"
+  },
+  {
+    "key": "Admin.attr.formatError",
+    "value": "属性格式无效"
+  },
+  {
+    "key": "Admin.class.nameRequired",
+    "value": "对象类名称和显示名称为必填项"
+  },
+  {
+    "key": "Admin.knowledge.textRequired",
+    "value": "业务知识内容不能为空"
+  },
+  {
+    "key": "Admin.knowledge.idRequired",
+    "value": "业务知识 ID 不能为空"
+  },
+  {
+    "key": "Admin.class.primaryKeyRequired",
+    "value": "新增对象类需要指定主键字段名"
+  },
+  {
+    "key": "Admin.attr.primaryKeyLocked",
+    "value": "当前主键不能删除或禁用，请先将主键切换为其他字段"
+  },
+  {
+    "key": "Admin.attr.primaryKeyInvalid",
+    "value": "主键必须是已启用的 varchar 字段"
+  },
+  {
+    "key": "Admin.attr.typeError",
+    "value": "属性类型无效"
+  },
+  {
+    "key": "Admin.attr.exist",
+    "value": "属性已存在"
+  },
+  {
+    "key": "Admin.attr.notFound",
+    "value": "未找到属性"
+  },
+  {
+    "key": "Admin.indicator.exist",
+    "value": "指标已存在"
+  },
+  {
+    "key": "PythonExecutor.execute.timeout",
+    "value": "Python 执行超时（分钟）"
+  },
+  {
+    "key": "QuestionCard.originCondition",
+    "value": "原始条件"
+  },
+  {
+    "key": "QuestionCard.replaceTo",
+    "value": "替换为"
+  },
+  {
+    "key": "QuestionCard.totalNum",
+    "value": "总记录数"
+  },
+  {
+    "key": "QuestionCard.showNum",
+    "value": "显示记录数"
+  },
+  {
+    "key": "QuestionCard.canGetByUrl",
+    "value": "可通过查询链接获取全部数据"
+  },
+  {
+    "key": "AuditLog.datasetDesc.upd",
+    "value": "修改数据集描述"
+  },
+  {
+    "key": "AuditLog.relationship.add",
+    "value": "新增关系类型"
+  },
+  {
+    "key": "AuditLog.relationship.del",
+    "value": "删除关系类型"
+  },
+  {
+    "key": "AuditLog.relationship.upd",
+    "value": "修改关系类型"
+  },
+  {
+    "key": "AuditLog.class.add",
+    "value": "新增对象类"
+  },
+  {
+    "key": "AuditLog.class.del",
+    "value": "删除对象类"
+  },
+  {
+    "key": "AuditLog.class.upd",
+    "value": "修改对象类"
+  },
+  {
+    "key": "AuditLog.class",
+    "value": "对象类"
+  },
+  {
+    "key": "AuditLog.attr.add",
+    "value": "新增属性"
+  },
+  {
+    "key": "AuditLog.attr.del",
+    "value": "删除属性"
+  },
+  {
+    "key": "AuditLog.attr.upd",
+    "value": "修改属性"
+  },
+  {
+    "key": "AuditLog.attr",
+    "value": "属性"
+  },
+  {
+    "key": "AuditLog.indicator.add",
+    "value": "新增指标"
+  },
+  {
+    "key": "AuditLog.indicator.del",
+    "value": "删除指标"
+  },
+  {
+    "key": "AuditLog.indicator.upd",
+    "value": "修改指标"
+  },
+  {
+    "key": "AuditLog.businessExample.add",
+    "value": "新增业务示例"
+  },
+  {
+    "key": "AuditLog.businessExample.upd",
+    "value": "修改业务示例"
+  },
+  {
+    "key": "AuditLog.businessExample.del",
+    "value": "删除业务示例"
+  },
+  {
+    "key": "AuditLog.businessKnowledge.add",
+    "value": "新增业务知识"
+  },
+  {
+    "key": "AuditLog.businessKnowledge.upd",
+    "value": "修改业务知识"
+  },
+  {
+    "key": "AuditLog.businessKnowledge.del",
+    "value": "删除业务知识"
+  },
+  {
+    "key": "Action.notGenerated",
+    "value": "Action 尚未生成"
+  },
+  {
+    "key": "Action.notFound",
+    "value": "Action 不存在"
+  },
+  {
+    "key": "Action.cannotModifySystem",
+    "value": "不能修改系统 Action"
+  },
+  {
+    "key": "Action.cannotDeleteSystem",
+    "value": "不能删除系统 Action"
+  },
+  {
+    "key": "Action.domainMismatch",
+    "value": "Action 业务域不匹配"
+  },
+  {
+    "key": "Action.notPublished",
+    "value": "Action 尚未发布"
+  },
+  {
+    "key": "Action.parseCodeExplainFailed",
+    "value": "解析代码说明结果失败"
+  },
+  {
+    "key": "Function.notFound",
+    "value": "函数不存在"
+  },
+  {
+    "key": "Function.cannotBeEmpty",
+    "value": "函数不能为空"
+  },
+  {
+    "key": "Function.notWrite",
+    "value": "该函数不是写入函数"
+  },
+  {
+    "key": "Function.notRead",
+    "value": "该函数不是读取函数"
+  },
+  {
+    "key": "Function.cannotModifySystem",
+    "value": "不能修改系统函数"
+  },
+  {
+    "key": "Function.cannotDeleteSystem",
+    "value": "不能删除系统函数"
+  },
+  {
+    "key": "Function.domainMismatch",
+    "value": "函数业务域不匹配"
+  },
+  {
+    "key": "Function.referencedByMetricView",
+    "value": "被 MetricView 引用的函数不能修改或删除"
+  },
+  {
+    "key": "Function.referencedByAction",
+    "value": "被 Action 引用的函数不能修改或删除"
+  },
+  {
+    "key": "Function.referencedByWriteTask",
+    "value": "被 WriteTask 引用的函数不能修改或删除"
+  },
+  {
+    "key": "MetricView.notGenerated",
+    "value": "MetricView 尚未生成"
+  },
+  {
+    "key": "MetricView.notFound",
+    "value": "MetricView 不存在"
+  },
+  {
+    "key": "MetricView.cannotModifySystem",
+    "value": "不能修改系统 MetricView"
+  },
+  {
+    "key": "MetricView.cannotDeleteSystem",
+    "value": "不能删除系统 MetricView"
+  },
+  {
+    "key": "MetricView.domainMismatch",
+    "value": "MetricView 业务域不匹配"
+  },
+  {
+    "key": "MetricView.notPublished",
+    "value": "MetricView 尚未发布"
+  },
+  {
+    "key": "MetricView.snapshotNotFound",
+    "value": "热数据结果快照不存在或已过期"
+  },
+  {
+    "key": "MetricView.snapshotUnreadable",
+    "value": "读取热数据结果快照失败"
+  },
+  {
+    "key": "WriteTask.notFound",
+    "value": "WriteTask 不存在"
+  },
+  {
+    "key": "WriteTask.domainMismatch",
+    "value": "WriteTask 业务域不匹配"
+  },
+  {
+    "key": "WriteTask.functionMustBeNoParam",
+    "value": "函数必须没有参数"
+  },
+  {
+    "key": "WriteTask.invalidStatus",
+    "value": "WriteTask 状态无效"
+  },
+  {
+    "key": "WriteTask.invalidCrontab",
+    "value": "WriteTask 定时表达式无效"
+  },
+  {
+    "key": "WriteFunctionOperation.classNotExist",
+    "value": "对象类不存在"
+  },
+  {
+    "key": "WriteFunctionOperation.relationNotExist",
+    "value": "关系不存在"
+  },
+  {
+    "key": "WriteFunctionOperation.vectorAttrNotAllowed",
+    "value": "此接口不允许写入向量属性"
+  },
+  {
+    "key": "Vector.rebuildRequired",
+    "value": "当前业务域的向量检索已暂停，需按当前嵌入配置重建全部向量。请在模型配置中启动或继续重建。"
+  },
+  {
+    "key": "Vector.saveRefusedWhileRebuilding",
+    "value": "当前业务域正在重建向量，请先暂停重建再修改嵌入配置。"
+  },
+  {
+    "key": "Vector.rebuildNotNeeded",
+    "value": "当前业务域的向量无需重建。"
+  },
+  {
+    "key": "Vector.rebuildAlreadyRunning",
+    "value": "当前业务域已有向量重建任务正在运行。"
+  },
+  {
+    "key": "Vector.rebuildNotRunning",
+    "value": "当前业务域没有正在运行的向量重建任务。"
+  },
+  {
+    "key": "AgentRole.notConfigured",
+    "value": "角色“{0}”未配置模型，请在模型配置中选择模型。"
+  },
+  {
+    "key": "AgentRole.query",
+    "value": "查询"
+  },
+  {
+    "key": "AgentRole.coding",
+    "value": "编码与计算"
+  },
+  {
+    "key": "AgentRole.general",
+    "value": "通用"
+  },
+  {
+    "key": "AgentRole.diagnosis",
+    "value": "运维智能体"
+  },
+  {
+    "key": "AgentRole.knowledgeGovernance",
+    "value": "知识治理智能体"
+  }
+]

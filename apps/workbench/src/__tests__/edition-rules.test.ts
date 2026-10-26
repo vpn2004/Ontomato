@@ -505,10 +505,10 @@ describe("open-source edition rules", () => {
     expect(empty.analysis).toMatchObject({ data: [], source: "current_query", fieldDisplayPlan: EMPTY_PLAN });
     expect(mocks.chartInputs).toEqual([]);
     expect(empty.update).toEqual({ visualizationArtifactRef: "visualization:thread-1:3", events: [] });
-    expect(empty.stored?.result).toMatchObject({ chartType: "none", title: "No chart generated" });
-    expect(empty.stored?.result.html).toContain("<h2>No chart generated</h2><p>The query returned no rows for the selected conditions.</p>");
-    expect(empty.stored?.thinkingState).toMatchObject({ status: "completed", headline: "No chart generated", tailLines: [] });
-    expect(empty.stored?.thinking).toBe("No chart generated\nThe query returned no rows for the selected conditions.");
+    expect(empty.stored?.result).toMatchObject({ chartType: "none", title: "未生成图表" });
+    expect(empty.stored?.result.html).toContain("<h2>未生成图表</h2><p>所选条件下查询未返回数据行。</p>");
+    expect(empty.stored?.thinkingState).toMatchObject({ status: "completed", headline: "未生成图表", tailLines: [] });
+    expect(empty.stored?.thinking).toBe("未生成图表\n所选条件下查询未返回数据行。");
     const thinkingEvents = empty.events.filter((event) => event.type === "thinking_state");
     expect(thinkingEvents.at(-1)).toMatchObject({ node: "visualization" });
 

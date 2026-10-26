@@ -7,7 +7,7 @@ type Messages = { [key: string]: string | Messages };
 export type SupportedLocale = "zh-CN" | "en" | "ja" | "ar" | "zh-TW" | "fr" | "de" | "it";
 
 /**
- * The app's language profile (installed once at startup). Open source has only en, saves nothing and shows no switch;
+ * The app's language profile (installed once at startup);
  * other apps supply their locales, messages, default, saved locale and switch setting from their own entry.
  */
 export interface WorkbenchLanguage {
@@ -15,10 +15,10 @@ export interface WorkbenchLanguage {
   defaultLocale: SupportedLocale;
   initialLocale: SupportedLocale;
   switchEnabled: boolean;
-  /** Persistence of the locale choice; null in open source, which does not save it. */
+  /** Optional persistence of the locale choice. */
   save: ((locale: SupportedLocale) => void) | null;
   messages: Partial<Record<SupportedLocale, Messages>>;
-  /** Element Plus locale for a UI locale; always en in open source. */
+  /** Element Plus locale for a UI locale. */
   elementLocale(locale: string): ElementLocale;
 }
 

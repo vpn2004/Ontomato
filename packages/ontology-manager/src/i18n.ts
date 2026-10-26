@@ -1,6 +1,7 @@
 import en from "element-plus/es/locale/lang/en";
 import type { Language as ElementLocale } from "element-plus/es/locale";
 import sharedEn from "./locales/en";
+export { chineseMessages } from "./chinese-messages";
 
 export type TextParams = Record<string, string | number>;
 

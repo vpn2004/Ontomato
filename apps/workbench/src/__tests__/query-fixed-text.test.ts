@@ -51,9 +51,9 @@ afterAll(() => {
 });
 
 describe("oss query fixed text", () => {
-  it("keeps protocol, display, dashboard, chart and thinking text on the fixed English pack", async () => {
+  it("keeps protocol and stored app text stable while user messages follow the locale", async () => {
     setLocale("zh-CN");
-    expect(getLocale()).toBe("en");
+    expect(getLocale()).toBe("zh-CN");
 
     expect(parseQueryAnswerPayload({ answer: [1] }).answer).toEqual([1]);
     expect(() => parseQueryAnswerPayload({ answer: "no" })).toThrow(
@@ -66,7 +66,7 @@ describe("oss query fixed text", () => {
     expect(truncateErrorForDisplay("")).toBe("Unknown error");
     expect(truncateErrorForDisplay(new Error("  "))).toBe("Unknown error");
     expect(truncateErrorForDisplay("boom")).toBe("boom");
-    expect(t("query.error.unknownError")).toBe("Unknown Error");
+    expect(t("query.error.unknownError")).toBe("未知错误");
 
     db.queries.length = 0;
     const created = await createDashboard({ ownerId: "owner-1", domainId: "domain-1", name: "" });
@@ -102,7 +102,7 @@ describe("oss query fixed text", () => {
     });
 
     const label = t("query.branch.static");
-    expect(label).toBe("Fixed Metrics Hot Data");
+    expect(label).toBe("固定指标热数据");
     const summary = buildThinkingSummary({
       summary: "",
       status: "completed",
