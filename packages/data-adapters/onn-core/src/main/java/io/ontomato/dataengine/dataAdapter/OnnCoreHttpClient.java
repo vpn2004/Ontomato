@@ -28,14 +28,22 @@ final class OnnCoreHttpClient {
     private static final HttpClient CLIENT = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(3)).followRedirects(HttpClient.Redirect.NEVER).build();
     private final String configuredUrl;
+    private final String gatewayToken;
     private final Duration timeout;
     private final int maxBytes;
 
-    OnnCoreHttpClient(String url) { this(url, Duration.ofSeconds(12), MAX_BYTES); }
+    OnnCoreHttpClient(String url) { this(url, null, Duration.ofSeconds(12), MAX_BYTES); }
+
+    OnnCoreHttpClient(String url, String gatewayToken) { this(url, gatewayToken, Duration.ofSeconds(12), MAX_BYTES); }
 
     OnnCoreHttpClient(String url, Duration timeout, int maxBytes) {
+        this(url, null, timeout, maxBytes);
+    }
+
+    OnnCoreHttpClient(String url, String gatewayToken, Duration timeout, int maxBytes) {
         if (timeout == null || timeout.toMillis() < 1 || maxBytes < 1) throw new IllegalArgumentException("Invalid ONN read limits");
-        this.configuredUrl = url; this.timeout = timeout; this.maxBytes = maxBytes;
+        this.configuredUrl = url; this.gatewayToken = gatewayToken == null || gatewayToken.isBlank() ? null : gatewayToken;
+        this.timeout = timeout; this.maxBytes = maxBytes;
     }
 
     String baseUrl() {
@@ -64,6 +72,10 @@ final class OnnCoreHttpClient {
     private JSONObject request(String method, String route, String body) throws Exception {
         HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(baseUrl() + route))
             .timeout(timeout).header("Accept", "application/json");
+        if (gatewayToken != null) {
+            builder.header("Authorization", "Bearer " + gatewayToken)
+                .header("X-OMS-Gateway-Token", gatewayToken);
+        }
         if (body == null) builder.GET();
         else builder.header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofString(body));
         // The deadline includes body consumption. An InputStream body handler completes

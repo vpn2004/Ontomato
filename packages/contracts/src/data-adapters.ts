@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 /** Fields a data adapter connection can have; which ones each adapter needs comes from its fields. */
-export type DataAdapterField = "url" | "company" | "user" | "password";
+export type DataAdapterField = "url" | "company" | "user" | "password" | "token";
 
 /** Values of the connection fields an adapter type declares; the single-source connections and each data source of a multi-source definition hold one. */
 export type DataAdapterConnection = Partial<Record<DataAdapterField, string>>;

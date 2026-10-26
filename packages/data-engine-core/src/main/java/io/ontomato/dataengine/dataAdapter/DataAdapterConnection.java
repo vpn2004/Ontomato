@@ -9,4 +9,6 @@ public class DataAdapterConnection {
 	private String company;
 	private String user;
 	private String password;
+	/** Trusted gateway token for HTTP-native adapters such as ONN Core. */
+	private String token;
 }

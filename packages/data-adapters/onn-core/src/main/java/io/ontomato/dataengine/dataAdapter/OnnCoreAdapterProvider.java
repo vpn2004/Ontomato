@@ -11,8 +11,8 @@ public class OnnCoreAdapterProvider implements DataAdapterProvider {
     public String label() { return "ONN Core"; }
     public boolean requiresJoinFields() { return false; }
     public DataAdapterCapabilities capabilities() { return DataAdapterCapabilities.onnReadOnly(); }
-    public List<String> connectionFields() { return List.of("url"); }
-    public Map<String, String> connectionExamples() { return Map.of("url", "http://host:18081"); }
+    public List<String> connectionFields() { return List.of("url", "token"); }
+    public Map<String, String> connectionExamples() { return Map.of("url", "http://host:18081", "token", "trusted gateway token"); }
     public DataAdapter create(DataAdapterConnection connection, DataRagConfig config, Map<String, Object> ontology) {
         return new OnnCoreAdapter(connection, ontology);
     }

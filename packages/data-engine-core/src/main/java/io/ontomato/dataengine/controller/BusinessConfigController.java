@@ -680,6 +680,9 @@ public class BusinessConfigController {
 		if (fields.contains("password")) {
 			connection.setPassword(input.getString("password"));
 		}
+		if (fields.contains("token")) {
+			connection.setToken(input.getString("token"));
+		}
 		return connection;
 	}
 	

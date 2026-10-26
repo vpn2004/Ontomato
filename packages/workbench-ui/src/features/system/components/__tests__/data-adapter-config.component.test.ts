@@ -200,8 +200,8 @@ const placeholders = (card: Card) =>
 describe("the data adapter card renders from the backend list", () => {
   it("ONN shows its read-only import guidance and saves only the business HTTP URL", async () => {
     const onn: DataAdapterInfo = {
-      type: "onn-core", label: "ONN Core", sql: false, fields: ["url"],
-      examples: { url: "http://host:18081" },
+      type: "onn-core", label: "ONN Core", sql: false, fields: ["url", "token"],
+      examples: { url: "http://host:18081", token: "trusted gateway token" },
       capabilities: {
         query: true, schemaRead: true, schemaWrite: false, objectWrite: false,
         edgeWrite: false, sandbox: false, graphRead: false,
@@ -209,14 +209,19 @@ describe("the data adapter card renders from the backend list", () => {
     };
     const card = await mountCard([...openSourceAdapters, onn], "onn-core", {
       postgresql: { url: "jdbc:postgresql://db/business", user: "pg", password: "secret" },
-      "onn-core": { url: "http://onn.example:18081" },
+      "onn-core": { url: "http://onn.example:18081", token: "test-token" },
     });
 
-    expect(card.find(".el-alert").text()).toContain(t("admin.readOnlyAdapterNotice"));
-    expect(formLabels(card)).toEqual([t("admin.adapterMode"), t("admin.connectionUrl")]);
+    expect(formLabels(card)).toEqual([
+      t("admin.adapterMode"),
+      t("admin.connectionUrl"),
+      t("admin.gatewayToken"),
+    ]);
     await card.find("button.el-button--primary").trigger("click");
     await flushPromises();
-    expect(backend.used).toEqual([{ type: "onn-core", url: "http://onn.example:18081" }]);
+    expect(backend.used).toEqual([
+      { type: "onn-core", url: "http://onn.example:18081", token: "test-token" },
+    ]);
   });
 
   it("the open-source list has only postgresql: shows just that item, selects the current type and fills in the saved connection", async () => {

@@ -184,6 +184,7 @@ export default {
     "configSaveSuccess": "Configuration saved",
     "switchedDataAdapter": "Switched to {name}",
     "connectionUrl": "Connection URL",
+    "gatewayToken": "Trusted gateway token",
     "company": "Company",
     "generalParamConfig": "General Parameters",
     "dataAdapterConfig": "Data Adapter Configuration",

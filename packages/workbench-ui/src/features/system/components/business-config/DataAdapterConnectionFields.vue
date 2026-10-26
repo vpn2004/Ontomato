@@ -29,7 +29,8 @@ const connection = defineModel<DataAdapterConnection>("connection", { required: 
     v-if="
       adapter.fields.includes('company') ||
       adapter.fields.includes('user') ||
-      adapter.fields.includes('password')
+      adapter.fields.includes('password') ||
+      adapter.fields.includes('token')
     "
     :gutter="24"
   >
@@ -49,6 +50,16 @@ const connection = defineModel<DataAdapterConnection>("connection", { required: 
           v-model="connection.password"
           type="password"
           placeholder="******"
+          show-password
+        />
+      </el-form-item>
+    </el-col>
+    <el-col v-if="adapter.fields.includes('token')" :span="adapterDisplay.credentialSpan">
+      <el-form-item :label="t('admin.gatewayToken')">
+        <el-input
+          v-model="connection.token"
+          type="password"
+          :placeholder="adapter.examples.token || '******'"
           show-password
         />
       </el-form-item>

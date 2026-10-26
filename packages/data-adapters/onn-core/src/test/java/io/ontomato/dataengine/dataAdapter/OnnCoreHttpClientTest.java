@@ -67,6 +67,15 @@ class OnnCoreHttpClientTest {
                 "POST /api/v1/query/execute"), calls);
     }
 
+    @Test void sendsTrustedGatewayHeadersOnlyWhenConfigured() throws Exception {
+        server.createContext("/api/v1/schema/all", exchange -> {
+            assertEquals("Bearer test-token", exchange.getRequestHeaders().getFirst("Authorization"));
+            assertEquals("test-token", exchange.getRequestHeaders().getFirst("X-OMS-Gateway-Token"));
+            respond(exchange, 200, "{}");
+        });
+        new OnnCoreHttpClient(url, "test-token").schema();
+    }
+
     @Test void onlyExactInstance404MeansAbsent() throws Exception {
         server.createContext("/api/v1", exchange -> respond(exchange, 404, "not found"));
         OnnCoreHttpClient client = new OnnCoreHttpClient(url);

@@ -26,7 +26,7 @@ public interface DataAdapterProvider {
 	/** Whether relations name the source and target join fields (fromField/toField) this adapter joins on. */
 	boolean requiresJoinFields();
 
-	/** Connection fields the adapter reads, each one of "url", "company", "user", "password". */
+	/** Connection fields the adapter reads, each one of "url", "company", "user", "password", "token". */
 	List<String> connectionFields();
 
 	/** Input hints shown for connection fields, field name to example value; fields without a hint are absent. */

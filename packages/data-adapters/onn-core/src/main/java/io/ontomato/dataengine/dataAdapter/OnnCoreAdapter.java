@@ -22,7 +22,7 @@ public final class OnnCoreAdapter implements DataAdapter {
     private OnnCoreSchema sampleSchema;
 
     public OnnCoreAdapter(DataAdapterConnection connection, Map<String, Object> mapping) {
-        this.client = new OnnCoreHttpClient(connection.getUrl()); this.mapping=mapping;
+        this.client = new OnnCoreHttpClient(connection.getUrl(), connection.getToken()); this.mapping=mapping;
     }
     public boolean useM3() { return false; }
     public Connection openConnection() throws SQLException { throw new UnsupportedOperationException("ONN Core is not a JDBC data source"); }
