@@ -143,6 +143,15 @@ public final class OnnCoreAdapter implements DataAdapter {
     }
 
     private static UnsupportedOperationException unavailable() { return new UnsupportedOperationException("ONN Core business data is read only; writes, sandbox and document-vector fields are unavailable"); }
+    // Keep the adapter-level schema hooks explicit for callers compiled against the
+    // compatibility surface; ONN Core schema writes are intentionally unavailable in
+    // the read-only first phase.
+    public void createSchemaClass(Map<String, Object> c, DataRagConfig config) { throw unavailable(); }
+    public void deleteSchemaClass(String className, DataRagConfig config) { throw unavailable(); }
+    public void createSchemaRelationship(String name, Map<String, String> relation, DataRagConfig config) { throw unavailable(); }
+    public void deleteSchemaRelationship(String name, Map<String, String> relation, DataRagConfig config) { throw unavailable(); }
+    public void addSchemaAttribute(String className, Map<String, Object> attr, DataRagConfig config) { throw unavailable(); }
+    public void deleteSchemaAttribute(String className, String attrName, DataRagConfig config) { throw unavailable(); }
     public void createNamespace(String n) { throw unavailable(); }
     public void truncateNamespace(String n) { throw unavailable(); }
     public void dropNamespace(String n) { throw unavailable(); }
