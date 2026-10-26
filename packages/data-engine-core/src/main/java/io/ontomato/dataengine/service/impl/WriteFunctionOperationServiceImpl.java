@@ -23,6 +23,7 @@ import io.ontomato.dataengine.dataAdapter.DataAdapterRegistry;
 import io.ontomato.dataengine.service.BusinessConfigService;
 import io.ontomato.dataengine.service.LangService;
 import io.ontomato.dataengine.service.WriteFunctionOperationService;
+import io.ontomato.dataengine.util.DslUtil;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -56,7 +57,6 @@ public class WriteFunctionOperationServiceImpl implements WriteFunctionOperation
 		Map<String, Object> classDef = getClassDefByClassName(className, domainId);
 		if (classDef != null) {
 			stripVectorAttrs(classDef, objs);
-			DataAdapter adapter = getDataAdapter(domainId);
 			adapter.insertObjects(sandboxId, classDef, objs);
 		} else {
 			throw new Exception(langService.get(businessConfigService.get(domainId).getLang(), "WriteFunctionOperation.classNotExist") + "[" + className + "]");
@@ -218,7 +218,6 @@ public class WriteFunctionOperationServiceImpl implements WriteFunctionOperation
 		Map<String, Object> classDef = getClassDefByClassName(className, domainId);
 		if (classDef != null) {
 			rejectVectorAttrs(classDef, setValues, domainId);
-			DataAdapter adapter = getDataAdapter(domainId);
 			adapter.updateObjects(sandboxId, classDef, setValues, where);
 		} else {
 			throw new Exception(langService.get(businessConfigService.get(domainId).getLang(), "WriteFunctionOperation.classNotExist") + "[" + className + "]");
@@ -233,7 +232,7 @@ public class WriteFunctionOperationServiceImpl implements WriteFunctionOperation
 		Map<String, Object> classDef = getClassDefByClassName(className, domainId);
 		if (classDef != null) {
 			Map<String, Object> jsonRule = jsonRuleDao.query(domainId);
-			DataAdapter adapter = getDataAdapter(domainId, jsonRule);
+			adapter = getDataAdapter(domainId, jsonRule);
 			cleanupVectorAttrs(adapter, classDef, className, where, sandboxId, domainId);
 			adapter.deleteObjects(sandboxId, classDef, where);
 		} else {

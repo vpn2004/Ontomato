@@ -109,9 +109,9 @@ class HttpRequestUtilVectorTest {
 		DataRagConfig config = new DataRagConfig();
 		config.setCardBaseUrl("http://card");
 
-		DslExecutionResult[] results = HttpRequestUtil.getM3Data(config, adapter, PLAIN_DSL, "s1", true,
+		DslExecutionResult[] results = HttpRequestUtil.executeDsl(config, adapter, PLAIN_DSL, "s1", true,
 				Map.of("classDef", List.of(PRODUCT)), mock(VectorResourceDao.class),
-				mock(UserDataPermission.class), M3Mode.V1, "d1");
+				mock(UserDataPermission.class), DslExecutionMode.OPTIMIZED, "d1");
 
 		assertTrue(results[1].failed());
 		assertTrue(results[1].failure().cause() instanceof UnsupportedOperationException);

@@ -15,7 +15,7 @@ public interface DataAdapter {
 
 	/** Product capabilities independent of the source query language. */
 	default DataAdapterCapabilities capabilities() {
-		return DataAdapterCapabilities.legacy();
+        return DataAdapterCapabilities.legacy(useM3());
 	}
 
 	/** Kept as a compatibility marker for callers that distinguish the historical M3 path. */
@@ -35,22 +35,56 @@ public interface DataAdapter {
 
 	/** Resolve the identity field used by object detail/evidence paths. */
 	default String objectPrimaryKey(Map<String, Object> classDef) {
+		if (useM3()) return "id";
 		return io.ontomato.dataengine.util.DslUtil.getPrimaryKey(classDef);
 	}
 
 	/** Encode a product node reference without assuming the source ID is numeric. */
 	default String encodeNodeReference(String className, String storedId) {
+		if (useM3()) return storedId;
 		return className + ":" + storedId;
 	}
 
 	/** Decode a node reference while preserving colons inside the stored ID. */
 	default String decodeNodeReference(String className, String nodeReference) {
+		if (useM3()) return nodeReference;
 		String prefix = className + ":";
 		if (nodeReference == null || !nodeReference.startsWith(prefix)) {
 			throw new IllegalArgumentException("Node reference does not belong to class " + className);
 		}
 		return nodeReference.substring(prefix.length());
 	}
+
+    /** Schema lifecycle hooks retained for the historical M3 management path. */
+    default void createSchemaClass(Map<String, Object> classDef, DataRagConfig config) {
+        capabilities().requireSchemaWrite();
+        if (useM3()) LegacyM3SchemaOperations.createClass(classDef, config);
+    }
+
+    default void deleteSchemaClass(String className, DataRagConfig config) {
+        capabilities().requireSchemaWrite();
+        if (useM3()) LegacyM3SchemaOperations.deleteClass(className, config);
+    }
+
+    default void createSchemaRelationship(String name, Map<String, String> relationDef, DataRagConfig config) {
+        capabilities().requireSchemaWrite();
+        if (useM3()) LegacyM3SchemaOperations.createRelationship(name, relationDef, config);
+    }
+
+    /** Removing a relationship changes the ontomap; legacy relational sources have no physical edge DDL. */
+    default void deleteSchemaRelationship(String name, Map<String, String> relationDef, DataRagConfig config) {
+        capabilities().requireSchemaWrite();
+    }
+
+    default void addSchemaAttribute(String className, Map<String, Object> attrDef, DataRagConfig config) {
+        capabilities().requireSchemaWrite();
+        if (useM3()) LegacyM3SchemaOperations.addAttribute(className, attrDef, config);
+    }
+
+    default void deleteSchemaAttribute(String className, String attrName, DataRagConfig config) {
+        capabilities().requireSchemaWrite();
+        if (useM3()) LegacyM3SchemaOperations.deleteAttribute(className, attrName, config);
+    }
 
 	/**
 	 * Open a new JDBC connection from this adapter's own connection.

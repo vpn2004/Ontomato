@@ -8,6 +8,7 @@ import io.ontomato.dataengine.bean.DslExecutionResult;
 import io.ontomato.dataengine.config.DataRagConfig;
 import io.ontomato.dataengine.dao.VectorResourceDao;
 import io.ontomato.dataengine.dataAdapter.DataAdapter;
+import io.ontomato.dataengine.dataAdapter.DataAdapterCapabilities;
 import io.ontomato.dataengine.dataAdapter.DslContractViolationException;
 import io.ontomato.dataengine.dataAdapter.DslExecutionMode;
 import io.ontomato.dataengine.dataAdapter.DslGrammarValidator;
@@ -24,6 +25,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -31,6 +33,11 @@ import java.util.Set;
 
 @Slf4j
 public class HttpRequestUtil {
+
+    /** Compatibility transport used only by the historical M3 schema hooks. */
+    public static JSONArray getExecMQL(DataRagConfig dataRagConfig, String mql) {
+        throw new UnsupportedOperationException("The v4.1 adapter contract no longer carries the legacy M3 schema transport");
+    }
 
     // Returns [execution result without permission, row permission execution result]; each item contains the query data or failure fact and the original DSL
     public static DslExecutionResult[] executeDsl(
@@ -135,17 +142,26 @@ public class HttpRequestUtil {
 			String nodeResp = adapter.executeDsl(nodeDslStr, null, DslExecutionMode.OPTIMIZED, new ArrayList<String>());
         	for (Map map : JSON.parseArray(nodeResp, Map.class)) {
         		List answer = (List)map.get("answer");
-        		for (Object obj : answer) {
+				if (answer == null) continue;
+				for (Object obj : answer) {
         			Map m = (Map)obj;
         			for (Object k : m.keySet()) {
         				String key = (String)k;
         				if (key.endsWith("_id")) {
-        					nodeIds.add((String)m.get(k));
+							Object value = m.get(k);
+							if (value == null) continue;
+							String className = evidenceClasses.get(key);
+							if (className == null) {
+								throw new IllegalStateException("Backend evidence returned an unknown identity field: " + key);
+							}
+							nodeIds.add(adapter.encodeNodeReference(className, String.valueOf(value)));
         				}
         			}
         		}
         	}
-        } catch (Exception e) {}
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to query evidence: " + e.getMessage(), e);
+        }
         List<String> nodeList = new ArrayList<String>();
         if (nodeIds.size() > 100) {
         	for (String nodeId : nodeIds) {
@@ -173,6 +189,8 @@ public class HttpRequestUtil {
 		List<String> generatedMqls = new ArrayList<String>();
     	
 		try {
+			DataAdapterCapabilities capabilities = adapter.capabilities();
+			if (capabilities != null) capabilities.requireQuery();
 			String JsonData = adapter.executeDsl("[" + JSON.toJSONString(dsl, Feature.WriteMapNullValue) + "]", sessionId, mode, generatedMqls);
 			if (JsonData != null) {
         	log.info("Data source returned data, sessionId-{}>>>:\n{}",sessionId,JsonData);

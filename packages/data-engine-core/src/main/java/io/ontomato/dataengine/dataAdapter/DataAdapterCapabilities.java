@@ -8,6 +8,11 @@ public record DataAdapterCapabilities(boolean query, boolean schemaRead, boolean
         return new DataAdapterCapabilities(true, false, true, true, true, true, false);
     }
 
+    /** Historical M3 adapters additionally expose native graph reads. */
+    public static DataAdapterCapabilities legacy(boolean useM3) {
+        return new DataAdapterCapabilities(true, false, true, true, true, true, useM3);
+    }
+
     public static DataAdapterCapabilities onnReadOnly() {
         return new DataAdapterCapabilities(true, true, false, false, false, false, false);
     }

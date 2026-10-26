@@ -127,6 +127,8 @@ public class AdminServiceImpl implements AdminService {
 			if (!existTo) {
 				throw new Exception(langService.get(lang, "Admin.relationship.toClassNotFound"));
 			}
+			BusinessConfig businessConfig = businessConfigService.get(user.getDomainId());
+			DataAdapter adapter = dataAdapterRegistry.create(businessConfig, jsonRule);
 			
 			Map<String, String> relationshipDef = new HashMap<String, String>();
 			relationshipDef.put("fromclass", fromClassName);
@@ -299,7 +301,10 @@ public class AdminServiceImpl implements AdminService {
 			classDefs.remove(removeIndex);
 			List<String> classList = (List<String>)jsonRule.get("classlist");
 			classList.remove(className);
-			BusinessConfig businessConfig = businessConfigService.get(user.getDomainId());
+				validatePrimaryKey(jsonRule);
+				BusinessConfig businessConfig = businessConfigService.get(user.getDomainId());
+				DataAdapter adapter = dataAdapterRegistry.create(businessConfig, jsonRule);
+				adapter.deleteSchemaClass(className, dataRagConfig);
 			writeJSONRule(jsonRule, user.getDomainId());
 			
 			AuditLog auditLog = new AuditLog();
@@ -425,6 +430,7 @@ public class AdminServiceImpl implements AdminService {
 					throw new Exception(langService.get(lang, "Admin.attr.formatError"));
 				}
 				BusinessConfig businessConfig = businessConfigService.get(user.getDomainId());
+				DataAdapter adapter = dataAdapterRegistry.create(businessConfig, jsonRule);
 				
 				Map<String, Object> attrDef = new HashMap<String, Object>();
 				attrDef.put("name", attrName.trim());
@@ -490,6 +496,9 @@ public class AdminServiceImpl implements AdminService {
 				}
 				attrs.remove(removeIndex);
 				BusinessConfig businessConfig = businessConfigService.get(user.getDomainId());
+					validatePrimaryKey(jsonRule);
+					DataAdapter adapter = dataAdapterRegistry.create(businessConfig, jsonRule);
+					adapter.deleteSchemaAttribute(className, attrName, dataRagConfig);
 				
 				writeJSONRule(jsonRule, user.getDomainId());
 				

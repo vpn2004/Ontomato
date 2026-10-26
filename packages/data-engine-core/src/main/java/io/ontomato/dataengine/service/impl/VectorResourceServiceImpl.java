@@ -18,6 +18,7 @@ import io.ontomato.dataengine.dataAdapter.DataAdapter;
 import io.ontomato.dataengine.dataAdapter.DataAdapterRegistry;
 import io.ontomato.dataengine.service.BusinessConfigService;
 import io.ontomato.dataengine.service.VectorResourceService;
+import io.ontomato.dataengine.util.DslUtil;
 
 import lombok.extern.slf4j.Slf4j;
 
