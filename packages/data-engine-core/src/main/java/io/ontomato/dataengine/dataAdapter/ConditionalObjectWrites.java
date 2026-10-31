@@ -5,6 +5,17 @@ import java.util.List;
 
 /** Explicit optimistic writes. Hosts must resolve the principal from authenticated server state. */
 public interface ConditionalObjectWrites {
+    /** A backend rejection with a known HTTP outcome, separate from an uncertain transport failure. */
+    final class Rejected extends Exception {
+        private final int status;
+        private final String code;
+        public Rejected(int status, String code) {
+            super("Conditional write rejected: " + status + " " + code);
+            this.status = status; this.code = code;
+        }
+        public int status() { return status; }
+        public String code() { return code; }
+    }
     record Principal(String subject, List<String> roles) {
         public Principal {
             if (subject == null || !subject.matches("[A-Za-z0-9._:@/-]{1,200}") || roles == null || roles.isEmpty()

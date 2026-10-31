@@ -1,4 +1,5 @@
 import type { DataAdaptersData } from "@ontomato/contracts/data-adapters";
+import type { ControlledActionCatalog, ControlledActionDecision } from "@ontomato/contracts/controlled-actions";
 import { ontologyText, type ManagerMessages } from "./i18n";
 import type { AdapterOntologyPreview, DataAdapterInfo } from "@ontomato/contracts/data-adapters";
 
@@ -573,6 +574,18 @@ export function createManagerClient(
   }
 
   return {
+    async loadControlledActions(): Promise<ControlledActionCatalog> {
+      return (await post("/action/controlled/catalog", {})).data;
+    },
+    async prepareControlledAction(actionId: string, objectId: string, values: Record<string, string>): Promise<ControlledActionDecision> {
+      return (await post("/action/controlled/prepare", { actionId, objectId, values })).data;
+    },
+    async executeControlledAction(decisionId: string): Promise<ControlledActionDecision> {
+      return (await post("/action/controlled/execute", { decisionId })).data;
+    },
+    async controlledActionStatus(decisionId: string): Promise<ControlledActionDecision> {
+      return (await post("/action/controlled/status", { decisionId })).data;
+    },
     loadInstanceGraphStatistics,
     dispose: () => {
       disposed = true;

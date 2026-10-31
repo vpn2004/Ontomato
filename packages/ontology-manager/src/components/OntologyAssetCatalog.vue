@@ -11,6 +11,7 @@ import {
 } from "lucide-vue-next";
 import type { SmartAsset } from "../api";
 import type { AssetTab } from "../workspace";
+import ControlledActionPanel from "./ControlledActionPanel.vue";
 import { useManagerClient, useOntologyText } from "../context";
 
 const { ot } = useOntologyText();
@@ -135,6 +136,7 @@ onMounted(() => void loadCatalog());
       </el-button>
     </header>
 
+    <ControlledActionPanel v-if="kind === 'actions'" />
     <div class="catalog-toolbar">
       <el-input
         v-model="query"

@@ -22,7 +22,11 @@ public final class OnnCoreAdapter implements DataAdapter, ConditionalObjectWrite
     private OnnCoreSchema sampleSchema;
 
     public OnnCoreAdapter(DataAdapterConnection connection, Map<String, Object> mapping) {
-        this.client = new OnnCoreHttpClient(connection.getUrl(), connection.getToken()); this.mapping=mapping;
+        this(connection, mapping, null);
+    }
+    public OnnCoreAdapter(DataAdapterConnection connection, Map<String, Object> mapping, Principal readPrincipal) {
+        var transport = new OnnCoreHttpClient(connection.getUrl(), connection.getToken());
+        this.client = readPrincipal == null ? transport : transport.asPrincipal(readPrincipal); this.mapping=mapping;
     }
     public boolean useM3() { return false; }
     public Connection openConnection() throws SQLException { throw new UnsupportedOperationException("ONN Core is not a JDBC data source"); }
@@ -58,11 +62,13 @@ public final class OnnCoreAdapter implements DataAdapter, ConditionalObjectWrite
     // Deliberately separate from legacy objectWrite: arbitrary predicate updates, sandbox writes
     // and existing Python Actions must not acquire write access by the existence of this API.
     @Override public JSONObject readVersionedObject(String className, String id, Principal principal) throws Exception {
-        return new OnnCoreConditionalWriter(client, mapping, principal).read(className, id);
+        try { return new OnnCoreConditionalWriter(client, mapping, principal).read(className, id); }
+        catch (OnnCoreHttpClient.OnnHttpException e) { throw new Rejected(e.status, e.code); }
     }
     @Override public JSONObject patchObject(String className, String id, JSONObject values, String expectedEtag,
             String idempotencyKey, Principal principal) throws Exception {
-        return new OnnCoreConditionalWriter(client, mapping, principal).patch(className, id, values, expectedEtag, idempotencyKey);
+        try { return new OnnCoreConditionalWriter(client, mapping, principal).patch(className, id, values, expectedEtag, idempotencyKey); }
+        catch (OnnCoreHttpClient.OnnHttpException e) { throw new Rejected(e.status, e.code); }
     }
     public Map<String, Object> readOntology() throws Exception { return new OnnCoreSchema(client.schema()).ontology(); }
     public String objectPrimaryKey(Map<String, Object> classDef) { return "id"; }

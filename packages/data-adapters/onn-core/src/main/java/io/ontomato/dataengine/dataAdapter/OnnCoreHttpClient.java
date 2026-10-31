@@ -56,13 +56,15 @@ final class OnnCoreHttpClient {
     OnnCoreHttpClient asPrincipal(ConditionalObjectWrites.Principal principal) {
         if (gatewayToken == null) throw new UnsupportedOperationException("ONN conditional writes require a configured trusted gateway");
         return new OnnCoreHttpClient(configuredUrl, gatewayToken, timeout, maxBytes,
-            Map.of("X-OMS-Subject", principal.subject(), "X-OMS-Roles", String.join(",", principal.roles())));
+            Map.of("X-OMS-Subject", principal.subject(), "X-OMS-Roles", String.join(",", principal.roles()),
+                "X-OMS-Audit-Who", principal.subject()));
     }
 
     JSONObject patch(String className, String id, JSONObject attributes, String etag, String idempotencyKey) throws Exception {
         return request("PATCH", "/data/instance", JSON.toJSONString(JSONObject.of("class_path", className, "id", id,
             "attributes", attributes), com.alibaba.fastjson2.JSONWriter.Feature.WriteMapNullValue), false, timeout,
-            Map.of("If-Match", etag, "X-OMS-Idempotency-Key", idempotencyKey));
+            Map.of("If-Match", etag, "X-OMS-Idempotency-Key", idempotencyKey,
+                "X-Request-ID", idempotencyKey, "X-OMS-Audit-Why", "controlled-action:" + idempotencyKey));
     }
 
     String baseUrl() {

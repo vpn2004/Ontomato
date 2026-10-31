@@ -39,6 +39,7 @@ class OnnCoreConditionalWriterTest {
             assertEquals("test-user", exchange.getRequestHeaders().getFirst("X-OMS-Subject"));
             assertEquals("test-writer", exchange.getRequestHeaders().getFirst("X-OMS-Roles"));
             assertEquals("test-token", exchange.getRequestHeaders().getFirst("X-OMS-Gateway-Token"));
+            assertEquals("test-user", exchange.getRequestHeaders().getFirst("X-OMS-Audit-Who"));
             String path = exchange.getRequestURI().getPath(); JSONObject response; int status = 200;
             if (path.endsWith("capabilities")) response = ready();
             else if (path.endsWith("schema/all")) response = OnnCoreGraphCompilerTest.schemaWire();
@@ -48,6 +49,8 @@ class OnnCoreConditionalWriterTest {
             } else {
                 matches.add(exchange.getRequestHeaders().getFirst("If-Match"));
                 assertEquals("decision-1", exchange.getRequestHeaders().getFirst("X-OMS-Idempotency-Key"));
+                assertEquals("decision-1", exchange.getRequestHeaders().getFirst("X-Request-ID"));
+                assertEquals("controlled-action:decision-1", exchange.getRequestHeaders().getFirst("X-OMS-Audit-Why"));
                 writes.add(JSON.parseObject(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8)));
                 assertEquals("PATCH", exchange.getRequestMethod());
                 if (writes.size() == 1) response = JSONObject.of("status", "ok", "updated_attributes", List.of("name"), "version", 2, "etag", "\"v2-hash\"");
