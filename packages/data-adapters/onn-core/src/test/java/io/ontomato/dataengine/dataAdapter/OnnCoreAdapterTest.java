@@ -160,17 +160,35 @@ class OnnCoreAdapterTest {
             assertEquals(0, fixture.requests(SAMPLE).size());
             assertEquals(2, fixture.requests(SCHEMA).size());
             JSONObject nativeQuery = JSON.parseObject(fixture.requests(QUERY).get(0).body());
-            assertFalse(nativeQuery.containsKey("where"), "R1/R2 predicates must remain local until their release gate passes");
+            assertEquals("eq", nativeQuery.getJSONObject("where_logic").getJSONArray("children").getJSONObject(0)
+                .getJSONArray("conditions").getJSONObject(0).getString("operator"));
             assertFalse(nativeQuery.containsKey("limit"));
             assertEquals("snapshot", nativeQuery.getJSONObject("pagination").getString("mode"));
             JSONObject evidence = result.getJSONObject("evidence");
             assertTrue(evidence.getBooleanValue("snapshotConsistent"));
             assertTrue(evidence.getBooleanValue("complete"));
-            assertFalse(evidence.getBooleanValue("queryPushdown"));
+            assertTrue(evidence.getBooleanValue("queryPushdown"));
+            assertTrue(evidence.getBooleanValue("filterPushdown"));
+            assertTrue(evidence.getBooleanValue("residualEvaluation"));
             assertEquals("epoch:17", evidence.getString("dataVersion"));
             assertEquals(2, evidence.getIntValue("objectsRead"));
             assertEquals("fb81695c", evidence.getString("backendCommit"));
             assertFalse(result.toJSONString().contains("next_cursor"));
+        }
+    }
+
+    @Test void identityCountUsesCertifiedTotalWithoutDownloadingEveryPage() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.capabilitiesStatus = 200;
+            fixture.capabilitiesResponse = OnnCoreCapabilitiesTest.manifest();
+            fixture.queryResponse = OnnCoreSnapshotReaderTest.page(array(instance("a", "Alpha")), 6001, "opaque-next", "snap", 17);
+            JSONObject count = field("id", "total"); count.put("function", "count");
+            JSONObject result = execute(fixture.adapter(), query(fields(count), null), new ArrayList<>());
+            assertEquals(6001L, result.getJSONArray("answer").getJSONObject(0).getLongValue("total"));
+            assertEquals(1, fixture.requests(QUERY).size());
+            assertEquals(1, result.getJSONObject("evidence").getIntValue("objectsRead"));
+            assertTrue(result.getJSONObject("evidence").getBooleanValue("aggregatePushdown"));
+            assertFalse(result.toJSONString().contains("opaque-next"));
         }
     }
 

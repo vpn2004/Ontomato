@@ -8,9 +8,8 @@ import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
 
 /**
- * Compile a deliberately bounded single-class DSL. Filters/metrics are evaluated over
- * the complete fetched class, so leaf-node counts, float coercion and ABC translation
- * cannot silently change Ontomato semantics. Unsupported structures fail before reads.
+ * Compile a bounded single-class DSL. Native filters select a superset of local matches;
+ * residual evaluation preserves null, precision, grouping and ordering semantics.
  */
 final class OnnCoreDslCompiler {
     static final int MAX_ROWS = 5000;
@@ -79,8 +78,66 @@ final class OnnCoreDslCompiler {
 
     JSONObject nativeRead() { return JSONObject.of("match_class",className,"limit",MAX_ROWS+1,"metrics",List.of(JSONObject.of("name","total","type","count"))); }
 
-    /** Keep local predicate semantics until the native null/date contracts pass the release gate. */
-    JSONObject nativeSnapshotRead() { return JSONObject.of("match_class", className); }
+    JSONObject nativeSnapshotRead() {
+        JSONObject query = JSONObject.of("match_class", className);
+        List<JSONObject> children = new ArrayList<>();
+        for (JSONObject predicate : predicates) {
+            JSONObject pushed = nativePredicate(predicate);
+            if (pushed != null) children.add(pushed);
+        }
+        if (!children.isEmpty()) query.put("where_logic", JSONObject.of("op", "and", "children", children));
+        // Include every residual dependency, even if it is absent from the user's output.
+        List<JSONObject> projection = new ArrayList<>();
+        boolean ambiguous = false;
+        for (String field : new TreeSet<>(referenced)) {
+            String source = schema.sourceField(className, field);
+            if ("id".equals(source)) ambiguous = true;
+            if (source != null) projection.add(JSONObject.of("attribute", source, "as", source));
+        }
+        if (!ambiguous && !projection.isEmpty()) query.put("output", JSONObject.of("fields", projection));
+        return query;
+    }
+
+    /** No predicate or aggregate is discarded when a native operation is unavailable. */
+    private JSONObject nativePredicate(JSONObject predicate) {
+        if ("logic".equals(predicate.getString("operator"))) {
+            boolean and = predicate.containsKey("and");
+            List<JSONObject> children = new ArrayList<>();
+            for (Object raw : predicate.getJSONArray(and ? "and" : "or")) {
+                JSONObject child = nativePredicate(JSONObject.from(raw));
+                // An unconstrained OR branch makes the entire native OR unconstrained.
+                if (child == null && !and) return null;
+                if (child != null) children.add(child);
+            }
+            return children.isEmpty() ? null : JSONObject.of("op", and ? "and" : "or", "children", children);
+        }
+        String field = predicate.getString("field"), source = schema.sourceField(className, field);
+        String type = schema.dataType(className, field), op = predicate.getString("operator");
+        if (source == null || source.equals("id") || !Set.of("string", "boolean").contains(type)) return null;
+        Object value = predicate.get("value");
+        if (!Set.of("=", "in").contains(op)) return null;
+        List<?> values = op.equals("in") ? (List<?>) value : Collections.singletonList(value);
+        // Numeric equality uses a textual native index; do not assume decimal/float equivalence.
+        if (values.isEmpty() || values.stream().anyMatch(v -> type.equals("string") ? !(v instanceof String) : !(v instanceof Boolean))) return null;
+        return JSONObject.of("op", "and", "conditions", List.of(JSONObject.of(
+            "attribute", source, "operator", op.equals("=") ? "eq" : "in", "value", value)));
+    }
+
+    boolean nativeIdentityCount() {
+        return aggregate && predicates.isEmpty() && groups.isEmpty() && having.isEmpty() && sort.isEmpty()
+            && fields.stream().map(JSONObject::from).allMatch(f -> "count".equals(f.getString("function")) && "id".equals(f.getString("field")));
+    }
+
+    JSONArray evaluateIdentityCount(long total) {
+        if (!nativeIdentityCount()) throw new IllegalStateException("Native count requires an unfiltered identity aggregate");
+        JSONArray result = new JSONArray();
+        if (count > 0 && offset == 0) {
+            JSONObject row = new JSONObject();
+            for (Object raw : fields) row.put(JSONObject.from(raw).getString("as"), total);
+            result.add(row);
+        }
+        return result;
+    }
 
     /** Only a conjunctive virtual-id filter can narrow the fetch without changing OR semantics. */
     List<String> identitySelection() {

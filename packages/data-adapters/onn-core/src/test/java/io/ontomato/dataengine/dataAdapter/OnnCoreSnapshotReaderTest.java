@@ -142,6 +142,17 @@ class OnnCoreSnapshotReaderTest {
         }
     }
 
+    @Test void countOnlyClosesTheMaterializedSnapshotAfterItsFirstCertifiedPage() throws Exception {
+        try (Fixture fixture = new Fixture(List.of(ok("a", 6001, "private-cursor", "snap")))) {
+            var result = fixture.reader().read(JSONObject.of("match_class", CLASS), 1, true);
+            assertEquals(6001, result.total());
+            assertEquals(1, result.rows().size());
+            assertEquals(1, fixture.requests.size());
+            assertTrue(result.snapshotReleased());
+            assertEquals(List.of("snap"), fixture.closed);
+        }
+    }
+
     private static final class Fixture implements AutoCloseable {
         final HttpServer server;
         final AtomicInteger next = new AtomicInteger();

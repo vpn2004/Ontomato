@@ -27,15 +27,19 @@ final class OnnCoreSnapshotReader {
         this.client = client; this.maxRows = maxRows; this.maxBytes = maxBytes; this.timeout = timeout; this.attempts = attempts;
     }
 
-    record Result(List<JSONObject> rows, String dataVersion, int pages, int attempts, boolean snapshotReleased) { }
+    record Result(List<JSONObject> rows, long total, String dataVersion, int pages, int attempts, boolean snapshotReleased) { }
 
     Result read(JSONObject original, int pageSize) throws Exception {
+        return read(original, pageSize, false);
+    }
+
+    Result read(JSONObject original, int pageSize, boolean totalOnly) throws Exception {
         if (original.containsKey("pagination") || original.containsKey("limit") || original.containsKey("offset") || original.containsKey("after"))
             throw new IllegalArgumentException("ONN snapshot query must not contain a live window or cursor");
         if (pageSize < 1 || pageSize > 1000) throw new IllegalArgumentException("Invalid ONN snapshot page size");
         long deadline = System.nanoTime() + timeout.toNanos();
         for (int attempt = 1; ; attempt++) {
-            try { return readAttempt(original, pageSize, deadline, attempt); }
+            try { return readAttempt(original, pageSize, deadline, attempt, totalOnly); }
             catch (OnnCoreHttpClient.OnnHttpException error) {
                 if (attempt >= attempts || !restartable(error)) throw error;
                 long delay = Math.min(100L * attempt, Math.max(0, remaining(deadline).toMillis()));
@@ -45,7 +49,7 @@ final class OnnCoreSnapshotReader {
         }
     }
 
-    private Result readAttempt(JSONObject original, int pageSize, long deadline, int attempt) throws Exception {
+    private Result readAttempt(JSONObject original, int pageSize, long deadline, int attempt, boolean totalOnly) throws Exception {
         JSONObject query = JSON.parseObject(original.toJSONString());
         JSONObject pagination = JSONObject.of("mode", "snapshot", "result_kind", "data", "page_size", pageSize);
         query.put("pagination", pagination);
@@ -63,6 +67,7 @@ final class OnnCoreSnapshotReader {
                 String currentId = meta == null ? null : meta.getString("snapshot_id");
                 if (currentId != null && !currentId.isBlank() && snapshotId == null) snapshotId = currentId;
                 if (meta == null || !Boolean.TRUE.equals(meta.get("total_exact"))
+                    || Boolean.TRUE.equals(response.get("truncated"))
                     || !"materialized".equals(meta.getString("consistency")) || !"data".equals(meta.getString("result_kind"))
                     || !(meta.get("has_more") instanceof Boolean) || meta.get("fallback_reason") != null)
                     throw incomplete("missing exact materialized pagination metadata");
@@ -99,13 +104,16 @@ final class OnnCoreSnapshotReader {
                 }
                 if (data.isEmpty() || rows.size() >= total || cursor == null || cursor.isBlank() || !cursors.add(cursor))
                     throw incomplete("continuation makes no progress or repeats a cursor");
+                // The server has already materialized and certified the entire match set.
+                // COUNT(id) needs its exact total, not the remaining object payloads.
+                if (totalOnly) { complete = true; break; }
                 pagination.put("after", cursor);
             }
         } finally {
             if (!complete && snapshotId != null) release(snapshotId);
         }
         boolean released = snapshotId == null || release(snapshotId);
-        return new Result(List.copyOf(rows), version, pages, attempt, released);
+        return new Result(List.copyOf(rows), total, version, pages, attempt, released);
     }
 
     private boolean release(String snapshotId) {

@@ -69,6 +69,7 @@ public final class OnnCoreAdapter implements DataAdapter {
         OnnCoreSchema schema=new OnnCoreSchema(client.schema());
         OnnCoreDslCompiler plan=new OnnCoreDslCompiler(dsls.getJSONObject(0),schema,mapping);
         List<JSONObject> rows=new ArrayList<>();
+        JSONArray nativeAnswer=null;
         JSONObject evidence=JSONObject.of("backend","onn-core","view","BASE","schemaFingerprint",schema.fingerprint,
             "evaluation","bounded-count-checked-single-class","source",client.baseUrl(),"snapshotConsistent",false);
         List<String> ids=plan.identitySelection();
@@ -88,14 +89,18 @@ public final class OnnCoreAdapter implements DataAdapter {
             evidence.put("backendCommit",negotiated.commit());
             if (negotiated.snapshotReads()) {
                 JSONObject nativeRead=plan.nativeSnapshotRead();
-                generated.add("POST /api/v1/query/execute " + JSON.toJSONString(JSONObject.of(
-                    "match_class",plan.className,"pagination",JSONObject.of("mode","snapshot","result_kind","data","page_size",negotiated.pageSize()))));
-                OnnCoreSnapshotReader.Result snapshot=new OnnCoreSnapshotReader(client).read(nativeRead,negotiated.pageSize());
+                boolean nativeCount=plan.nativeIdentityCount();
+                int pageSize=nativeCount ? 1 : negotiated.pageSize();
+                JSONObject loggedRead=JSON.parseObject(nativeRead.toJSONString());
+                loggedRead.put("pagination",JSONObject.of("mode","snapshot","result_kind","data","page_size",pageSize));
+                generated.add("POST /api/v1/query/execute " + JSON.toJSONString(loggedRead));
+                OnnCoreSnapshotReader.Result snapshot=new OnnCoreSnapshotReader(client).read(nativeRead,pageSize,nativeCount);
                 for (JSONObject instance:snapshot.rows()) rows.add(schema.flatten(plan.className,instance));
+                if (nativeCount) nativeAnswer=plan.evaluateIdentityCount(snapshot.total());
                 generated.add("GET /api/v1/schema/all");
                 if (!schema.fingerprint.equals(new OnnCoreSchema(client.schema()).fingerprint))
                     throw new IllegalStateException("ONN schema changed during the snapshot read; re-import schema before retrying");
-                evidence.put("evaluation","snapshot-single-class-local-evaluation");
+                evidence.put("evaluation",nativeCount ? "snapshot-native-identity-count" : "snapshot-single-class-residual-evaluation");
                 evidence.put("snapshotConsistent",true);
                 evidence.put("consistency","materialized");
                 evidence.put("dataVersion",snapshot.dataVersion());
@@ -104,13 +109,18 @@ public final class OnnCoreAdapter implements DataAdapter {
                 evidence.put("snapshotReleased",snapshot.snapshotReleased());
                 evidence.put("totalExact",true);
                 evidence.put("complete",true);
-                evidence.put("queryPushdown",false);
+                evidence.put("queryPushdown",nativeCount || nativeRead.containsKey("where_logic") || nativeRead.containsKey("output"));
+                evidence.put("filterPushdown",nativeRead.containsKey("where_logic"));
+                evidence.put("projectionPushdown",nativeRead.containsKey("output"));
+                evidence.put("aggregatePushdown",nativeCount);
+                evidence.put("residualEvaluation",!nativeCount);
+                evidence.put("matchedObjects",snapshot.total());
             } else {
                 rows.addAll(readLegacy(plan,schema,generated));
             }
         }
         JSONObject result=new JSONObject();
-        result.put("answer",plan.evaluate(rows)); result.put("mqls",generated);
+        result.put("answer",nativeAnswer==null ? plan.evaluate(rows) : nativeAnswer); result.put("mqls",generated);
         evidence.put("objectsRead",rows.size());
         result.put("evidence",evidence);
         return JSON.toJSONString(List.of(result),Feature.WriteMapNullValue);

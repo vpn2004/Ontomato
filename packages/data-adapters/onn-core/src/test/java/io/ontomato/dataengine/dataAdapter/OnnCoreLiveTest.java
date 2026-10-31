@@ -47,12 +47,13 @@ class OnnCoreLiveTest {
         field.put("function", "count"); field.put("as", "count");
         JSONObject count = execute(adapter, countQuery);
         assertEquals(total, count.getJSONArray("answer").getJSONObject(0).getLongValue("count"));
-        assertEquals(total, count.getJSONObject("evidence").getLongValue("objectsRead"));
+        assertEquals(snapshot ? 1 : total, count.getJSONObject("evidence").getLongValue("objectsRead"));
         assertEquals(snapshot, count.getJSONObject("evidence").getBooleanValue("snapshotConsistent"));
         if (snapshot) {
             assertTrue(count.getJSONObject("evidence").getBooleanValue("complete"));
             assertTrue(count.getJSONObject("evidence").getBooleanValue("snapshotReleased"));
-            assertFalse(count.getJSONObject("evidence").getBooleanValue("queryPushdown"));
+            assertTrue(count.getJSONObject("evidence").getBooleanValue("aggregatePushdown"));
+            assertEquals(total, count.getJSONObject("evidence").getLongValue("matchedObjects"));
         }
         assertFalse(adapter.capabilities().graphRead());
     }

@@ -207,6 +207,42 @@ class OnnCoreDslCompilerTest {
     }
 
     private OnnCoreDslCompiler compile(JSONObject dsl) { return new OnnCoreDslCompiler(dsl, schema, schema.ontology()); }
+
+    @Test void pushesSafeConjunctionsButNeverDropsAnUnconstrainedOrBranch() {
+        JSONObject safe = predicate("category", "in", List.of("A", "B"));
+        JSONObject unsafe = predicate("when", "=", "2026-01-15T00:00:00Z");
+        assertTrue(compile(query(array(field("id", "id")), logic("and", safe, unsafe))).nativeSnapshotRead().containsKey("where_logic"));
+        assertTrue(!compile(query(array(field("id", "id")), logic("or", safe, unsafe))).nativeSnapshotRead().containsKey("where_logic"));
+        JSONObject safeOr = compile(query(array(field("id", "id")), logic("or", safe, predicate("name", "=", "one")))).nativeSnapshotRead();
+        assertEquals("or", safeOr.getJSONObject("where_logic").getJSONArray("children").getJSONObject(0).getString("op"));
+        for (JSONObject residual : List.of(predicate("amount", "=", 1), predicate("amount", ">", 1),
+            predicate("name", "!=", "1"), predicate("name", "is", null), predicate("name", "=", null),
+            predicate("name", "in", Arrays.asList("one", null)), predicate("when", "in", List.of("2026-01-15")))) {
+            assertTrue(!compile(query(array(field("id", "id")), residual)).nativeSnapshotRead().containsKey("where_logic"), residual.toString());
+        }
+    }
+
+    @Test void projectionIncludesFilterGroupingHavingAndSortingDependencies() {
+        JSONObject dsl = query(array(field("category", "category"), aggregate("amount", "sum", "total", false)), predicate("name", "=", "one"));
+        output(dsl).put("group_by", JSONObject.of("fields", array(groupField("category"))));
+        JSONObject read = compile(dsl).nativeSnapshotRead();
+        assertEquals(List.of("amount", "category", "name"), read.getJSONObject("output").getJSONArray("fields")
+            .stream().map(JSONObject::from).map(f -> f.getString("attribute")).toList());
+        assertTrue(!read.containsKey("limit"));
+        assertTrue(!read.containsKey("metrics"));
+    }
+
+    @Test void exactCountRequiresAnUnfilteredUngroupedIdentityAggregateAndHonorsWindows() {
+        JSONObject dsl = query(array(aggregate("id", "count", "total", true)), null);
+        assertTrue(compile(dsl).nativeIdentityCount());
+        assertEquals(6001L, compile(dsl).evaluateIdentityCount(6001).getJSONObject(0).getLongValue("total"));
+        output(dsl).put("limit", JSONObject.of("count", 0));
+        assertTrue(compile(dsl).evaluateIdentityCount(6001).isEmpty());
+        output(dsl).put("limit", JSONObject.of("count", 1, "offset", 1));
+        assertTrue(compile(dsl).evaluateIdentityCount(6001).isEmpty());
+        assertTrue(!compile(query(array(aggregate("amount", "count", "total", false)), null)).nativeIdentityCount());
+        assertTrue(!compile(query(array(aggregate("id", "count", "total", false)), predicate("name", "=", "one"))).nativeIdentityCount());
+    }
     private List<String> ids(JSONObject predicate, List<JSONObject> rows) {
         return compile(query(array(field("id", "id")), predicate)).evaluate(rows).stream()
             .map(JSONObject::from).map(r -> r.getString("id")).toList();
