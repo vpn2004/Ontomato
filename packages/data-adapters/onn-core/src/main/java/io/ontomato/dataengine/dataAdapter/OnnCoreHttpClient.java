@@ -12,6 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -31,6 +32,7 @@ final class OnnCoreHttpClient {
     private final String gatewayToken;
     private final Duration timeout;
     private final int maxBytes;
+    private final Map<String, String> principalHeaders;
 
     OnnCoreHttpClient(String url) { this(url, null, Duration.ofSeconds(12), MAX_BYTES); }
 
@@ -41,9 +43,26 @@ final class OnnCoreHttpClient {
     }
 
     OnnCoreHttpClient(String url, String gatewayToken, Duration timeout, int maxBytes) {
+        this(url, gatewayToken, timeout, maxBytes, Map.of());
+    }
+
+    private OnnCoreHttpClient(String url, String gatewayToken, Duration timeout, int maxBytes, Map<String, String> principalHeaders) {
         if (timeout == null || timeout.toMillis() < 1 || maxBytes < 1) throw new IllegalArgumentException("Invalid ONN read limits");
         this.configuredUrl = url; this.gatewayToken = gatewayToken == null || gatewayToken.isBlank() ? null : gatewayToken;
         this.timeout = timeout; this.maxBytes = maxBytes;
+        this.principalHeaders = Map.copyOf(principalHeaders);
+    }
+
+    OnnCoreHttpClient asPrincipal(ConditionalObjectWrites.Principal principal) {
+        if (gatewayToken == null) throw new UnsupportedOperationException("ONN conditional writes require a configured trusted gateway");
+        return new OnnCoreHttpClient(configuredUrl, gatewayToken, timeout, maxBytes,
+            Map.of("X-OMS-Subject", principal.subject(), "X-OMS-Roles", String.join(",", principal.roles())));
+    }
+
+    JSONObject patch(String className, String id, JSONObject attributes, String etag, String idempotencyKey) throws Exception {
+        return request("PATCH", "/data/instance", JSON.toJSONString(JSONObject.of("class_path", className, "id", id,
+            "attributes", attributes), com.alibaba.fastjson2.JSONWriter.Feature.WriteMapNullValue), false, timeout,
+            Map.of("If-Match", etag, "X-OMS-Idempotency-Key", idempotencyKey));
     }
 
     String baseUrl() {
@@ -85,6 +104,10 @@ final class OnnCoreHttpClient {
     }
 
     private JSONObject request(String method, String route, String body, boolean paged, Duration remaining) throws Exception {
+        return request(method, route, body, paged, remaining, Map.of());
+    }
+
+    private JSONObject request(String method, String route, String body, boolean paged, Duration remaining, Map<String, String> headers) throws Exception {
         Duration deadline = remaining.compareTo(timeout) < 0 ? remaining : timeout;
         if (deadline.isNegative() || deadline.isZero()) throw new HttpTimeoutException("ONN query exceeded its response deadline");
         HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(baseUrl() + route))
@@ -93,6 +116,8 @@ final class OnnCoreHttpClient {
             builder.header("Authorization", "Bearer " + gatewayToken)
                 .header("X-OMS-Gateway-Token", gatewayToken);
         }
+        principalHeaders.forEach(builder::header);
+        headers.forEach(builder::header);
         if (body == null) builder.method(method, HttpRequest.BodyPublishers.noBody());
         else builder.header("Content-Type", "application/json").method(method, HttpRequest.BodyPublishers.ofString(body));
         // The deadline includes body consumption. An InputStream body handler completes

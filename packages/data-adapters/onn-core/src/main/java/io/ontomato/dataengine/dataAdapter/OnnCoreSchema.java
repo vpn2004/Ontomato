@@ -93,7 +93,7 @@ final class OnnCoreSchema {
             rules.put(path, rule);
         }
         ontology = new LinkedHashMap<>();
-        String description = "ONN Core business data (BASE view, read only; relationship queries unavailable)";
+        String description = "ONN Core business data (BASE view; typed relationship trees and read-only browsing)";
         if (!unboundRelations.isEmpty()) description += "; unbound relationships omitted: "
             + String.join(", ", unboundRelations.stream().sorted().toList());
         ontology.put("datasetdesc", description);
@@ -103,6 +103,18 @@ final class OnnCoreSchema {
     }
 
     Map<String, Object> ontology() { return ontology; }
+    void validateRelationship(Map<String, Object> mapping, String type, String from, String to) {
+        JSONObject expected = JSONObject.from(ontology).getJSONObject("relationship_rule").getJSONObject(type);
+        JSONObject rules = mapping == null ? null : JSONObject.from(mapping).getJSONObject("relationship_rule");
+        JSONObject imported = rules == null ? null : rules.getJSONObject(type);
+        if (expected == null || imported == null || Boolean.FALSE.equals(imported.getBoolean("enable")))
+            throw new IllegalStateException("ONN relationship is unknown, disabled or not imported: " + type);
+        for (String key : List.of("fromclass", "toclass", "fromField", "toField"))
+            if (!Objects.equals(expected.getString(key), imported.getString(key)))
+                throw new IllegalStateException("ONN relationship mapping changed; re-import schema: " + type);
+        if (!from.equals(expected.getString("fromclass")) || !to.equals(expected.getString("toclass")))
+            throw new IllegalArgumentException("ONN relationship direction or endpoints do not match: " + type);
+    }
     void requireClass(String path) { if (!classes.containsKey(path)) throw new IllegalArgumentException("Unknown ONN class: " + path); }
     String sourceField(String path, String field) {
         requireClass(path);

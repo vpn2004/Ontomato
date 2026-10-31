@@ -16,7 +16,7 @@ import java.sql.Connection;
 import java.sql.SQLException;
 
 /** ONN carries business objects; platform persistence and attachment indices remain PostgreSQL. */
-public final class OnnCoreAdapter implements DataAdapter {
+public final class OnnCoreAdapter implements DataAdapter, ConditionalObjectWrites {
     private final OnnCoreHttpClient client;
     private final Map<String, Object> mapping;
     private OnnCoreSchema sampleSchema;
@@ -55,6 +55,15 @@ public final class OnnCoreAdapter implements DataAdapter {
         });
     }
     public DataAdapterCapabilities capabilities() { return DataAdapterCapabilities.onnReadOnly(); }
+    // Deliberately separate from legacy objectWrite: arbitrary predicate updates, sandbox writes
+    // and existing Python Actions must not acquire write access by the existence of this API.
+    @Override public JSONObject readVersionedObject(String className, String id, Principal principal) throws Exception {
+        return new OnnCoreConditionalWriter(client, mapping, principal).read(className, id);
+    }
+    @Override public JSONObject patchObject(String className, String id, JSONObject values, String expectedEtag,
+            String idempotencyKey, Principal principal) throws Exception {
+        return new OnnCoreConditionalWriter(client, mapping, principal).patch(className, id, values, expectedEtag, idempotencyKey);
+    }
     public Map<String, Object> readOntology() throws Exception { return new OnnCoreSchema(client.schema()).ontology(); }
     public String objectPrimaryKey(Map<String, Object> classDef) { return "id"; }
     public void validateClassNameFormat(String className) { OnnCoreSchema.validatePath(className); }
@@ -67,6 +76,7 @@ public final class OnnCoreAdapter implements DataAdapter {
         if(dsls==null || dsls.size()!=1) throw new UnsupportedOperationException("ONN Core supports one query per execution");
         generated.add("GET /api/v1/schema/all");
         OnnCoreSchema schema=new OnnCoreSchema(client.schema());
+        if (OnnCoreGraphCompiler.isGraph(dsls.getJSONObject(0))) return executeGraph(dsls.getJSONObject(0), schema, generated);
         OnnCoreDslCompiler plan=new OnnCoreDslCompiler(dsls.getJSONObject(0),schema,mapping);
         List<JSONObject> rows=new ArrayList<>();
         JSONArray nativeAnswer=null;
@@ -124,6 +134,27 @@ public final class OnnCoreAdapter implements DataAdapter {
         evidence.put("objectsRead",rows.size());
         result.put("evidence",evidence);
         return JSON.toJSONString(List.of(result),Feature.WriteMapNullValue);
+    }
+
+    private String executeGraph(JSONObject dsl, OnnCoreSchema schema, List<String> generated) throws Exception {
+        OnnCoreGraphCompiler plan = new OnnCoreGraphCompiler(dsl, schema, mapping);
+        generated.add("GET /api/v1/system/capabilities");
+        OnnCoreCapabilities negotiated = OnnCoreCapabilities.discover(client);
+        if (!negotiated.bindingReads()) throw new UnsupportedOperationException("ONN graph queries require enabled v1 pipeline bindings and v2 materialized binding pagination");
+        JSONObject query = plan.nativePipeline();
+        generated.add("POST /api/v1/query/pipeline " + query.toJSONString());
+        OnnCoreSnapshotReader.Result snapshot = new OnnCoreSnapshotReader(client).readBindings(query, negotiated.pageSize(), plan.bindings());
+        generated.add("GET /api/v1/schema/all");
+        if (!schema.fingerprint.equals(new OnnCoreSchema(client.schema()).fingerprint))
+            throw new IllegalStateException("ONN schema changed during the binding snapshot; re-import schema before retrying");
+        JSONObject evidence = JSONObject.of("backend", "onn-core", "view", "BASE", "source", client.baseUrl(),
+            "schemaFingerprint", schema.fingerprint, "backendCommit", negotiated.commit(),
+            "evaluation", "snapshot-bindings-residual-evaluation", "snapshotConsistent", true,
+            "consistency", "materialized", "dataVersion", snapshot.dataVersion(), "pagesRead", snapshot.pages(),
+            "readAttempts", snapshot.attempts(), "snapshotReleased", snapshot.snapshotReleased(),
+            "totalExact", true, "complete", true, "queryPushdown", true, "relationshipPushdown", true,
+            "aggregatePushdown", false, "residualEvaluation", true, "bindingsRead", snapshot.rows().size());
+        return JSON.toJSONString(List.of(JSONObject.of("answer", plan.evaluate(snapshot.rows()), "mqls", generated, "evidence", evidence)), Feature.WriteMapNullValue);
     }
 
     private List<JSONObject> readLegacy(OnnCoreDslCompiler plan,OnnCoreSchema schema,List<String> generated) throws Exception {

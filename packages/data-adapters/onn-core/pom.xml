@@ -8,7 +8,13 @@
     </parent>
     <artifactId>data-adapter-onn-core</artifactId>
     <dependencies>
-        <dependency><groupId>io.ontomato</groupId><artifactId>data-engine-core</artifactId><version>${project.version}</version></dependency>
-        <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-test</artifactId><scope>test</scope></dependency>
+        <dependency>
+            <groupId>io.ontomato</groupId><artifactId>data-engine-core</artifactId><version>${project.version}</version>
+            <exclusions><exclusion><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-logging</artifactId></exclusion></exclusions>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-test</artifactId><scope>test</scope>
+            <exclusions><exclusion><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-logging</artifactId></exclusion></exclusions>
+        </dependency>
     </dependencies>
 </project>

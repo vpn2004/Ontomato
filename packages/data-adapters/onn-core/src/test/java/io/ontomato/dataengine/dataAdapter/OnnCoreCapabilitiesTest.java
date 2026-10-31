@@ -50,4 +50,19 @@ class OnnCoreCapabilitiesTest {
             assertThrows(IllegalStateException.class, () -> OnnCoreCapabilities.parse(invalid), change);
         }
     }
+
+    @Test void bindingsRequireEveryKnownEnabledGraphContractAndSnapshotKind() {
+        JSONObject wire = manifest();
+        wire.getJSONArray("features").getJSONObject(1).getJSONObject("pagination").getJSONArray("result_kinds").add("bindings");
+        for (String feature : List.of("pipeline", "graph_query", "graph_binding_aggregate"))
+            wire.getJSONArray("features").add(JSONObject.of("id", feature, "enabled", true, "contract_version", "v1"));
+        assertTrue(OnnCoreCapabilities.parse(wire).bindingReads());
+        for (int index = 0; index < wire.getJSONArray("features").size(); index++) {
+            JSONObject bad = JSONObject.parseObject(wire.toJSONString());
+            bad.getJSONArray("features").getJSONObject(index).put("enabled", false);
+            assertFalse(OnnCoreCapabilities.parse(bad).bindingReads());
+        }
+        wire.getJSONArray("features").getJSONObject(1).getJSONObject("pagination").getJSONArray("result_kinds").remove("bindings");
+        assertFalse(OnnCoreCapabilities.parse(wire).bindingReads());
+    }
 }

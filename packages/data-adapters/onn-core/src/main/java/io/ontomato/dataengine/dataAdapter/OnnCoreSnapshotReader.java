@@ -34,24 +34,45 @@ final class OnnCoreSnapshotReader {
     }
 
     Result read(JSONObject original, int pageSize, boolean totalOnly) throws Exception {
+        return read(original, pageSize, totalOnly, null);
+    }
+
+    Result readBindings(JSONObject original, int pageSize, java.util.Map<String, String> bindings) throws Exception {
+        if (bindings == null || bindings.isEmpty()) throw new IllegalArgumentException("Missing binding classes");
+        return read(original, pageSize, false, bindings);
+    }
+
+    private Result read(JSONObject original, int pageSize, boolean totalOnly, java.util.Map<String, String> bindings) throws Exception {
         if (original.containsKey("pagination") || original.containsKey("limit") || original.containsKey("offset") || original.containsKey("after"))
             throw new IllegalArgumentException("ONN snapshot query must not contain a live window or cursor");
         if (pageSize < 1 || pageSize > 1000) throw new IllegalArgumentException("Invalid ONN snapshot page size");
         long deadline = System.nanoTime() + timeout.toNanos();
+        int restarts = 0, capacityWaits = 0;
         for (int attempt = 1; ; attempt++) {
-            try { return readAttempt(original, pageSize, deadline, attempt, totalOnly); }
+            try { return readAttempt(original, pageSize, deadline, attempt, totalOnly, bindings); }
             catch (OnnCoreHttpClient.OnnHttpException error) {
-                if (attempt >= attempts || !restartable(error)) throw error;
-                long delay = Math.min(100L * attempt, Math.max(0, remaining(deadline).toMillis()));
+                long backoff;
+                if (error.status == 429 && "SNAPSHOT_CAPACITY_EXCEEDED".equals(error.code)) {
+                    // Manager requests can compete for the server's bounded snapshot builders.
+                    // Admission retries share the original deadline and never change consistency.
+                    if (capacityWaits >= 8) throw error;
+                    backoff = Math.min(1000L, 100L << capacityWaits++);
+                } else {
+                    if (!restartable(error) || ++restarts >= attempts) throw error;
+                    backoff = 100L * restarts;
+                }
+                long delay = Math.min(backoff, Math.max(1, remaining(deadline).toMillis()));
                 try { Thread.sleep(delay); }
                 catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw interrupted; }
             }
         }
     }
 
-    private Result readAttempt(JSONObject original, int pageSize, long deadline, int attempt, boolean totalOnly) throws Exception {
+    private Result readAttempt(JSONObject original, int pageSize, long deadline, int attempt, boolean totalOnly,
+            java.util.Map<String, String> bindings) throws Exception {
         JSONObject query = JSON.parseObject(original.toJSONString());
-        JSONObject pagination = JSONObject.of("mode", "snapshot", "result_kind", "data", "page_size", pageSize);
+        String kind = bindings == null ? "data" : "bindings";
+        JSONObject pagination = JSONObject.of("mode", "snapshot", "result_kind", kind, "page_size", pageSize);
         query.put("pagination", pagination);
         List<JSONObject> rows = new ArrayList<>();
         Set<String> identities = new HashSet<>(), cursors = new HashSet<>();
@@ -62,13 +83,13 @@ final class OnnCoreSnapshotReader {
         boolean complete = false;
         try {
             while (true) {
-                JSONObject response = client.queryPage(query, remaining(deadline));
+                JSONObject response = bindings == null ? client.queryPage(query, remaining(deadline)) : client.pipelinePage(query, remaining(deadline));
                 JSONObject meta = response.getJSONObject("pagination");
                 String currentId = meta == null ? null : meta.getString("snapshot_id");
                 if (currentId != null && !currentId.isBlank() && snapshotId == null) snapshotId = currentId;
                 if (meta == null || !Boolean.TRUE.equals(meta.get("total_exact"))
                     || Boolean.TRUE.equals(response.get("truncated"))
-                    || !"materialized".equals(meta.getString("consistency")) || !"data".equals(meta.getString("result_kind"))
+                    || !"materialized".equals(meta.getString("consistency")) || !kind.equals(meta.getString("result_kind"))
                     || !(meta.get("has_more") instanceof Boolean) || meta.get("fallback_reason") != null)
                     throw incomplete("missing exact materialized pagination metadata");
                 long currentTotal = count(meta.get("total"));
@@ -79,7 +100,7 @@ final class OnnCoreSnapshotReader {
                 else if (total != currentTotal || !version.equals(currentVersion) || !Objects.equals(snapshotId, currentId))
                     throw incomplete("snapshot identity, total or data version changed");
                 if (total > maxRows) throw incomplete("row budget exceeded; narrow the query");
-                JSONArray data = response.getJSONArray("data");
+                JSONArray data = response.getJSONArray(kind);
                 if (data == null || data.size() > pageSize || count(meta.get("page_count")) != data.size())
                     throw incomplete("page count does not match data");
                 if (total > 0 && (currentId == null || currentId.isBlank())) throw incomplete("snapshot identity is missing");
@@ -87,10 +108,15 @@ final class OnnCoreSnapshotReader {
                 if (bytes > maxBytes) throw incomplete("byte budget exceeded; narrow the query");
                 for (Object raw : data) {
                     JSONObject row = JSONObject.from(raw);
-                    String id = row.getString("id"), classPath = row.getString("classPath");
-                    if (id == null || classPath == null || !classPath.equals(original.getString("match_class")))
-                        throw incomplete("missing or mismatched object identity");
-                    if (!identities.add(JSON.toJSONString(List.of(classPath, id)))) throw incomplete("duplicate object identity");
+                    String identity;
+                    if (bindings != null) identity = OnnCoreGraphCompiler.bindingIdentity(row, bindings);
+                    else {
+                        String id = row.getString("id"), classPath = row.getString("classPath");
+                        if (id == null || classPath == null || !classPath.equals(original.getString("match_class")))
+                            throw incomplete("missing or mismatched object identity");
+                        identity = JSON.toJSONString(List.of(classPath, id));
+                    }
+                    if (!identities.add(identity)) throw incomplete("duplicate result identity");
                     rows.add(row);
                 }
                 pages++;
