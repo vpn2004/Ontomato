@@ -1,0 +1,139 @@
+package io.ontomato.dataengine.dataAdapter;
+
+import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONArray;
+import com.alibaba.fastjson2.JSONObject;
+import java.net.http.HttpTimeoutException;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Objects;
+import java.util.Set;
+
+/** Reads one complete materialized result or fails; attempts never share accumulated pages. */
+final class OnnCoreSnapshotReader {
+    private final OnnCoreHttpClient client;
+    private final int maxRows;
+    private final long maxBytes;
+    private final Duration timeout;
+    private final int attempts;
+
+    OnnCoreSnapshotReader(OnnCoreHttpClient client) { this(client, 100_000, 32L * 1024 * 1024, Duration.ofSeconds(45), 3); }
+
+    OnnCoreSnapshotReader(OnnCoreHttpClient client, int maxRows, long maxBytes, Duration timeout, int attempts) {
+        if (maxRows < 1 || maxBytes < 1 || timeout.isNegative() || timeout.isZero() || attempts < 1)
+            throw new IllegalArgumentException("Invalid ONN snapshot read budget");
+        this.client = client; this.maxRows = maxRows; this.maxBytes = maxBytes; this.timeout = timeout; this.attempts = attempts;
+    }
+
+    record Result(List<JSONObject> rows, String dataVersion, int pages, int attempts, boolean snapshotReleased) { }
+
+    Result read(JSONObject original, int pageSize) throws Exception {
+        if (original.containsKey("pagination") || original.containsKey("limit") || original.containsKey("offset") || original.containsKey("after"))
+            throw new IllegalArgumentException("ONN snapshot query must not contain a live window or cursor");
+        if (pageSize < 1 || pageSize > 1000) throw new IllegalArgumentException("Invalid ONN snapshot page size");
+        long deadline = System.nanoTime() + timeout.toNanos();
+        for (int attempt = 1; ; attempt++) {
+            try { return readAttempt(original, pageSize, deadline, attempt); }
+            catch (OnnCoreHttpClient.OnnHttpException error) {
+                if (attempt >= attempts || !restartable(error)) throw error;
+                long delay = Math.min(100L * attempt, Math.max(0, remaining(deadline).toMillis()));
+                try { Thread.sleep(delay); }
+                catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw interrupted; }
+            }
+        }
+    }
+
+    private Result readAttempt(JSONObject original, int pageSize, long deadline, int attempt) throws Exception {
+        JSONObject query = JSON.parseObject(original.toJSONString());
+        JSONObject pagination = JSONObject.of("mode", "snapshot", "result_kind", "data", "page_size", pageSize);
+        query.put("pagination", pagination);
+        List<JSONObject> rows = new ArrayList<>();
+        Set<String> identities = new HashSet<>(), cursors = new HashSet<>();
+        String snapshotId = null;
+        String version = null;
+        long total = -1, bytes = 0;
+        int pages = 0;
+        boolean complete = false;
+        try {
+            while (true) {
+                JSONObject response = client.queryPage(query, remaining(deadline));
+                JSONObject meta = response.getJSONObject("pagination");
+                String currentId = meta == null ? null : meta.getString("snapshot_id");
+                if (currentId != null && !currentId.isBlank() && snapshotId == null) snapshotId = currentId;
+                if (meta == null || !Boolean.TRUE.equals(meta.get("total_exact"))
+                    || !"materialized".equals(meta.getString("consistency")) || !"data".equals(meta.getString("result_kind"))
+                    || !(meta.get("has_more") instanceof Boolean) || meta.get("fallback_reason") != null)
+                    throw incomplete("missing exact materialized pagination metadata");
+                long currentTotal = count(meta.get("total"));
+                Object rawVersion = meta.get("data_version");
+                if (!(rawVersion instanceof String currentVersion) || currentVersion.isBlank() || currentVersion.length() > 256)
+                    throw incomplete("data version is missing or invalid");
+                if (pages == 0) { total = currentTotal; version = currentVersion; }
+                else if (total != currentTotal || !version.equals(currentVersion) || !Objects.equals(snapshotId, currentId))
+                    throw incomplete("snapshot identity, total or data version changed");
+                if (total > maxRows) throw incomplete("row budget exceeded; narrow the query");
+                JSONArray data = response.getJSONArray("data");
+                if (data == null || data.size() > pageSize || count(meta.get("page_count")) != data.size())
+                    throw incomplete("page count does not match data");
+                if (total > 0 && (currentId == null || currentId.isBlank())) throw incomplete("snapshot identity is missing");
+                bytes += JSON.toJSONBytes(response).length;
+                if (bytes > maxBytes) throw incomplete("byte budget exceeded; narrow the query");
+                for (Object raw : data) {
+                    JSONObject row = JSONObject.from(raw);
+                    String id = row.getString("id"), classPath = row.getString("classPath");
+                    if (id == null || classPath == null || !classPath.equals(original.getString("match_class")))
+                        throw incomplete("missing or mismatched object identity");
+                    if (!identities.add(JSON.toJSONString(List.of(classPath, id)))) throw incomplete("duplicate object identity");
+                    rows.add(row);
+                }
+                pages++;
+                if (rows.size() > total || rows.size() > maxRows) throw incomplete("rows exceed the exact total or budget");
+                String cursor = meta.getString("next_cursor");
+                if (!meta.getBooleanValue("has_more")) {
+                    if (cursor != null && !cursor.isBlank() || rows.size() != total)
+                        throw incomplete("terminal page has a cursor or omits rows");
+                    complete = true;
+                    break;
+                }
+                if (data.isEmpty() || rows.size() >= total || cursor == null || cursor.isBlank() || !cursors.add(cursor))
+                    throw incomplete("continuation makes no progress or repeats a cursor");
+                pagination.put("after", cursor);
+            }
+        } finally {
+            if (!complete && snapshotId != null) release(snapshotId);
+        }
+        boolean released = snapshotId == null || release(snapshotId);
+        return new Result(List.copyOf(rows), version, pages, attempt, released);
+    }
+
+    private boolean release(String snapshotId) {
+        // Cleanup uses its own small deadline, even when the query budget was exhausted.
+        try { client.closeSnapshot(snapshotId, Duration.ofSeconds(1)); return true; }
+        catch (Exception ignored) { if (ignored instanceof InterruptedException) Thread.currentThread().interrupt(); return false; }
+    }
+
+    private static boolean restartable(OnnCoreHttpClient.OnnHttpException error) {
+        return error.status == 409 && Set.of("SNAPSHOT_BUSY", "SNAPSHOT_STALE", "SNAPSHOT_AUTH_CHANGED").contains(error.code)
+            || error.status == 410 && "CURSOR_EXPIRED".equals(error.code);
+    }
+
+    private static Duration remaining(long deadline) throws HttpTimeoutException {
+        long nanos = deadline - System.nanoTime();
+        if (nanos <= 0) throw new HttpTimeoutException("ONN snapshot exceeded its total query deadline");
+        return Duration.ofNanos(nanos);
+    }
+
+    private static long count(Object raw) {
+        try {
+            long value = new java.math.BigDecimal(raw.toString()).longValueExact();
+            if (value >= 0) return value;
+        } catch (RuntimeException ignored) { }
+        throw incomplete("invalid exact count or data version");
+    }
+
+    private static IllegalStateException incomplete(String reason) {
+        return new IllegalStateException("ONN snapshot is incomplete: " + reason + "; no answer was produced");
+    }
+}

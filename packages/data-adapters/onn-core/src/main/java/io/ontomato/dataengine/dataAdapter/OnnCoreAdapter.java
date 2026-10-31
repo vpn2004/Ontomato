@@ -69,6 +69,8 @@ public final class OnnCoreAdapter implements DataAdapter {
         OnnCoreSchema schema=new OnnCoreSchema(client.schema());
         OnnCoreDslCompiler plan=new OnnCoreDslCompiler(dsls.getJSONObject(0),schema,mapping);
         List<JSONObject> rows=new ArrayList<>();
+        JSONObject evidence=JSONObject.of("backend","onn-core","view","BASE","schemaFingerprint",schema.fingerprint,
+            "evaluation","bounded-count-checked-single-class","source",client.baseUrl(),"snapshotConsistent",false);
         List<String> ids=plan.identitySelection();
         if(ids!=null) {
             for(String id:ids) {
@@ -81,37 +83,66 @@ public final class OnnCoreAdapter implements DataAdapter {
                 }
             }
         } else {
-            long before = classCount(plan.className,generated);
-            if (before > OnnCoreDslCompiler.MAX_ROWS) throw new UnsupportedOperationException(
-                "ONN class exceeds the initial 5000-object read limit; use an exact id filter or a smaller class");
-            JSONObject nativeRead=plan.nativeRead();
-            generated.add("POST /api/v1/query/execute " + JSON.toJSONString(nativeRead));
-            JSONObject response=client.query(nativeRead);
-            JSONArray data=response.getJSONArray("data"); JSONObject metrics=response.getJSONObject("metrics");
-            if(data==null || response.get("matched_count")==null
-                || metrics==null || metrics.get("total")==null) throw new IllegalStateException("ONN query did not provide a consistent data/count response");
-            long matched=count(response.get("matched_count"),"matched count");
-            if(matched!=data.size()) throw new IllegalStateException("ONN query did not provide a consistent data/count response");
-            long total=count(metrics.get("total"),"total count");
-            if(total>OnnCoreDslCompiler.MAX_ROWS || data.size()>OnnCoreDslCompiler.MAX_ROWS)
-                throw new UnsupportedOperationException("ONN class exceeds the initial 5000-object complete-read limit; use an exact id filter or a smaller class");
-            if(total!=data.size()) throw new IllegalStateException("ONN query is incomplete; no answer was produced");
-            Set<String> seen=new HashSet<>();
-            for(Object raw:data) {
-                JSONObject row=schema.flatten(plan.className,JSONObject.from(raw));
-                if(!seen.add(row.getString("id"))) throw new IllegalStateException("ONN returned duplicate instance identities");
-                rows.add(row);
+            generated.add("GET /api/v1/system/capabilities");
+            OnnCoreCapabilities negotiated=OnnCoreCapabilities.discover(client);
+            evidence.put("backendCommit",negotiated.commit());
+            if (negotiated.snapshotReads()) {
+                JSONObject nativeRead=plan.nativeSnapshotRead();
+                generated.add("POST /api/v1/query/execute " + JSON.toJSONString(JSONObject.of(
+                    "match_class",plan.className,"pagination",JSONObject.of("mode","snapshot","result_kind","data","page_size",negotiated.pageSize()))));
+                OnnCoreSnapshotReader.Result snapshot=new OnnCoreSnapshotReader(client).read(nativeRead,negotiated.pageSize());
+                for (JSONObject instance:snapshot.rows()) rows.add(schema.flatten(plan.className,instance));
+                generated.add("GET /api/v1/schema/all");
+                if (!schema.fingerprint.equals(new OnnCoreSchema(client.schema()).fingerprint))
+                    throw new IllegalStateException("ONN schema changed during the snapshot read; re-import schema before retrying");
+                evidence.put("evaluation","snapshot-single-class-local-evaluation");
+                evidence.put("snapshotConsistent",true);
+                evidence.put("consistency","materialized");
+                evidence.put("dataVersion",snapshot.dataVersion());
+                evidence.put("pagesRead",snapshot.pages());
+                evidence.put("readAttempts",snapshot.attempts());
+                evidence.put("snapshotReleased",snapshot.snapshotReleased());
+                evidence.put("totalExact",true);
+                evidence.put("complete",true);
+                evidence.put("queryPushdown",false);
+            } else {
+                rows.addAll(readLegacy(plan,schema,generated));
             }
-            long after = classCount(plan.className,generated);
-            if (before != rows.size() || after != before) throw new IllegalStateException(
-                "ONN class count changed or instances were omitted; no answer was produced");
         }
         JSONObject result=new JSONObject();
         result.put("answer",plan.evaluate(rows)); result.put("mqls",generated);
-        result.put("evidence",Map.of("backend","onn-core","view","BASE","schemaFingerprint",schema.fingerprint,
-            "evaluation","bounded-count-checked-single-class","objectsRead",rows.size(),"source",client.baseUrl(),
-            "snapshotConsistent",false));
+        evidence.put("objectsRead",rows.size());
+        result.put("evidence",evidence);
         return JSON.toJSONString(List.of(result),Feature.WriteMapNullValue);
+    }
+
+    private List<JSONObject> readLegacy(OnnCoreDslCompiler plan,OnnCoreSchema schema,List<String> generated) throws Exception {
+        List<JSONObject> rows=new ArrayList<>();
+        long before = classCount(plan.className,generated);
+        if (before > OnnCoreDslCompiler.MAX_ROWS) throw new UnsupportedOperationException(
+            "ONN class exceeds the initial 5000-object read limit; use an exact id filter or a smaller class");
+        JSONObject nativeRead=plan.nativeRead();
+        generated.add("POST /api/v1/query/execute " + JSON.toJSONString(nativeRead));
+        JSONObject response=client.query(nativeRead);
+        JSONArray data=response.getJSONArray("data"); JSONObject metrics=response.getJSONObject("metrics");
+        if(data==null || response.get("matched_count")==null
+            || metrics==null || metrics.get("total")==null) throw new IllegalStateException("ONN query did not provide a consistent data/count response");
+        long matched=count(response.get("matched_count"),"matched count");
+        if(matched!=data.size()) throw new IllegalStateException("ONN query did not provide a consistent data/count response");
+        long total=count(metrics.get("total"),"total count");
+        if(total>OnnCoreDslCompiler.MAX_ROWS || data.size()>OnnCoreDslCompiler.MAX_ROWS)
+            throw new UnsupportedOperationException("ONN class exceeds the initial 5000-object complete-read limit; use an exact id filter or a smaller class");
+        if(total!=data.size()) throw new IllegalStateException("ONN query is incomplete; no answer was produced");
+        Set<String> seen=new HashSet<>();
+        for(Object raw:data) {
+            JSONObject row=schema.flatten(plan.className,JSONObject.from(raw));
+            if(!seen.add(row.getString("id"))) throw new IllegalStateException("ONN returned duplicate instance identities");
+            rows.add(row);
+        }
+        long after = classCount(plan.className,generated);
+        if (before != rows.size() || after != before) throw new IllegalStateException(
+            "ONN class count changed or instances were omitted; no answer was produced");
+        return rows;
     }
 
     private long classCount(String className,List<String> generated) throws Exception {

@@ -35,6 +35,7 @@ class OnnCoreAdapterTest {
     private static final String SAMPLE = "/api/v1/data/sample";
     private static final String QUERY = "/api/v1/query/execute";
     private static final String INSTANCE = "/api/v1/data/instance";
+    private static final String CAPABILITIES = "/api/v1/system/capabilities";
 
     @Test
     void healthyBoundedClassChecksCountsBeforeAndAfterNativeRead() throws Exception {
@@ -46,7 +47,7 @@ class OnnCoreAdapterTest {
             assertEquals("a", answer.getJSONObject(0).getString("id"));
             assertEquals("Alpha", answer.getJSONObject(0).getString("name"));
             assertEquals("b", answer.getJSONObject(1).getString("id"));
-            assertEquals(List.of("GET " + SCHEMA, "GET " + SAMPLE, "POST " + QUERY, "GET " + SAMPLE), fixture.operations());
+            assertEquals(List.of("GET " + SCHEMA, "GET " + CAPABILITIES, "GET " + SAMPLE, "POST " + QUERY, "GET " + SAMPLE), fixture.operations());
             for (Request sample : fixture.requests(SAMPLE)) {
                 assertEquals(Map.of("class", CLASS, "limit", "1"), parameters(sample.query()));
             }
@@ -58,11 +59,12 @@ class OnnCoreAdapterTest {
             assertEquals("total", nativeQuery.getJSONArray("metrics").getJSONObject(0).getString("name"));
             assertFalse(nativeQuery.containsKey("where"));
             assertFalse(nativeQuery.containsKey("traverse"));
-            assertEquals(4, generated.size());
+            assertEquals(5, generated.size());
             assertEquals("GET " + SCHEMA, generated.get(0));
-            assertEquals("GET " + SAMPLE + "?class=%2Ftest%2Fitem&limit=1", generated.get(1));
-            assertTrue(generated.get(2).startsWith("POST " + QUERY + " "));
-            assertEquals(generated.get(1), generated.get(3));
+            assertEquals("GET " + CAPABILITIES, generated.get(1));
+            assertEquals("GET " + SAMPLE + "?class=%2Ftest%2Fitem&limit=1", generated.get(2));
+            assertTrue(generated.get(3).startsWith("POST " + QUERY + " "));
+            assertEquals(generated.get(2), generated.get(4));
             assertEquals(generated, result.getJSONArray("mqls").toJavaList(String.class));
             JSONObject evidence = result.getJSONObject("evidence");
             assertEquals("onn-core", evidence.getString("backend"));
@@ -142,7 +144,43 @@ class OnnCoreAdapterTest {
         try (Fixture fixture = new Fixture()) {
             fixture.sampleCounts = new long[] {5001};
             assertThrows(UnsupportedOperationException.class, () -> execute(fixture.adapter(), objectQuery(), new ArrayList<>()));
-            assertEquals(List.of("GET " + SCHEMA, "GET " + SAMPLE), fixture.operations());
+            assertEquals(List.of("GET " + SCHEMA, "GET " + CAPABILITIES, "GET " + SAMPLE), fixture.operations());
+        }
+    }
+
+    @Test
+    void negotiatedSnapshotUsesCompleteRowsAndLocalDslSemantics() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.capabilitiesStatus = 200;
+            fixture.capabilitiesResponse = OnnCoreCapabilitiesTest.manifest();
+            fixture.queryResponse = OnnCoreSnapshotReaderTest.page(array(instance("b", "Beta"), instance("a", "Alpha")), 2, null, "snap", 17);
+            List<String> generated = new ArrayList<>();
+            JSONObject result = execute(fixture.adapter(), query(fields(field("id", "id")), predicate("name", "=", "Alpha")), generated);
+            assertEquals(array(JSONObject.of("id", "a")), result.getJSONArray("answer"));
+            assertEquals(0, fixture.requests(SAMPLE).size());
+            assertEquals(2, fixture.requests(SCHEMA).size());
+            JSONObject nativeQuery = JSON.parseObject(fixture.requests(QUERY).get(0).body());
+            assertFalse(nativeQuery.containsKey("where"), "R1/R2 predicates must remain local until their release gate passes");
+            assertFalse(nativeQuery.containsKey("limit"));
+            assertEquals("snapshot", nativeQuery.getJSONObject("pagination").getString("mode"));
+            JSONObject evidence = result.getJSONObject("evidence");
+            assertTrue(evidence.getBooleanValue("snapshotConsistent"));
+            assertTrue(evidence.getBooleanValue("complete"));
+            assertFalse(evidence.getBooleanValue("queryPushdown"));
+            assertEquals("epoch:17", evidence.getString("dataVersion"));
+            assertEquals(2, evidence.getIntValue("objectsRead"));
+            assertEquals("fb81695c", evidence.getString("backendCommit"));
+            assertFalse(result.toJSONString().contains("next_cursor"));
+        }
+    }
+
+    @Test
+    void capabilityAuthorizationFailureDoesNotFallBackToLegacyReads() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.capabilitiesStatus = 403;
+            assertThrows(OnnCoreHttpClient.OnnHttpException.class, () -> execute(fixture.adapter(), objectQuery(), new ArrayList<>()));
+            assertEquals(0, fixture.requests(SAMPLE).size());
+            assertEquals(0, fixture.requests(QUERY).size());
         }
     }
 
@@ -353,6 +391,8 @@ class OnnCoreAdapterTest {
         private volatile JSONObject queryResponse = queryResponse(array(instance("b", "Beta"), instance("a", "Alpha")), 2, 2);
         private volatile JSONObject instanceResponse = instance("a", "Alpha");
         private volatile int instanceStatus = 200;
+        private volatile int capabilitiesStatus = 404;
+        private volatile JSONObject capabilitiesResponse = JSONObject.of("code", "NOT_FOUND");
 
         Fixture() throws IOException {
             server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -374,6 +414,7 @@ class OnnCoreAdapterTest {
             JSONObject response; int status = 200;
             switch (path) {
                 case SCHEMA -> response = schemaResponse;
+                case CAPABILITIES -> { status = capabilitiesStatus; response = capabilitiesResponse; }
                 case SAMPLE -> {
                     long[] counts = sampleCounts;
                     long count = counts[Math.min(sampleReads.getAndIncrement(), counts.length - 1)];

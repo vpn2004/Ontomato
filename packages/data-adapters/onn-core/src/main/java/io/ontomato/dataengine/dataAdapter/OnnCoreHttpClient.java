@@ -59,6 +59,7 @@ final class OnnCoreHttpClient {
     }
 
     JSONObject schema() throws Exception { return request("GET", "/schema/all", null); }
+    JSONObject capabilities() throws Exception { return request("GET", "/system/capabilities", null); }
     JSONObject sample(String className) throws Exception {
         return request("GET", "/data/sample?class=" + encode(className) + "&limit=1", null);
     }
@@ -67,22 +68,38 @@ final class OnnCoreHttpClient {
         catch (OnnHttpException e) { if (e.status == 404) return null; throw e; }
     }
     JSONObject query(JSONObject query) throws Exception { return request("POST", "/query/execute", JSON.toJSONString(query)); }
+    JSONObject queryPage(JSONObject query, Duration remaining) throws Exception {
+        return request("POST", "/query/execute", JSON.toJSONString(query), true, remaining);
+    }
+    JSONObject pipelinePage(JSONObject query, Duration remaining) throws Exception {
+        return request("POST", "/query/pipeline", JSON.toJSONString(query), true, remaining);
+    }
+    void closeSnapshot(String id, Duration remaining) throws Exception {
+        if (id == null || id.isBlank()) return;
+        request("DELETE", "/query/snapshots/" + encode(id), null, false, remaining);
+    }
     static String encode(String value) { return URLEncoder.encode(value, StandardCharsets.UTF_8); }
 
     private JSONObject request(String method, String route, String body) throws Exception {
+        return request(method, route, body, false, timeout);
+    }
+
+    private JSONObject request(String method, String route, String body, boolean paged, Duration remaining) throws Exception {
+        Duration deadline = remaining.compareTo(timeout) < 0 ? remaining : timeout;
+        if (deadline.isNegative() || deadline.isZero()) throw new HttpTimeoutException("ONN query exceeded its response deadline");
         HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(baseUrl() + route))
-            .timeout(timeout).header("Accept", "application/json");
+            .timeout(deadline).header("Accept", "application/json");
         if (gatewayToken != null) {
             builder.header("Authorization", "Bearer " + gatewayToken)
                 .header("X-OMS-Gateway-Token", gatewayToken);
         }
-        if (body == null) builder.GET();
-        else builder.header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofString(body));
+        if (body == null) builder.method(method, HttpRequest.BodyPublishers.noBody());
+        else builder.header("Content-Type", "application/json").method(method, HttpRequest.BodyPublishers.ofString(body));
         // The deadline includes body consumption. An InputStream body handler completes
         // after headers and would allow a stalled response body to block indefinitely.
         CompletableFuture<HttpResponse<byte[]>> pending = CLIENT.sendAsync(builder.build(), info -> new BoundedBodySubscriber(maxBytes));
         HttpResponse<byte[]> response;
-        try { response = pending.get(timeout.toMillis(), TimeUnit.MILLISECONDS); }
+        try { response = pending.get(Math.max(1, deadline.toMillis()), TimeUnit.MILLISECONDS); }
         catch (TimeoutException e) {
             pending.cancel(true);
             throw new HttpTimeoutException("ONN read exceeded its response deadline");
@@ -92,7 +109,8 @@ final class OnnCoreHttpClient {
             throw new IllegalStateException("ONN response failed", e.getCause());
         }
         byte[] bytes = response.body();
-        if (response.statusCode() != 200) throw new OnnHttpException(response.statusCode(), method + " " + route.split("\\?")[0]);
+        if (method.equals("DELETE") && (response.statusCode() == 204 || response.statusCode() == 404)) return new JSONObject();
+        if (response.statusCode() != 200) throw new OnnHttpException(response.statusCode(), operation(method, route), errorCode(bytes));
         JSONObject result;
         try { result = JSON.parseObject(new String(bytes, StandardCharsets.UTF_8)); }
         catch (RuntimeException e) { throw new IllegalStateException("ONN returned an invalid JSON response", e); }
@@ -100,12 +118,26 @@ final class OnnCoreHttpClient {
             || Boolean.FALSE.equals(result.getBoolean("success")) || result.containsKey("error")
             || Boolean.TRUE.equals(result.getBoolean("partial")) || Boolean.TRUE.equals(result.getBoolean("truncated"))
             || Boolean.FALSE.equals(result.getBoolean("complete"))
-            || (route.startsWith("/query/") && Boolean.TRUE.equals(result.getBoolean("has_more")))
+            || (!paged && route.startsWith("/query/") && Boolean.TRUE.equals(result.getBoolean("has_more")))
             || Set.of("failed", "failure", "error", "invalid", "degraded", "partial", "truncated", "timeout", "cancelled", "canceled")
                 .contains(result.getString("status") == null ? "" : result.getString("status").toLowerCase(Locale.ROOT))) {
             throw new IllegalStateException("ONN returned a failed, degraded or incomplete response; no answer was produced");
         }
         return result;
+    }
+
+    private static String operation(String method, String route) {
+        return method + " " + (route.startsWith("/query/snapshots/") ? "/query/snapshots/{id}" : route.split("\\?")[0]);
+    }
+
+    private static String errorCode(byte[] bytes) {
+        try {
+            JSONObject error = JSON.parseObject(new String(bytes, StandardCharsets.UTF_8));
+            String code = error.getString("code");
+            if (code == null && error.get("error") instanceof JSONObject nested) code = nested.getString("code");
+            if (code != null && code.matches("[A-Z][A-Z0-9_]{0,79}")) return code;
+        } catch (RuntimeException ignored) { }
+        return "HTTP_ERROR";
     }
 
     private static final class BoundedBodySubscriber implements HttpResponse.BodySubscriber<byte[]> {
@@ -137,6 +169,10 @@ final class OnnCoreHttpClient {
 
     static final class OnnHttpException extends IllegalStateException {
         final int status;
-        OnnHttpException(int status, String operation) { super("ONN " + operation + " failed (HTTP " + status + ")"); this.status = status; }
+        final String code;
+        OnnHttpException(int status, String operation, String code) {
+            super("ONN " + operation + " failed (HTTP " + status + ", code=" + code + ")");
+            this.status = status; this.code = code;
+        }
     }
 }

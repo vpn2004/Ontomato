@@ -21,6 +21,17 @@ class OnnCoreSchemaTest {
     private static final String CLASS = "/test/item";
 
     @Test
+    void acceptsExplicitNullCollectionsFromGoButRejectsMissingCollectionKeys() {
+        JSONObject noRelations = wire(ontology(CLASS, null, attribute("name", "string")));
+        noRelations.put("relations", null);
+        OnnCoreSchema schema = new OnnCoreSchema(noRelations);
+        assertEquals(1, ((java.util.List<?>) schema.ontology().get("classlist")).size());
+        assertEquals(new OnnCoreSchema(wire(ontology(CLASS, null, attribute("name", "string")))).fingerprint, schema.fingerprint);
+        assertTrue(((java.util.List<?>) new OnnCoreSchema(JSONObject.of("ontologies", null, "relations", null)).ontology().get("classlist")).isEmpty());
+        assertThrows(IllegalArgumentException.class, () -> new OnnCoreSchema(JSONObject.of("ontologies", new JSONArray())));
+    }
+
+    @Test
     void resolvesInheritedAttributesAndChildOverridesWithTheEffectiveType() {
         OnnCoreSchema schema = new OnnCoreSchema(wire(
             ontology("/test/parent", null, attribute("inherited", "string"), attribute("amount", "int")),

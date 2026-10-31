@@ -21,7 +21,11 @@ final class OnnCoreSchema {
 
     OnnCoreSchema(JSONObject wire) {
         JSONArray defs = wire.getJSONArray("ontologies"), relations = wire.getJSONArray("relations");
-        if (defs == null || relations == null) throw new IllegalArgumentException("ONN schema response requires ontologies and relations");
+        if (!wire.containsKey("ontologies") || !wire.containsKey("relations"))
+            throw new IllegalArgumentException("ONN schema response requires ontologies and relations");
+        // Go serializes empty collections as null; absent keys still indicate an incomplete response.
+        if (defs == null) defs = new JSONArray();
+        if (relations == null) relations = new JSONArray();
         for (int i = 0; i < defs.size(); i++) {
             JSONObject def = defs.getJSONObject(i);
             String path = def.getString("path");

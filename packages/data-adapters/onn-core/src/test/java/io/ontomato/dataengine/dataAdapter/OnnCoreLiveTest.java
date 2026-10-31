@@ -19,20 +19,23 @@ class OnnCoreLiveTest {
         String className = System.getenv("ONTOMATO_ONN_LIVE_CLASS");
         assertNotNull(url, "Explicit live tests require ONTOMATO_ONN_LIVE_URL");
         assertNotNull(className, "Explicit live tests require ONTOMATO_ONN_LIVE_CLASS");
-        OnnCoreHttpClient client = new OnnCoreHttpClient(url);
+        String token = System.getenv("ONTOMATO_ONN_LIVE_TOKEN");
+        OnnCoreHttpClient client = new OnnCoreHttpClient(url, token);
         OnnCoreSchema schema = new OnnCoreSchema(client.schema());
         schema.requireClass(className);
         Map<String, Object> mapping = schema.ontology();
+        boolean snapshot = OnnCoreCapabilities.discover(client).snapshotReads();
         JSONObject sample = client.sample(className);
         assertEquals(className, sample.getString("class"));
         long total = sample.getLongValue("total_count");
-        assertTrue(total > 0 && total <= OnnCoreDslCompiler.MAX_ROWS, "Live class must be nonempty and within the explicit read bound");
+        assertTrue(total > 0 && total <= (snapshot ? 100_000 : OnnCoreDslCompiler.MAX_ROWS),
+            "Live class must be nonempty and within the negotiated complete-read budget");
         JSONArray samples = sample.getJSONArray("samples");
         assertNotNull(samples); assertFalse(samples.isEmpty());
         String id = samples.getJSONObject(0).getString("id");
         assertNotNull(id);
 
-        DataAdapterConnection connection = new DataAdapterConnection(); connection.setUrl(url);
+        DataAdapterConnection connection = new DataAdapterConnection(); connection.setUrl(url); connection.setToken(token);
         OnnCoreAdapter adapter = new OnnCoreAdapter(connection, mapping);
         JSONObject exact = execute(adapter, query(className, JSONObject.of("field", "id", "operator", "=", "value", id)));
         assertEquals(id, exact.getJSONArray("answer").getJSONObject(0).getString("id"));
@@ -45,7 +48,12 @@ class OnnCoreLiveTest {
         JSONObject count = execute(adapter, countQuery);
         assertEquals(total, count.getJSONArray("answer").getJSONObject(0).getLongValue("count"));
         assertEquals(total, count.getJSONObject("evidence").getLongValue("objectsRead"));
-        assertFalse(count.getJSONObject("evidence").getBooleanValue("snapshotConsistent"));
+        assertEquals(snapshot, count.getJSONObject("evidence").getBooleanValue("snapshotConsistent"));
+        if (snapshot) {
+            assertTrue(count.getJSONObject("evidence").getBooleanValue("complete"));
+            assertTrue(count.getJSONObject("evidence").getBooleanValue("snapshotReleased"));
+            assertFalse(count.getJSONObject("evidence").getBooleanValue("queryPushdown"));
+        }
         assertFalse(adapter.capabilities().graphRead());
     }
 

@@ -79,6 +79,9 @@ final class OnnCoreDslCompiler {
 
     JSONObject nativeRead() { return JSONObject.of("match_class",className,"limit",MAX_ROWS+1,"metrics",List.of(JSONObject.of("name","total","type","count"))); }
 
+    /** Keep local predicate semantics until the native null/date contracts pass the release gate. */
+    JSONObject nativeSnapshotRead() { return JSONObject.of("match_class", className); }
+
     /** Only a conjunctive virtual-id filter can narrow the fetch without changing OR semantics. */
     List<String> identitySelection() {
         for (JSONObject p:predicates) { List<String> ids=idsInAnd(p); if(ids!=null) return ids; }

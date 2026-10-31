@@ -117,6 +117,36 @@ class OnnCoreHttpClientTest {
         assertTrue(client.sample("/demo/item").getBooleanValue("has_more"));
     }
 
+    @Test void preservesStructuredCodesWithoutLeakingServerBodiesOrCredentials() throws Exception {
+        server.createContext("/api/v1/query/execute", exchange -> {
+            assertEquals("Bearer gateway-secret", exchange.getRequestHeaders().getFirst("Authorization"));
+            assertEquals("gateway-secret", exchange.getRequestHeaders().getFirst("X-OMS-Gateway-Token"));
+            respond(exchange, 409, "{\"code\":\"SNAPSHOT_STALE\",\"error\":\"private-cursor-and-data\"}");
+        });
+        var failure = assertThrows(OnnCoreHttpClient.OnnHttpException.class,
+            () -> new OnnCoreHttpClient(url, "gateway-secret").queryPage(new JSONObject(), Duration.ofSeconds(2)));
+        assertEquals(409, failure.status);
+        assertEquals("SNAPSHOT_STALE", failure.code);
+        assertTrue(failure.getMessage().contains("SNAPSHOT_STALE"));
+        assertFalse(failure.getMessage().contains("private-cursor"));
+        assertFalse(failure.getMessage().contains("gateway-secret"));
+    }
+
+    @Test void pageEndpointsAllowContinuationsAndSnapshotDeleteAcceptsAnEmpty204() throws Exception {
+        List<String> calls = new ArrayList<>();
+        server.createContext("/api/v1/", exchange -> {
+            calls.add(exchange.getRequestMethod() + " " + exchange.getRequestURI().getPath());
+            if (exchange.getRequestMethod().equals("DELETE")) {
+                exchange.sendResponseHeaders(204, -1); exchange.close();
+            } else respond(exchange, 200, "{\"has_more\":true}");
+        });
+        OnnCoreHttpClient client = new OnnCoreHttpClient(url);
+        assertTrue(client.queryPage(new JSONObject(), Duration.ofSeconds(2)).getBooleanValue("has_more"));
+        assertTrue(client.pipelinePage(new JSONObject(), Duration.ofSeconds(2)).getBooleanValue("has_more"));
+        client.closeSnapshot("snapshot-id", Duration.ofSeconds(2));
+        assertEquals(List.of("POST /api/v1/query/execute", "POST /api/v1/query/pipeline", "DELETE /api/v1/query/snapshots/snapshot-id"), calls);
+    }
+
     @Test void refusesOversizedChunkedBodyWithoutAcceptingTruncatedJson() {
         server.createContext("/api/v1/schema/all", exchange -> {
             exchange.sendResponseHeaders(200, 0);
