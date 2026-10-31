@@ -211,7 +211,9 @@ class PromptSchemaMappingTest {
     private void assertMappedPrompts(String role, int count) {
         ArgumentCaptor<String> prompts = ArgumentCaptor.forClass(String.class);
         verify(model, times(count)).chat(eq(role), any(), anyString(), prompts.capture(), any(), eq(DOMAIN));
-        verify(registry, times(count)).create(same(config), same(rule));
+        // Only the cooker needs a separate adapter for time-condition formatting.
+        int adapters = count + (MultiThreadAIChatService.DSL_COOKER.equals(role) ? 1 : 0);
+        verify(registry, times(adapters)).create(same(config), same(rule));
         verify(adapter, times(count)).querySampleDataByClassName(eq(CLASS), eq(List.of("id", "onn_attr_id", "name")));
         for (String prompt : prompts.getAllValues()) {
             assertTrue(prompt.contains("| id | varchar | true |"));

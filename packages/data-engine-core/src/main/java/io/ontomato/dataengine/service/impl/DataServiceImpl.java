@@ -657,8 +657,8 @@ public class DataServiceImpl implements DataService {
 			dsl.put("answer", answer);
 			dsls.add(dsl);
 			DslExecutionResult[] results = HttpRequestUtil.executeDsl(dataRagConfig, dataAdapterRegistry.create(businessConfig, jsonRule), JSON.toJSONString(dsls, Feature.WriteMapNullValue), UUID.randomUUID().toString(), false, jsonRule, vectorResourceDao, permission, DslExecutionMode.OPTIMIZED, domainId);
-			Map<String, Object> dataMap = results[0].rawResponse();
-			Map<String, Object> rowPermissionDataMap = results[1].rawResponse();
+			Map<String, Object> dataMap = successfulQueryResponse(results[0]);
+			Map<String, Object> rowPermissionDataMap = successfulQueryResponse(results[1]);
 			
 			if (dataMap.get("data") != null 
 					&& ((List)dataMap.get("data")).size() > 0 
@@ -685,8 +685,7 @@ public class DataServiceImpl implements DataService {
 			}
 		} catch (Exception e) {
 			log.error(e.getMessage(), e);
-			ret.put("message", langService.get(lang, "Data.query.error"));
-			ret.put("success", false);
+			return failedQueryResponse(e);
 		}
 		
 		return ret;
@@ -827,7 +826,8 @@ public class DataServiceImpl implements DataService {
 	            dsls.add(dsl);
 	            
 	            DslExecutionResult[] results = HttpRequestUtil.executeDsl(dataRagConfig, dataAdapterRegistry.create(businessConfig, jsonRule), JSON.toJSONString(dsls, Feature.WriteMapNullValue), sessionId, true, jsonRule, vectorResourceDao, permission, DslExecutionMode.OPTIMIZED, domainId);
-	            Map<String, Object> rowPermissionDataMap = results[1].rawResponse();
+	            if (results[1].failed()) return failedQueryResponse(results[1].failure().cause());
+			Map<String, Object> rowPermissionDataMap = successfulQueryResponse(results[1]);
 	            JSONArray rows = new JSONArray();
 	            if (rowPermissionDataMap.get("data") != null 
 	            		&& ((List)rowPermissionDataMap.get("data")).size() > 0 
@@ -981,7 +981,7 @@ public class DataServiceImpl implements DataService {
         
         BusinessConfig businessConfig = businessConfigService.get(domainId);
 		DslExecutionResult[] results = HttpRequestUtil.executeDsl(dataRagConfig, dataAdapterRegistry.create(businessConfig, jsonRule), JSON.toJSONString(dsls, Feature.WriteMapNullValue), sessionId, true, jsonRule, vectorResourceDao, permission, DslExecutionMode.OPTIMIZED, domainId);
-		Map<String, Object> rowPermissionDataMap = results[1].rawResponse();
+		Map<String, Object> rowPermissionDataMap = successfulQueryResponse(results[1]);
         if (rowPermissionDataMap.get("data") != null 
         		&& ((List)rowPermissionDataMap.get("data")).size() > 0 
         		&& ((Map)((List)rowPermissionDataMap.get("data")).get(0)).get("answer") != null
@@ -1113,7 +1113,8 @@ public class DataServiceImpl implements DataService {
             dsls.add(dsl);
             
 			DslExecutionResult[] results = HttpRequestUtil.executeDsl(dataRagConfig, dataAdapterRegistry.create(businessConfig, jsonRule), JSON.toJSONString(dsls, Feature.WriteMapNullValue), sessionId, true, jsonRule, vectorResourceDao, permission, DslExecutionMode.OPTIMIZED, domainId);
-			Map<String, Object> rowPermissionDataMap = results[1].rawResponse();
+			if (results[1].failed()) return failedQueryResponse(results[1].failure().cause());
+			Map<String, Object> rowPermissionDataMap = successfulQueryResponse(results[1]);
             JSONArray rows = new JSONArray();
             if (rowPermissionDataMap.get("data") != null 
             		&& ((List)rowPermissionDataMap.get("data")).size() > 0 
@@ -1219,7 +1220,7 @@ public class DataServiceImpl implements DataService {
 			        
 			        BusinessConfig businessConfig = businessConfigService.get(domainId);
 			        DslExecutionResult[] results = HttpRequestUtil.executeDsl(dataRagConfig, dataAdapterRegistry.create(businessConfig, jsonRule), JSON.toJSONString(dsls, Feature.WriteMapNullValue), sessionId, true, jsonRule, vectorResourceDao, permission, DslExecutionMode.OPTIMIZED, domainId);
-			        Map<String, Object> rowPermissionDataMap = results[1].rawResponse();
+			        Map<String, Object> rowPermissionDataMap = successfulQueryResponse(results[1]);
 			        if (rowPermissionDataMap.get("data") != null 
 			        		&& ((List)rowPermissionDataMap.get("data")).size() > 0 
 			        		&& ((Map)((List)rowPermissionDataMap.get("data")).get(0)).get("answer") != null

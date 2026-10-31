@@ -133,7 +133,9 @@ public class SandboxServiceImpl implements SandboxService {
 	/** The domain's adapter with its ontomap: writing an edge needs the relationship definitions. */
 	private DataAdapter getDataAdapter(String domainId) {
 		BusinessConfig businessConfig = businessConfigService.get(domainId);
-		return dataAdapterRegistry.create(businessConfig, jsonRuleDao.query(domainId));
+		DataAdapter adapter = dataAdapterRegistry.create(businessConfig, jsonRuleDao.query(domainId));
+		adapter.capabilities().requireSandbox();
+		return adapter;
 	}
 
 }

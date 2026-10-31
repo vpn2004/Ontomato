@@ -105,6 +105,7 @@ class ReadOnlyAdapterWriteBoundariesTest {
         ReflectionTestUtils.setField(sandbox, "businessConfigService", configs);
         ReflectionTestUtils.setField(sandbox, "dataAdapterRegistry", registry);
         ReflectionTestUtils.setField(sandbox, "vectorResourceDao", vectors);
+        ReflectionTestUtils.setField(sandbox, "jsonRuleDao", rules);
         Map<String, Object> classDef = Map.of("className", "Asset", "attrs", List.of(Map.of("name", "files", "type", "vector")));
 
         assertThrows(UnsupportedOperationException.class, () -> sandbox.createNamespace("sandbox1", "d1"));
