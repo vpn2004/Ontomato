@@ -16,6 +16,9 @@ final class OnnCoreGraphCompiler {
     private final Map<Column, String> columns = new LinkedHashMap<>();
     private final OnnCoreDslCompiler residual;
     private final JSONObject pipeline;
+    private final boolean extended;
+    private boolean exactFilters = true;
+    private final OnnCoreAggregatePlan aggregatePlan;
 
     static boolean isGraph(JSONObject dsl) {
         JSONObject answer = dsl.getJSONObject("answer");
@@ -31,7 +34,11 @@ final class OnnCoreGraphCompiler {
     }
 
     OnnCoreGraphCompiler(JSONObject original, OnnCoreSchema schema, Map<String, Object> mapping) {
+        this(original, schema, mapping, false);
+    }
+    OnnCoreGraphCompiler(JSONObject original, OnnCoreSchema schema, Map<String, Object> mapping, boolean extended) {
         this.schema = schema;
+        this.extended = extended;
         JSONObject lowered = JSON.parseObject(JSON.toJSONString(original, com.alibaba.fastjson2.JSONWriter.Feature.WriteMapNullValue));
         JSONObject step = lowered.getJSONObject("answer").getJSONArray("steps").getJSONObject(0);
         JSONObject pattern = step.getJSONObject("graph").getJSONArray("patterns").getJSONObject(0);
@@ -89,6 +96,8 @@ final class OnnCoreGraphCompiler {
             if (!progress) fail("disconnected or cyclic relationship pattern");
         }
         pipeline = JSONObject.of("steps", steps);
+        if (pattern.getJSONObject("conditions") != null && !pattern.getJSONObject("conditions").isEmpty()) exactFilters = false;
+        aggregatePlan = extended && exactFilters ? OnnCoreAggregatePlan.compile(original, schema, classes) : null;
 
         // Qualify every field into a collision-free logical binding column. All final filtering,
         // aggregates (including path multiplicity), grouping, sorting and windows remain local.
@@ -131,7 +140,9 @@ final class OnnCoreGraphCompiler {
         JSONObject query = JSONObject.of("answer", JSONObject.of("steps", JSONArray.of(JSONObject.of(
             "graph", JSONObject.of("patterns", JSONArray.of(JSONObject.of("objects", JSONArray.of(object)))),
             "output", JSONObject.of("fields", JSONArray.of(JSONObject.of("variable", object.getString("variable"), "field", "id", "as", "id")))))));
-        JSONObject nativeQuery = new OnnCoreDslCompiler(query, schema, mapping).nativeSnapshotRead();
+        OnnCoreDslCompiler compiler = new OnnCoreDslCompiler(query, schema, mapping);
+        exactFilters &= compiler.exactPredicates();
+        JSONObject nativeQuery = compiler.nativeSnapshotRead(extended);
         nativeQuery.remove("output"); // Bindings hydrate complete objects; no user window is pushed ahead of residuals.
         return nativeQuery;
     }
@@ -154,6 +165,23 @@ final class OnnCoreGraphCompiler {
     }
 
     JSONObject nativePipeline() { return JSON.parseObject(pipeline.toJSONString()); }
+    JSONObject projectedPipeline() {
+        JSONObject query = nativePipeline();
+        Map<String, Set<String>> projection = new LinkedHashMap<>();
+        for (String variable : classes.keySet()) projection.put(variable, new TreeSet<>());
+        for (Column column : columns.keySet()) {
+            String source = schema.sourceField(classes.get(column.variable), column.field);
+            if ("id".equals(source)) return query;
+            if (source != null) projection.get(column.variable).add(source);
+        }
+        query.put("binding_output", projection);
+        return query;
+    }
+    boolean nativeAggregate() { return aggregatePlan != null; }
+    JSONObject aggregatePipeline() {
+        JSONObject query = nativePipeline(); query.put("return", aggregatePlan.returns); return query;
+    }
+    JSONArray evaluateAggregate(OnnCoreSnapshotReader.Result result) { return aggregatePlan.evaluate(result); }
     Map<String, String> bindings() { return Collections.unmodifiableMap(classes); }
 
     JSONArray evaluate(List<JSONObject> bindings) {

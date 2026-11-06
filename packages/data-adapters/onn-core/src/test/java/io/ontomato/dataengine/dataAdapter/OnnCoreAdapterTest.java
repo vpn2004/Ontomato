@@ -224,11 +224,11 @@ class OnnCoreAdapterTest {
             JSONObject result = execute(adapter, query(fields(field("id", "id"), field("name", "name")), predicate("id", "=", id)), generated);
             assertEquals(id, result.getJSONArray("answer").getJSONObject(0).getString("id"));
             assertEquals("Exact object", result.getJSONArray("answer").getJSONObject(0).getString("name"));
-            assertEquals(List.of("GET " + SCHEMA, "GET " + INSTANCE), fixture.operations());
+            assertEquals(List.of("GET " + SCHEMA, "GET " + INSTANCE, "GET " + SCHEMA), fixture.operations());
             Request request = fixture.requests(INSTANCE).get(0);
             assertEquals(Map.of("class_path", CLASS, "id", id), parameters(request.query()));
             assertTrue(request.query().contains("asset%3Azone%3A42"));
-            assertEquals(2, generated.size());
+            assertEquals(3, generated.size());
             assertEquals("GET " + SCHEMA, generated.get(0));
             assertTrue(generated.get(1).startsWith("GET " + INSTANCE + "?"));
             String nodeReference = adapter.encodeNodeReference(CLASS, id);
@@ -244,7 +244,7 @@ class OnnCoreAdapterTest {
             JSONObject count = field("id", "count"); count.put("function", "count");
             JSONObject result = execute(fixture.adapter(), query(fields(count), predicate("id", "=", "absent:42")), new ArrayList<>());
             assertEquals(0L, result.getJSONArray("answer").getJSONObject(0).getLongValue("count"));
-            assertEquals(List.of("GET " + SCHEMA, "GET " + INSTANCE), fixture.operations());
+            assertEquals(List.of("GET " + SCHEMA, "GET " + INSTANCE, "GET " + SCHEMA), fixture.operations());
             assertEquals(0, fixture.requests(QUERY).size());
             assertEquals(0, fixture.requests(SAMPLE).size());
         }

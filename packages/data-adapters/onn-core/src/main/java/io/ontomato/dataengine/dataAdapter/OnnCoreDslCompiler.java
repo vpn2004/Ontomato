@@ -79,10 +79,13 @@ final class OnnCoreDslCompiler {
     JSONObject nativeRead() { return JSONObject.of("match_class",className,"limit",MAX_ROWS+1,"metrics",List.of(JSONObject.of("name","total","type","count"))); }
 
     JSONObject nativeSnapshotRead() {
+        return nativeSnapshotRead(false);
+    }
+    JSONObject nativeSnapshotRead(boolean extended) {
         JSONObject query = JSONObject.of("match_class", className);
         List<JSONObject> children = new ArrayList<>();
         for (JSONObject predicate : predicates) {
-            JSONObject pushed = nativePredicate(predicate);
+            JSONObject pushed = nativePredicate(predicate, extended);
             if (pushed != null) children.add(pushed);
         }
         if (!children.isEmpty()) query.put("where_logic", JSONObject.of("op", "and", "children", children));
@@ -100,11 +103,14 @@ final class OnnCoreDslCompiler {
 
     /** No predicate or aggregate is discarded when a native operation is unavailable. */
     private JSONObject nativePredicate(JSONObject predicate) {
+        return nativePredicate(predicate, false);
+    }
+    private JSONObject nativePredicate(JSONObject predicate, boolean extended) {
         if ("logic".equals(predicate.getString("operator"))) {
             boolean and = predicate.containsKey("and");
             List<JSONObject> children = new ArrayList<>();
             for (Object raw : predicate.getJSONArray(and ? "and" : "or")) {
-                JSONObject child = nativePredicate(JSONObject.from(raw));
+                JSONObject child = nativePredicate(JSONObject.from(raw), extended);
                 // An unconstrained OR branch makes the entire native OR unconstrained.
                 if (child == null && !and) return null;
                 if (child != null) children.add(child);
@@ -113,6 +119,7 @@ final class OnnCoreDslCompiler {
         }
         String field = predicate.getString("field"), source = schema.sourceField(className, field);
         String type = schema.dataType(className, field), op = predicate.getString("operator");
+        if (extended && source != null && !source.equals("id")) return extendedPredicate(predicate, source, type);
         if (source == null || source.equals("id") || !Set.of("string", "boolean").contains(type)) return null;
         Object value = predicate.get("value");
         if (!Set.of("=", "in").contains(op)) return null;
@@ -123,13 +130,96 @@ final class OnnCoreDslCompiler {
             "attribute", source, "operator", op.equals("=") ? "eq" : "in", "value", value)));
     }
 
+    boolean exactPredicates() { return predicates.stream().allMatch(this::exactPredicate); }
+    private boolean exactPredicate(JSONObject predicate) {
+        if ("logic".equals(predicate.getString("operator")))
+            return predicate.getJSONArray(predicate.containsKey("and") ? "and" : "or").stream()
+                .map(JSONObject::from).allMatch(this::exactPredicate);
+        String field = predicate.getString("field"), type = schema.dataType(className, field);
+        String source = schema.sourceField(className, field), op = predicate.getString("operator");
+        if (source == null || "id".equals(source) || extendedPredicate(predicate, source, type) == null) return false;
+        if (Set.of("int", "float").contains(type) && predicate.get("value") != null) return false;
+        if ("string".equals(type) && !Set.of("is", "is not").contains(op)) {
+            Object value = predicate.get("value");
+            List<?> values = value instanceof List<?> list ? list : Collections.singletonList(value);
+            // ONN treats date-looking text as an instant even on string fields.
+            if (values.stream().anyMatch(v -> v instanceof String s && s.matches("\\d{4}-\\d{2}-\\d{2}.*"))) return false;
+        }
+        return true;
+    }
+    private JSONObject extendedPredicate(JSONObject predicate, String source, String type) {
+        String op = predicate.getString("operator"); Object value = predicate.get("value");
+        if (op.equals("is") || op.equals("is not")) return condition(source, op.equals("is") ? "eq" : "neq", null);
+        // SQL comparison with a null literal is UNKNOWN, including under OR.
+        if (value == null) return and(condition(source, "eq", null), condition(source, "neq", null));
+        if (op.equals("between")) {
+            List<?> bounds = (List<?>) value;
+            JSONObject lower = new JSONObject(predicate), upper = new JSONObject(predicate);
+            lower.put("operator", ">="); lower.put("value", bounds.get(0));
+            upper.put("operator", "<="); upper.put("value", bounds.get(1));
+            JSONObject a = extendedPredicate(lower, source, type), b = extendedPredicate(upper, source, type);
+            return a == null || b == null ? null : and(a, b);
+        }
+        if (op.equals("in")) {
+            List<?> values = ((List<?>) value).stream().filter(Objects::nonNull).toList();
+            if (values.isEmpty()) return and(condition(source,"eq",null),condition(source,"neq",null));
+            if (type.equals("datetime")) {
+                List<JSONObject> children = new ArrayList<>();
+                for (Object v : values) children.add(condition(source, "eq", temporal(fieldName(predicate), v)));
+                return JSONObject.of("op", "or", "children", children);
+            }
+            if (!Set.of("string", "boolean").contains(type)
+                || values.stream().anyMatch(v -> type.equals("string") ? !(v instanceof String) : !(v instanceof Boolean))) return null;
+            return condition(source, "in", values);
+        }
+        if (type.equals("datetime") && Set.of("=", "!=", "<>", ">", ">=", "<", "<=").contains(op))
+            value = temporal(fieldName(predicate), value);
+        else if (Set.of("int", "float").contains(type)) {
+            if (!(value instanceof Number) || !Set.of(">", ">=", "<", "<=").contains(op)) return null;
+            double bound = ((Number) value).doubleValue();
+            if (!Double.isFinite(bound)) return null;
+            // ONN range comparisons use doubles. Widen by one ULP, then retain the exact residual.
+            double widened = op.startsWith(">") ? Math.nextDown(bound) : Math.nextUp(bound);
+            if (!Double.isFinite(widened)) return null;
+            return condition(source, op.startsWith(">") ? "gte" : "lte", widened);
+        } else if (!Set.of("string", "boolean").contains(type) || !Set.of("=", "!=", "<>").contains(op)
+            || (type.equals("string") ? !(value instanceof String) : !(value instanceof Boolean))) return null;
+        String nativeOp = switch (op) {
+            case "=" -> "eq"; case "!=", "<>" -> "neq"; case ">" -> "gt"; case ">=" -> "gte";
+            case "<" -> "lt"; case "<=" -> "lte"; default -> null;
+        };
+        if (nativeOp == null) return null;
+        JSONObject comparison = condition(source, nativeOp, value);
+        if (nativeOp.equals("neq")) {
+            if (type.equals("string") && value instanceof String s && s.matches("\\d{4}-\\d{2}-\\d{2}.*")) return null;
+            return and(condition(source, "neq", null), comparison);
+        }
+        return comparison;
+    }
+    private static String fieldName(JSONObject predicate) { return predicate.getString("field"); }
+    private Object temporal(String field, Object value) { return schema.temporalValue(className, field, value).toString(); }
+    private static JSONObject condition(String source, String op, Object value) {
+        return JSONObject.of("op", "and", "conditions", List.of(JSONObject.of("attribute", source, "operator", op, "value", value)));
+    }
+    private static JSONObject and(JSONObject a, JSONObject b) { return JSONObject.of("op", "and", "children", List.of(a, b)); }
+
+    boolean nativeMetricsCount() {
+        return aggregate && groups.isEmpty() && having.isEmpty() && sort.isEmpty() && exactPredicates()
+            && fields.stream().map(JSONObject::from).allMatch(f -> "count".equals(f.getString("function")) && "id".equals(f.getString("field")));
+    }
+    JSONObject nativeCountRead() {
+        JSONObject query = nativeSnapshotRead(true); query.remove("output");
+        query.put("metrics", List.of(JSONObject.of("name", "total", "type", "count")));
+        return query;
+    }
+
     boolean nativeIdentityCount() {
         return aggregate && predicates.isEmpty() && groups.isEmpty() && having.isEmpty() && sort.isEmpty()
             && fields.stream().map(JSONObject::from).allMatch(f -> "count".equals(f.getString("function")) && "id".equals(f.getString("field")));
     }
 
     JSONArray evaluateIdentityCount(long total) {
-        if (!nativeIdentityCount()) throw new IllegalStateException("Native count requires an unfiltered identity aggregate");
+        if (!nativeIdentityCount() && !nativeMetricsCount()) throw new IllegalStateException("Native count requires an exact identity aggregate");
         JSONArray result = new JSONArray();
         if (count > 0 && offset == 0) {
             JSONObject row = new JSONObject();

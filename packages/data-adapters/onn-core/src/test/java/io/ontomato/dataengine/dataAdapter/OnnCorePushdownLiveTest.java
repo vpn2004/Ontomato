@@ -20,12 +20,18 @@ class OnnCorePushdownLiveTest {
         String url = System.getenv("ONTOMATO_ONN_LIVE_URL"), token = System.getenv("ONTOMATO_ONN_LIVE_TOKEN");
         assertNotNull(url);
         OnnCoreHttpClient client = new OnnCoreHttpClient(url, token);
+        ConditionalObjectWrites.Principal principal = null;
+        if (System.getenv("ONTOMATO_ONN_LIVE_SUBJECT") != null) {
+            principal = new ConditionalObjectWrites.Principal(System.getenv("ONTOMATO_ONN_LIVE_SUBJECT"), List.of("admin"));
+            client = client.asPrincipal(principal);
+        }
         OnnCoreSchema schema = new OnnCoreSchema(client.schema());
+        boolean t30 = OnnCoreCapabilities.discover(client).pushdown();
         var all = new OnnCoreSnapshotReader(client).read(JSONObject.of("match_class", CLASS), 500);
         assertEquals(6001, all.total());
         var rows = all.rows().stream().map(r -> schema.flatten(CLASS, r)).toList();
         DataAdapterConnection connection = new DataAdapterConnection(); connection.setUrl(url); connection.setToken(token);
-        OnnCoreAdapter adapter = new OnnCoreAdapter(connection, schema.ontology());
+        OnnCoreAdapter adapter = new OnnCoreAdapter(connection, schema.ontology(), principal);
         JSONObject text = predicate("name", "=", "Item 42");
         JSONObject date = predicate("when", "=", "2026-01-15T10:30:00Z");
         List<JSONObject> predicates = Arrays.asList(text,
@@ -40,7 +46,7 @@ class OnnCorePushdownLiveTest {
             JSONObject dsl = query(List.of(field("id", "id"), field("name", "name")), predicate);
             JSONObject result = compare(adapter, schema, rows, dsl);
             boolean pushed = result.getJSONObject("evidence").getBooleanValue("filterPushdown");
-            assertEquals(checked < 5, pushed, predicate.toString());
+            assertEquals(t30 || checked < 5, pushed, predicate.toString());
             if (checked == 0) assertEquals(1, result.getJSONObject("evidence").getIntValue("objectsRead"));
             checked++;
         }
@@ -57,13 +63,13 @@ class OnnCorePushdownLiveTest {
         JSONObject count = field("id", "total"); count.put("function", "count");
         JSONObject countQuery = query(List.of(count), null);
         JSONObject nativeCount = compare(adapter, schema, rows, countQuery); checked++;
-        assertEquals(1, nativeCount.getJSONObject("evidence").getIntValue("objectsRead"));
+        assertEquals(t30 ? 0 : 1, nativeCount.getJSONObject("evidence").getIntValue("objectsRead"));
         assertTrue(nativeCount.getJSONObject("evidence").getBooleanValue("aggregatePushdown"));
         assertTrue(nativeCount.getJSONObject("evidence").getBooleanValue("snapshotReleased"));
         output(countQuery).put("limit", JSONObject.of("count", 1, "offset", 1));
         compare(adapter, schema, rows, countQuery); checked++;
         System.out.println("ONN_NATIVE_ACCEPTANCE cases=" + checked + " objects=" + rows.size()
-            + " countObjectsDownloaded=1 equalityObjectsDownloaded=1");
+            + " countObjectsDownloaded=" + (t30 ? 0 : 1) + " equalityObjectsDownloaded=1");
     }
 
     private JSONObject compare(OnnCoreAdapter adapter, OnnCoreSchema schema, List<JSONObject> rows, JSONObject dsl) throws Exception {

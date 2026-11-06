@@ -6,7 +6,11 @@ import java.util.HashMap;
 import java.util.Map;
 
 /** Negotiates only explicitly enabled, understood contracts; it never grants write access. */
-record OnnCoreCapabilities(String commit, boolean snapshotReads, int pageSize, boolean bindingReads) {
+record OnnCoreCapabilities(String commit, boolean snapshotReads, int pageSize, boolean bindingReads,
+        boolean pushdown, boolean inlinePages, boolean returnReads, String buildIdentity) {
+    OnnCoreCapabilities(String commit, boolean snapshotReads, int pageSize, boolean bindingReads) {
+        this(commit, snapshotReads, pageSize, bindingReads, false, false, false, commit);
+    }
     static OnnCoreCapabilities discover(OnnCoreHttpClient client) throws Exception {
         try { return parse(client.capabilities()); }
         catch (OnnCoreHttpClient.OnnHttpException error) {
@@ -43,7 +47,17 @@ record OnnCoreCapabilities(String commit, boolean snapshotReads, int pageSize, b
         boolean bindings = contains(pagination, "result_kinds", "bindings")
             && enabled(byId.get("pipeline"), "v1") && enabled(byId.get("graph_query"), "v1")
             && enabled(byId.get("graph_binding_aggregate"), "v1");
-        return new OnnCoreCapabilities(commit, true, Math.min(500, max), bindings);
+        JSONObject push = byId.get("query_pushdown");
+        JSONObject contract = push == null ? null : push.getJSONObject("query_pushdown");
+        boolean pushdown = enabled(push, "v1") && contract != null && "v1".equals(contract.getString("contract_version"))
+            && "absolute_instant".equals(contract.getString("datetime_comparison"))
+            && "null_or_missing".equals(contract.getString("null_equality"))
+            && "single_class_identity_count_without_attribute_or_expr".equals(contract.getString("metrics_only_scope"))
+            && contains(contract, "metrics_only_operators", "count");
+        String build = commit + ":" + wire.getString("build_time") + ":" + OnnCoreSchema.digest(wire.toJSONString());
+        return new OnnCoreCapabilities(commit, true, Math.min(500, max), bindings, pushdown,
+            pushdown && Boolean.TRUE.equals(contract.get("single_page_elision")),
+            pushdown && bindings && contains(pagination, "result_kinds", "return"), build);
     }
 
     private static boolean contains(JSONObject object, String key, String value) {

@@ -80,6 +80,26 @@ final class OnnCoreHttpClient {
     }
 
     JSONObject schema() throws Exception { return request("GET", "/schema/all", null); }
+    record SchemaResponse(JSONObject body, String etag, boolean notModified) { }
+    SchemaResponse schema(String etag) throws Exception {
+        var response = exchange("GET", "/schema/all", null, timeout,
+            etag == null ? Map.of() : Map.of("If-None-Match", etag));
+        if (response.statusCode() == 304) {
+            if (etag == null || response.body().length != 0
+                || response.headers().firstValue("ETag").filter(tag -> !tag.equals(etag)).isPresent())
+                throw new IllegalStateException("ONN returned an unsolicited or nonempty schema 304");
+            return new SchemaResponse(null, etag, true);
+        }
+        JSONObject body = decode(response, "GET", "/schema/all", false);
+        String tag = response.headers().firstValue("ETag").orElse(null);
+        if (tag != null && (!tag.matches("\"[a-zA-Z0-9._-]{1,256}\"")))
+            throw new IllegalStateException("ONN returned an invalid strong schema ETag");
+        return new SchemaResponse(body, tag, false);
+    }
+    String cacheScope() {
+        return OnnCoreSchema.digest(JSON.toJSONString(java.util.Arrays.asList(baseUrl(), gatewayToken,
+            new java.util.TreeMap<>(principalHeaders)), com.alibaba.fastjson2.JSONWriter.Feature.WriteMapNullValue));
+    }
     JSONObject capabilities() throws Exception { return request("GET", "/system/capabilities", null); }
     JSONObject sample(String className) throws Exception {
         return request("GET", "/data/sample?class=" + encode(className) + "&limit=1", null);
@@ -94,6 +114,10 @@ final class OnnCoreHttpClient {
     }
     JSONObject pipelinePage(JSONObject query, Duration remaining) throws Exception {
         return request("POST", "/query/pipeline", JSON.toJSONString(query), true, remaining);
+    }
+    JSONObject page(JSONObject query, Duration remaining, boolean pipeline, boolean profile) throws Exception {
+        return request("POST", (pipeline ? "/query/pipeline" : "/query/execute") + (profile ? "?profile=1" : ""),
+            JSON.toJSONString(query, com.alibaba.fastjson2.JSONWriter.Feature.WriteMapNullValue), true, remaining);
     }
     void closeSnapshot(String id, Duration remaining) throws Exception {
         if (id == null || id.isBlank()) return;
@@ -110,6 +134,10 @@ final class OnnCoreHttpClient {
     }
 
     private JSONObject request(String method, String route, String body, boolean paged, Duration remaining, Map<String, String> headers) throws Exception {
+        return decode(exchange(method, route, body, remaining, headers), method, route, paged);
+    }
+
+    private HttpResponse<byte[]> exchange(String method, String route, String body, Duration remaining, Map<String, String> headers) throws Exception {
         Duration deadline = remaining.compareTo(timeout) < 0 ? remaining : timeout;
         if (deadline.isNegative() || deadline.isZero()) throw new HttpTimeoutException("ONN query exceeded its response deadline");
         HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(baseUrl() + route))
@@ -135,6 +163,10 @@ final class OnnCoreHttpClient {
             if (e.getCause() instanceof Exception cause) throw cause;
             throw new IllegalStateException("ONN response failed", e.getCause());
         }
+        return response;
+    }
+
+    private JSONObject decode(HttpResponse<byte[]> response, String method, String route, boolean paged) {
         byte[] bytes = response.body();
         if (method.equals("DELETE") && (response.statusCode() == 204 || response.statusCode() == 404)) return new JSONObject();
         if (response.statusCode() != 200) throw new OnnHttpException(response.statusCode(), operation(method, route), errorCode(bytes));
@@ -146,7 +178,7 @@ final class OnnCoreHttpClient {
             || Boolean.TRUE.equals(result.getBoolean("partial")) || Boolean.TRUE.equals(result.getBoolean("truncated"))
             || Boolean.FALSE.equals(result.getBoolean("complete"))
             || (!paged && route.startsWith("/query/") && Boolean.TRUE.equals(result.getBoolean("has_more")))
-            || Set.of("failed", "failure", "error", "invalid", "degraded", "partial", "truncated", "timeout", "cancelled", "canceled")
+            || Set.of("failed", "failure", "error", "invalid", "unknown", "incomplete", "degraded", "partial", "truncated", "timeout", "cancelled", "canceled")
                 .contains(result.getString("status") == null ? "" : result.getString("status").toLowerCase(Locale.ROOT))) {
             throw new IllegalStateException("ONN returned a failed, degraded or incomplete response; no answer was produced");
         }

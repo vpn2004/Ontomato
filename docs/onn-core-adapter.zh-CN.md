@@ -1,5 +1,7 @@
 # ONN Core 首期适配器使用说明
 
+> 本文保留首期交付记录。2026-11-06 的 T30 响应兼容、缓存、计数、过滤、图投影与聚合接入及当前边界，见 [T30 接入与验收](onn-core-adapter-t30.zh-CN.md)。
+
 本次改造在 Ontomato 中新增独立 `onn-core` HTTP adapter，使用 `sql=false`、`useM3=false`。它已装配到 Java 应用，提供源模型预览、显式导入和受限单类只读查询。没有迁移业务数据，也没有部署改造后的完整应用。
 
 ONN 保存已有业务对象、属性和关系；Ontomato 的本体投影、展示说明、连接配置、用户与权限管理、对话、任务、执行证据和附件索引继续使用现有 PostgreSQL。首期不删除 PostgreSQL，不使用 ONN Edit/Action 替代平台服务。
