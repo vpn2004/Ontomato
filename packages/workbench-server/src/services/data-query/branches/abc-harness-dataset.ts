@@ -51,5 +51,6 @@ export function buildDataset(
     subQuestion: question,
     fieldDisplayPlan,
     ...content.truncation,
+    sourceWindows: content.sourceWindows,
   };
 }

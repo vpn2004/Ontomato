@@ -1,3 +1,4 @@
+import type { ResultSourceWindows } from "@ontomato/contracts/result-window";
 import { randomUUID } from "node:crypto";
 import type { AbcProgramDashboard } from "@ontomato/contracts/dashboard";
 import type { QueryDatasetIdentity, ResultTruncation } from "@ontomato/contracts/query-execution";
@@ -22,7 +23,7 @@ export type FieldDisplayPlanItem = {
 export type FieldDisplayPlan = Record<string, FieldDisplayPlanItem>;
 
 /** A result dataset; a partial one carries the data engine's truncation marker unchanged. */
-export interface Dataset extends QueryDatasetIdentity, Partial<ResultTruncation> {
+export interface Dataset extends QueryDatasetIdentity, Partial<ResultTruncation>, ResultSourceWindows {
   name: string;
   description: string;
   columns: string[];
@@ -829,7 +830,7 @@ export function extractAnswerFromData(data: unknown): string {
 }
 
 export function convertChunkToDataset(
-  chunk: { data: Record<string, unknown>[]; dsl?: unknown; truncation?: ResultTruncation },
+  chunk: { data: Record<string, unknown>[]; dsl?: unknown; truncation?: ResultTruncation } & ResultSourceWindows,
   index: number,
   locale?: string
 ): Dataset {
@@ -849,5 +850,6 @@ export function convertChunkToDataset(
     data: chunk.data,
     dsl: chunk.dsl,
     ...chunk.truncation,
+    sourceWindows: chunk.sourceWindows,
   };
 }

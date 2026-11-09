@@ -1,3 +1,4 @@
+import type { ResultSourceWindows } from "@ontomato/contracts/result-window";
 import type {
   QueryFactDatasetPreview as QueryResultDatasetPreview,
   ResultTruncation,
@@ -13,7 +14,7 @@ import type { QueryExecutionFact } from "../../data-query/query-fact";
 /**
  * Evidence layer data structure - normalized query results for charts and reports
  */
-export interface AnalysisEvidence extends Partial<ResultTruncation> {
+export interface AnalysisEvidence extends Partial<ResultTruncation>, ResultSourceWindows {
   /** Sub-question ID */
   questionId: string;
   /** Sub-question text */

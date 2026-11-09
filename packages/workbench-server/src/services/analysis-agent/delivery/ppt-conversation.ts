@@ -31,7 +31,7 @@ export function collectPptConversation(
         const columns = [...new Set(entry.data.flatMap(row => Object.keys(row)))];
         const table = { columns, rows: entry.data.map(row => columns.map(column => row[column])) };
         sections.push({id: `query-${ref.questionId}-${entry.index}`, heading: entry.title || evidence.question,
-          content: [evidence.question, entry.title, JSON.stringify(table)].join("\n"), tables: [table],
+          content: [evidence.question, entry.title, entry.sourceWindows?.length ? `Source window ranges: ${JSON.stringify(entry.sourceWindows)}. Calculations describe these ranges.` : "", JSON.stringify(table)].filter(Boolean).join("\n"), tables: [table],
           ...combineResultTruncation([entry])});
       }
     }

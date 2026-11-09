@@ -12,6 +12,7 @@ public class OnnCoreAdapterProvider implements DataAdapterProvider {
     @Value("${ONTOMATO_ONN_READ_ROLES:}") private String readRoles = "";
     @Value("${ONTOMATO_ONN_TRUSTED_URL:}") private String trustedUrl = "";
     @Value("${ONTOMATO_ONN_GATEWAY_TOKEN:}") private String gatewayToken = "";
+    @Value("${ONTOMATO_ONN_GRAPH_READ_CONSISTENCY:materialized}") private String graphReadConsistency = "materialized";
     public String type() { return "onn-core"; }
     public String label() { return "ONN Core"; }
     public boolean requiresJoinFields() { return false; }
@@ -28,6 +29,8 @@ public class OnnCoreAdapterProvider implements DataAdapterProvider {
         ConditionalObjectWrites.Principal reader = null;
         if (!readSubject.isBlank() || !readRoles.isBlank())
             reader = new ConditionalObjectWrites.Principal(readSubject, List.of(readRoles.split(",")));
-        return new OnnCoreAdapter(connection, ontology, reader);
+        if (!List.of("materialized", "version_checked_window").contains(graphReadConsistency))
+            throw new IllegalArgumentException("Unsupported ONN graph read consistency");
+        return new OnnCoreAdapter(connection, ontology, reader, "version_checked_window".equals(graphReadConsistency));
     }
 }

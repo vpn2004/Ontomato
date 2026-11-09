@@ -349,6 +349,7 @@ export const en = {
   "query.display.empty":
     "There is currently no data to display. Try adjusting the filters or retry later.",
   "query.display.emptyPartial": "No rows were returned from the processed portion of this partial result.",
+  "query.sourceWindow": "Source: {total} matches; source rows {start}–{end} were read. Calculations describe this requested range.",
   "query.partialSource": "⚠️ Partial source data ({source}): a {rowLimit}-row cap was reached, so this may not cover all matching data. {hint}",
   "query.display.groupColumn": "Group",
   "query.harness.processHeading": "Query process",

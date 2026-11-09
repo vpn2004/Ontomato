@@ -17,6 +17,12 @@ class OnnCoreAdapterProviderTest {
         assertNotNull(provider.create(connection, null, null));
         assertEquals("obsolete-public-token", connection.getToken());
     }
+    @Test void unknownConsistencyModeFailsClosed() {
+        var provider = new OnnCoreAdapterProvider();
+        ReflectionTestUtils.setField(provider, "graphReadConsistency", "unknown");
+        var connection = new DataAdapterConnection(); connection.setUrl("http://onn:18081");
+        assertThrows(IllegalArgumentException.class, () -> provider.create(connection, null, null));
+    }
     @Test void halfConfiguredReadIdentityFailsClosed() {
         var provider = new OnnCoreAdapterProvider(); ReflectionTestUtils.setField(provider, "readSubject", "reader");
         var connection = new DataAdapterConnection(); connection.setUrl("http://onn:18081");

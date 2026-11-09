@@ -60,7 +60,11 @@ function downloadFilename() {
 }
 
 function downloadData() {
-  const { rows, truncated, rowLimit, truncationHint } = props.dataset;
+  const { rows, truncated, rowLimit, truncationHint, sourceWindows } = props.dataset;
+  if (sourceWindows?.length) {
+    downloadJson({ answer: rows, sourceWindows, ...(truncated ? { truncated, rowLimit, truncationHint } : {}) }, downloadFilename());
+    return;
+  }
   if (truncated) {
     downloadJson(
       { answer: rows, truncated, rowLimit, truncationHint },
@@ -90,6 +94,10 @@ function openDetail(kind: ResultDetailRequest["kind"]) {
   <div class="result-dataset">
     <div v-if="showTitle" class="result-dataset-head">
       <span class="result-dataset-title">{{ dataset.title }}</span>
+    </div>
+    <div v-for="(window, index) in dataset.sourceWindows || []" :key="index" class="result-dataset-window" role="note">
+      <List :size="14" aria-hidden="true" />
+      <span>{{ t("chat.resultWindow", { total: window.matchingTotal, start: window.returnedRows ? window.offset + 1 : 0, end: window.returnedRows ? window.offset + window.returnedRows : 0 }) }}</span>
     </div>
     <div v-if="dataset.truncated" class="result-dataset-partial" role="note">
       <TriangleAlert :size="14" class="result-dataset-partial-icon" />
@@ -201,6 +209,20 @@ function openDetail(kind: ResultDetailRequest["kind"]) {
 .result-dataset-btn {
   font-size: 12px;
 }
+.result-dataset-window {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-bottom: 8px;
+  padding: 7px 9px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: var(--radius-md);
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.result-dataset-window svg { flex-shrink: 0; margin-top: 2px; }
 .result-dataset-partial {
   display: flex;
   gap: 6px;

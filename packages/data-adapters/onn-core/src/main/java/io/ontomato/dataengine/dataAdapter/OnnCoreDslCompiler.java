@@ -23,6 +23,9 @@ final class OnnCoreDslCompiler {
     private final OnnCoreSchema schema;
 
     OnnCoreDslCompiler(JSONObject dsl, OnnCoreSchema schema, Map<String, Object> mapping) {
+        this(dsl, schema, new OnnCoreMappingView(mapping));
+    }
+    OnnCoreDslCompiler(JSONObject dsl, OnnCoreSchema schema, OnnCoreMappingView mapping) {
         this.schema = schema;
         keys(dsl, "problem", "answer");
         JSONObject answer = required(dsl, "answer"); keys(answer, "steps");
@@ -73,7 +76,7 @@ final class OnnCoreDslCompiler {
         JSONObject limit=output.getJSONObject("limit"); if(limit!=null) keys(limit,"count","offset");
         count=limit==null ? 100 : integer(limit,"count",100); offset=limit==null ? 0 : integer(limit,"offset",0);
         if(count<0 || count>MAX_ROWS || offset<0) fail("pagination bounds (count must be 0..5000, offset >= 0)");
-        schema.validateMapping(mapping,className,referenced);
+        mapping.validate(schema, className, referenced);
     }
 
     JSONObject nativeRead() { return JSONObject.of("match_class",className,"limit",MAX_ROWS+1,"metrics",List.of(JSONObject.of("name","total","type","count"))); }

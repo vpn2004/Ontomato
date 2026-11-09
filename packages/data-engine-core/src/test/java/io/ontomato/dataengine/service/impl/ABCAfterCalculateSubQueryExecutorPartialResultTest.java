@@ -86,6 +86,18 @@ class ABCAfterCalculateSubQueryExecutorPartialResultTest {
 		assertFalse(answer.containsKey("truncated"));
 	}
 
+	@Test
+	void windowDependencyKeepsItsSourceRange() {
+		ABCSubQueryTask source = dependency(0, false, true);
+		source.getRowPermissionDataMap().getJSONArray("data").getJSONObject(0).put("resultWindow", JSONObject.of(
+			"contract", "onn_binding_window_v1", "answerComplete", true, "sourceExhausted", false,
+			"matchingTotal", 262144, "totalExact", true, "offset", 0, "count", 5000, "returnedRows", 5000,
+			"consistency", "version_checked", "dataVersion", "boot:1"));
+		JSONObject result = runAfterCalculation(source);
+		assertEquals(262144, result.getJSONArray("sourceWindows").getJSONObject(0).getIntValue("matchingTotal"));
+		assertFalse(result.containsKey("truncated"));
+	}
+
 	/** Runs the executor over stored dependencies and returns the answer object it persisted. */
 	private static JSONObject runAfterCalculation(ABCSubQueryTask... dependencies) {
 		ABCSubQueryTask afterTask = new ABCSubQueryTask();

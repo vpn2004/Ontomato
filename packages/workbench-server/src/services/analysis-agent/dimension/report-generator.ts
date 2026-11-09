@@ -17,6 +17,7 @@ import { applyFieldDisplayPlan } from "../../data-query/adapter";
 import { buildModelDataView } from "../../../utils/model-data-view";
 import { tApp } from "../../../i18n";
 import { combineResultTruncation } from "../../data-query/protocol";
+import { sourceWindowNotice } from "../report/source-window-notice";
 import { partialReportNotice } from "../report/partial-result-notice";
 
 
@@ -169,7 +170,7 @@ export class ReportGenerator {
 
       logger.info(tApp("analysis.dimension.report-generator.168"));
       return {
-        report: partialReportNotice(dimensionName, combineResultTruncation(evidence)) + (report as string),
+        report: sourceWindowNotice(evidence) + partialReportNotice(dimensionName, combineResultTruncation(evidence)) + (report as string),
         provenance,
       };
     } catch (error) {
@@ -357,7 +358,7 @@ export class ReportGenerator {
       locale,
     } = params;
 
-    const notice = partialReportNotice(dimensionName, combineResultTruncation(evidence));
+    const notice = sourceWindowNotice(evidence) + partialReportNotice(dimensionName, combineResultTruncation(evidence));
     if (notice) yield notice;
 
     const prompt = this.buildDimensionReportPrompt(

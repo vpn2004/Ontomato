@@ -1,9 +1,20 @@
+import { parseSourceResultWindow, type ResultSourceWindows, type SourceResultWindow } from "@ontomato/contracts/result-window";
 import type { ResultTruncation } from "@ontomato/contracts/query-execution";
 import { tApp } from "../../i18n";
-export interface QueryAnswerPayload extends Partial<ResultTruncation> {
+export interface QueryAnswerPayload extends Partial<ResultTruncation>, ResultSourceWindows {
   answer: unknown[];
   problem?: string;
   [key: string]: unknown;
+}
+
+export function parseResultSourceWindows(record: Record<string, unknown>): SourceResultWindow[] {
+  if (record.resultWindow !== undefined) return [parseSourceResultWindow(record.resultWindow)];
+  if (record.sourceWindows === undefined) return [];
+  if (!Array.isArray(record.sourceWindows) || record.sourceWindows.length > 256) throw new Error("Invalid result window list");
+  return record.sourceWindows.map(parseSourceResultWindow);
+}
+export function combineResultSourceWindows(packs: ResultSourceWindows[]): SourceResultWindow[] {
+  return packs.flatMap(pack => pack.sourceWindows || []);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -60,8 +71,10 @@ export function parseQueryAnswerPayload(
   }
   // Validated here; the payload keeps the marker fields as the data engine sent them.
   parseResultTruncation(value, context);
-
-  return value as QueryAnswerPayload;
+  const sourceWindows = parseResultSourceWindows(value);
+  if (value.resultWindow !== undefined && sourceWindows[0].returnedRows !== value.answer.length)
+    throw new Error("Invalid result window answer row count");
+  return { ...value, ...(sourceWindows.length ? { sourceWindows } : {}) } as QueryAnswerPayload;
 }
 
 export function parseQueryAnswerPayloads(

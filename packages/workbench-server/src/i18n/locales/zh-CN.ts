@@ -226,6 +226,7 @@ export const zhCN = {
   "query.datasetFallbackTitle": "数据集 {index}",
   "query.display.empty": "当前没有可展示的数据，请调整筛选条件或稍后重试。",
   "query.display.emptyPartial": "部分结果中已处理的数据未返回任何行。",
+  "query.sourceWindow": "来源共匹配 {total} 条，本次读取第 {start}–{end} 条；计算结论基于该请求范围。",
   "query.partialSource": "⚠️ 来源数据不完整（{source}）：已达到 {rowLimit} 行上限，可能未覆盖所有匹配数据。{hint}",
   "query.display.groupColumn": "分组",
   "query.harness.processHeading": "查询过程",

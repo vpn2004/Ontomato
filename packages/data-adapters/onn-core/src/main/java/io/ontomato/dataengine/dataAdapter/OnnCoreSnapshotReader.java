@@ -98,6 +98,7 @@ final class OnnCoreSnapshotReader {
         try {
             while (true) {
                 JSONObject response = client.page(query, remaining(deadline), pipeline, profile);
+                long validationStart = System.nanoTime();
                 JSONObject meta = response.getJSONObject("pagination");
                 String currentId = meta == null ? null : meta.getString("snapshot_id");
                 if (currentId != null && !currentId.isBlank() && snapshotId == null) snapshotId = currentId;
@@ -137,7 +138,9 @@ final class OnnCoreSnapshotReader {
                     }
                 } else if (kind.equals("return") && pages == 0) metrics = ret.getJSONObject("metrics");
                 if (response.getJSONObject("query_profile") != null) profiles.add(response.getJSONObject("query_profile"));
+                long byteEncodingStart = System.nanoTime();
                 bytes += JSON.toJSONBytes(response).length;
+                if (client.timing() != null) client.timing().add("budgetEncode", byteEncodingStart);
                 if (bytes > maxBytes) throw incomplete("byte budget exceeded; narrow the query");
                 for (Object raw : data) {
                     JSONObject row = JSONObject.from(raw);
@@ -153,6 +156,7 @@ final class OnnCoreSnapshotReader {
                     if (!identities.add(identity)) throw incomplete("duplicate result identity");
                     rows.add(row);
                 }
+                if (client.timing() != null) client.timing().add("pageValidation", validationStart);
                 pages++;
                 if (rows.size() > total || rows.size() > maxRows) throw incomplete("rows exceed the exact total or budget");
                 String cursor = meta.getString("next_cursor");

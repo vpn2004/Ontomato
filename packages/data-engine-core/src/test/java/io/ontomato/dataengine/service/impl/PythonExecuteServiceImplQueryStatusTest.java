@@ -71,6 +71,9 @@ class PythonExecuteServiceImplQueryStatusTest {
 				JSONObject answer = new JSONObject();
 				answer.put("answer", JSONArray.of(JSONObject.of("id", 1), JSONObject.of("id", 2)));
 				answer.put("mqls", JSONArray.of());
+				if ("window".equals(mode)) answer.put("resultWindow", JSONObject.of("contract", "onn_binding_window_v1", "answerComplete", true,
+					"sourceExhausted", false, "matchingTotal", 262144, "totalExact", true, "offset", 0, "count", 2, "returnedRows", 2,
+					"consistency", "version_checked", "dataVersion", "boot:1"));
 				if (mode.startsWith("partial")) {
 					answer.put("truncated", true);
 					answer.put("rowLimit", 100000);
@@ -96,6 +99,16 @@ class PythonExecuteServiceImplQueryStatusTest {
 			server.stop(0);
 			foreignServer.stop(0);
 		}
+	}
+
+	@Test
+	void windowSourceRangesSurviveRealPythonCalculationWithoutBudgetTruncation() throws Exception {
+		PythonExecuteResult result = run(DslToPythonCodeUtil.generate(JSONObject.of("mode", "window"), port()));
+		assertNull(result.getError(), result.getError());
+		JSONObject marked = new JSONObject(); result.markCompleteness(marked);
+		assertEquals(262144, marked.getJSONArray("sourceWindows").getJSONObject(0).getIntValue("matchingTotal"));
+		assertFalse(marked.containsKey("truncated"));
+		assertTrue(result.partialResultNotice().contains("window"));
 	}
 
 	@Test

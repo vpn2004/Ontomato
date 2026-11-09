@@ -1,3 +1,5 @@
+import type { ResultSourceWindows } from "@ontomato/contracts/result-window";
+import { parseResultSourceWindows } from "../protocol";
 import type { ResultTruncation } from "@ontomato/contracts/query-execution";
 import { parseResultTruncation } from "../protocol";
 import type { OutKeyRef } from "./types";
@@ -10,7 +12,7 @@ export type HarnessEvent = {
   error?: string;
 };
 
-export type HarnessDataContent = {
+export type HarnessDataContent = ResultSourceWindows & {
   question?: string;
   data?: unknown;
   code?: string;
@@ -69,6 +71,7 @@ export function normalizeHarnessDataContent(content: unknown): HarnessDataConten
       typeof outputKeyDescriptionMDTable === "string" ? outputKeyDescriptionMDTable : undefined,
     outKeyRefs: Array.isArray(outKeyRefs) ? (outKeyRefs as OutKeyRef[]) : undefined,
     truncation: parseResultTruncation(parsed, "ABC Harness DATA_TYPE"),
+    sourceWindows: parseResultSourceWindows(parsed),
   };
 }
 export function extractHarnessMessage(content: unknown): string {

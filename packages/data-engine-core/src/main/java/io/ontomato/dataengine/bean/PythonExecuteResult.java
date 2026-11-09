@@ -21,7 +21,9 @@ public class PythonExecuteResult {
 
 	/** Mark {@code target} with this run's partial-result fields; a complete run leaves it untouched. */
 	public void markCompleteness(JSONObject target) {
-		if (partialQuery != null) {
+		if (partialQuery != null && partialQuery.getJSONArray("sourceWindows") != null)
+			target.put("sourceWindows", com.alibaba.fastjson2.JSON.parseArray(partialQuery.getJSONArray("sourceWindows").toJSONString()));
+		if (partialQuery != null && Boolean.TRUE.equals(partialQuery.getBoolean(DslRowLimit.TRUNCATED))) {
 			target.put(DslRowLimit.TRUNCATED, true);
 			target.put(DslRowLimit.ROW_LIMIT, partialQuery.getInteger(DslRowLimit.ROW_LIMIT));
 			target.put(DslRowLimit.TRUNCATION_HINT, partialQuery.getString(DslRowLimit.TRUNCATION_HINT));
@@ -33,6 +35,9 @@ public class PythonExecuteResult {
 		if (partialQuery == null || (error != null && !error.isBlank())) {
 			return "";
 		}
+		if (!Boolean.TRUE.equals(partialQuery.getBoolean(DslRowLimit.TRUNCATED)))
+			return "Source window ranges: " + partialQuery.getJSONArray("sourceWindows")
+				+ ". Calculations use these requested windows; do not present them as statistics over all matching source rows.\n";
 		Integer rowLimit = partialQuery.getInteger(DslRowLimit.ROW_LIMIT);
 		String hint = partialQuery.getString(DslRowLimit.TRUNCATION_HINT);
 		return "IMPORTANT: at least one query in this program returned an INCOMPLETE result"

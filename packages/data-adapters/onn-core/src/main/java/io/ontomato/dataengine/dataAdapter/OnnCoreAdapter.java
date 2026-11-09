@@ -19,14 +19,19 @@ import java.sql.SQLException;
 public final class OnnCoreAdapter implements DataAdapter, ConditionalObjectWrites {
     private final OnnCoreHttpClient client;
     private final Map<String, Object> mapping;
+    private final boolean versionCheckedWindows;
     private OnnCoreSchema sampleSchema;
 
     public OnnCoreAdapter(DataAdapterConnection connection, Map<String, Object> mapping) {
         this(connection, mapping, null);
     }
     public OnnCoreAdapter(DataAdapterConnection connection, Map<String, Object> mapping, Principal readPrincipal) {
+        this(connection, mapping, readPrincipal, false);
+    }
+    OnnCoreAdapter(DataAdapterConnection connection, Map<String, Object> mapping, Principal readPrincipal, boolean versionCheckedWindows) {
         var transport = new OnnCoreHttpClient(connection.getUrl(), connection.getToken());
         this.client = readPrincipal == null ? transport : transport.asPrincipal(readPrincipal); this.mapping=mapping;
+        this.versionCheckedWindows = versionCheckedWindows;
     }
     public boolean useM3() { return false; }
     public Connection openConnection() throws SQLException { throw new UnsupportedOperationException("ONN Core is not a JDBC data source"); }
@@ -147,19 +152,29 @@ public final class OnnCoreAdapter implements DataAdapter, ConditionalObjectWrite
 
     private String executeGraph(JSONObject dsl, OnnCoreSchema schema, List<String> generated) throws Exception {
         long started = System.nanoTime();
-        OnnCoreCapabilities negotiated = OnnCoreMetadataCache.capabilities(client, generated);
-        OnnCoreGraphCompiler plan = new OnnCoreGraphCompiler(dsl, schema, mapping, negotiated.pushdown());
+        OnnCoreTiming timing = new OnnCoreTiming();
+        OnnCoreHttpClient measured = client.withTiming(timing);
+        long stageStart = System.nanoTime();
+        OnnCoreCapabilities negotiated = OnnCoreMetadataCache.capabilities(measured, generated);
+        timing.add("capabilities", stageStart);
+        stageStart = System.nanoTime();
+        OnnCoreGraphCompiler plan = new OnnCoreGraphCompiler(dsl, schema, mapping, negotiated.pushdown(), timing);
+        timing.add("compile", stageStart);
         if (!negotiated.bindingReads()) throw new UnsupportedOperationException("ONN graph queries require enabled v1 pipeline bindings and v2 materialized binding pagination");
         if (negotiated.pushdown()) {
             boolean aggregate = negotiated.returnReads() && plan.nativeAggregate();
+            if (!aggregate && versionCheckedWindows && negotiated.windowReads() && plan.window() != null)
+                return executeWindow(schema, plan, negotiated, measured, timing, generated, started);
             JSONObject nativeQuery = aggregate ? plan.aggregatePipeline() : plan.projectedPipeline();
             String kind = aggregate ? "return" : "bindings";
             generated.add("POST /api/v1/query/pipeline " + nativeQuery.toJSONString());
             long remoteStart = System.nanoTime();
-            var result = new OnnCoreSnapshotReader(client).readNative(nativeQuery, negotiated.pageSize(), kind, true,
+            var result = new OnnCoreSnapshotReader(measured).readNative(nativeQuery, negotiated.pageSize(), kind, true,
                 aggregate ? null : plan.bindings(), negotiated.inlinePages(), true);
             double remoteMs = elapsed(remoteStart);
-            OnnCoreMetadataCache.validate(client, schema, generated);
+            stageStart = System.nanoTime();
+            OnnCoreMetadataCache.validate(measured, schema, generated);
+            timing.add("schemaValidate", stageStart);
             long localStart = System.nanoTime();
             JSONArray answer = aggregate ? plan.evaluateAggregate(result) : plan.evaluate(result.rows());
             JSONObject evidence = pushedEvidence(schema, negotiated, result, started, remoteMs, elapsed(localStart));
@@ -168,6 +183,7 @@ public final class OnnCoreAdapter implements DataAdapter, ConditionalObjectWrite
             evidence.put("filterPushdown", hasFilter(nativeQuery));
             evidence.put("residualEvaluation", true); evidence.put("bindingsRead", aggregate ? 0 : result.rows().size());
             evidence.put("resultKind", kind);
+            evidence.put("timingPhasesMs", timing.phases()); evidence.put("workCounters", timing.counters());
             if (!aggregate) evidence.put("aggregateFallback", "Only equivalent count aggregates are pushed; typed grouping, exact arithmetic and deterministic ties remain residual");
             return encoded(answer, generated, evidence);
         }
@@ -219,6 +235,29 @@ public final class OnnCoreAdapter implements DataAdapter, ConditionalObjectWrite
         if (!count && aggregate == null) evidence.put("aggregateFallback", "Precision-sensitive aggregates, typed group keys and unsupported predicates retain complete local evaluation");
         return encoded(answer, generated, evidence);
     }
+    private String executeWindow(OnnCoreSchema schema, OnnCoreGraphCompiler plan, OnnCoreCapabilities negotiated,
+            OnnCoreHttpClient measured, OnnCoreTiming timing, List<String> generated, long started) throws Exception {
+        JSONObject query = plan.projectedPipeline();
+        generated.add("POST /api/v1/query/pipeline (explicit version_checked binding window) " + query.toJSONString());
+        long remoteStart = System.nanoTime();
+        var result = new OnnCoreWindowReader(measured).read(query, Math.min(1000, negotiated.pageSize()), plan.window().needed(), plan.bindings());
+        double remoteMs = elapsed(remoteStart); long validateStart = System.nanoTime();
+        OnnCoreMetadataCache.validate(measured, schema, generated); timing.add("schemaValidate", validateStart);
+        long localStart = System.nanoTime(); JSONArray answer = plan.evaluate(result.rows()); double localMs = elapsed(localStart);
+        long expected = Math.min(plan.window().count(), Math.max(0L, result.total() - plan.window().offset()));
+        if (answer.size() != expected) throw new IllegalStateException("ONN binding window did not satisfy the requested range; no answer was produced");
+        JSONObject evidence = JSONObject.of("backend", "onn-core", "view", "BASE", "source", client.baseUrl(),
+            "schemaFingerprint", schema.fingerprint, "backendCommit", negotiated.commit(), "backendBuild", negotiated.buildIdentity(),
+            "evaluation", "version-checked-binding-window", "consistency", "version_checked", "snapshotConsistent", false,
+            "dataVersion", result.version(), "pagesRead", result.pages(), "readAttempts", result.attempts(),
+            "answerComplete", true, "sourceExhausted", result.sourceExhausted(), "matchedBindings", result.total(), "totalExact", true,
+            "requestedWindow", JSONObject.of("offset", plan.window().offset(), "count", plan.window().count()), "returnedRows", answer.size(),
+            "orderingContract", OnnCoreWindowReader.ORDERING, "windowReleased", result.released(), "bindingsRead", result.rows().size(),
+            "queryPushdown", true, "relationshipPushdown", true, "aggregatePushdown", false, "projectionPushdown", query.containsKey("binding_output"),
+            "residualEvaluation", true, "onnProfiles", result.profiles(), "timingPhasesMs", timing.phases(), "workCounters", timing.counters(),
+            "timingMs", JSONObject.of("total", elapsed(started), "remoteRead", remoteMs, "residual", localMs));
+        return encoded(answer, generated, evidence);
+    }
     private JSONObject pushedEvidence(OnnCoreSchema schema, OnnCoreCapabilities capabilities, OnnCoreSnapshotReader.Result result,
             long started, double remoteMs, double localMs) {
         return JSONObject.of("backend", "onn-core", "view", "BASE", "source", client.baseUrl(),
@@ -235,7 +274,15 @@ public final class OnnCoreAdapter implements DataAdapter, ConditionalObjectWrite
         return false;
     }
     private static String encoded(JSONArray answer, List<String> generated, JSONObject evidence) {
-        return JSON.toJSONString(List.of(JSONObject.of("answer", answer, "mqls", generated, "evidence", evidence)), Feature.WriteMapNullValue);
+        JSONObject payload = JSONObject.of("answer", answer, "mqls", generated, "evidence", evidence);
+        if ("version_checked".equals(evidence.getString("consistency"))) {
+            JSONObject range = evidence.getJSONObject("requestedWindow");
+            payload.put("resultWindow", JSONObject.of("contract", "onn_binding_window_v1", "answerComplete", true,
+                "sourceExhausted", evidence.get("sourceExhausted"), "matchingTotal", evidence.get("matchedBindings"),
+                "totalExact", true, "offset", range.get("offset"), "count", range.get("count"), "returnedRows", answer.size(),
+                "consistency", "version_checked", "dataVersion", evidence.get("dataVersion")));
+        }
+        return JSON.toJSONString(List.of(payload), Feature.WriteMapNullValue);
     }
 
     private List<JSONObject> readLegacy(OnnCoreDslCompiler plan,OnnCoreSchema schema,List<String> generated) throws Exception {

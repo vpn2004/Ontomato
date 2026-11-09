@@ -20,6 +20,8 @@ afterAll(async () => {skillRegistryManager.dispose(); await fs.rm(root, {recursi
 describe("PPT Skill runtime", () => {
   it("executes the real Skill with host context, enforces selection and live disable, and settles activity", async () => {
     const registry = await skillRegistryManager.forDomain("domain");
+    // 该Skill默认关闭；本用例验证显式启用后的执行及动态禁用。
+    registry.setSkillEnabled("generate-ppt", true);
     const generatePpt = vi.fn(async () => ({url: "/api/ppt/files/example", fileName: "conversation.pptx", warnings: []}));
     const trajectory = {start: vi.fn(() => "activity"), settle: vi.fn()};
     const deps = {domainId: "domain", selectedSkillIds: ["generate-ppt"], resolveEvidence: () => undefined, generatePpt, trajectory};

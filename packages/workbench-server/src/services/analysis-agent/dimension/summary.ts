@@ -48,9 +48,10 @@ function buildSummaryEvidence(plannedDimensions: any[]): AnalysisEvidence[] {
           entry.markdownTable || (datasetEntries.length === 1 ? question.markdownTable : undefined),
         abcSubQuestions: question.abcSubQuestions,
         ...combineResultTruncation([entry]),
+        sourceWindows: entry.sourceWindows,
       }));
     })
-    .filter((item) => item.data.length > 0 || item.truncated);
+    .filter((item) => item.data.length > 0 || item.truncated || item.sourceWindows?.length);
 }
 
 function buildSummarySkillInput(
@@ -86,6 +87,7 @@ function buildSummarySkillInput(
         dimensionName: question.dimensionName,
         subQuestion: question.subQuestion,
         ...combineResultTruncation([entry]),
+        sourceWindows: entry.sourceWindows,
       }))
     ),
     dimensions: successfulReports.map((report) => ({

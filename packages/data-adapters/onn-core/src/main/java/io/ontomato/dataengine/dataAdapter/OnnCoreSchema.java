@@ -17,6 +17,8 @@ final class OnnCoreSchema {
     private final Map<String, Map<String, JSONObject>> attributes = new TreeMap<>();
     private final Map<String, Map<String, String>> sourceNames = new TreeMap<>();
     private final Map<String, Object> ontology;
+    private final Map<String, JSONObject> mappingClasses = new HashMap<>();
+    private final Map<String, JSONObject> mappingRelations = new HashMap<>();
     final String fingerprint;
 
     OnnCoreSchema(JSONObject wire) {
@@ -99,10 +101,14 @@ final class OnnCoreSchema {
         ontology.put("datasetdesc", description);
         ontology.put("classlist", new ArrayList<>(classes.keySet()));
         ontology.put("classDef", classDefs); ontology.put("relationship_rule", rules);
+        for (Object raw : classDefs) { JSONObject def = JSONObject.from(raw); mappingClasses.put(def.getString("className"), def); }
+        for (String type : rules.keySet()) mappingRelations.put(type, JSONObject.from(rules.get(type)));
         fingerprint = digest(JSON.toJSONString(canonical(ontology)));
     }
 
     Map<String, Object> ontology() { return ontology; }
+    JSONObject mappingClass(String path) { requireClass(path); return mappingClasses.get(path); }
+    JSONObject mappingRelationship(String type) { return mappingRelations.get(type); }
     void validateRelationship(Map<String, Object> mapping, String type, String from, String to) {
         JSONObject expected = JSONObject.from(ontology).getJSONObject("relationship_rule").getJSONObject(type);
         JSONObject rules = mapping == null ? null : JSONObject.from(mapping).getJSONObject("relationship_rule");
@@ -149,15 +155,20 @@ final class OnnCoreSchema {
         throw new IllegalArgumentException("Unsupported ONN datetime value for "+path+"."+field);
     }
     JSONObject flatten(String path, JSONObject instance) {
+        return flatten(path, instance, sourceNames.get(path).keySet());
+    }
+    JSONObject flatten(String path, JSONObject instance, Set<String> fields) {
         if (instance == null || !path.equals(instance.getString("classPath")) || instance.getString("id") == null)
             throw new IllegalStateException("ONN returned a missing or mismatched class/instance identity");
         JSONObject row = new JSONObject(); row.put("id", instance.getString("id"));
         JSONObject values = instance.getJSONObject("attributes");
         if (values == null) throw new IllegalStateException("ONN instance response is missing attributes");
-        sourceNames.get(path).forEach((product, source) -> {
+        for (String product : fields) {
+            if ("id".equals(product)) continue;
+            String source = sourceNames.get(path).get(product);
             JSONObject def = attributes.get(path).get(source);
             if (scalarSupported(def)) row.put(product, values.get(source));
-        });
+        }
         return row;
     }
 

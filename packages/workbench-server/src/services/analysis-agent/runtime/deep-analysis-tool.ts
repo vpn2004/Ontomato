@@ -12,7 +12,7 @@ import {
   convertChunkToDataset,
   rowsFromQueryAnswerPayloads,
 } from "../../data-query/adapter";
-import { combineResultTruncation, parseQueryAnswerPayloads } from "../../data-query/protocol";
+import { combineResultTruncation, combineResultSourceWindows, parseQueryAnswerPayloads } from "../../data-query/protocol";
 import type { AnalysisQueryFact, DimensionQueryResult } from "./evidence-types";
 import { buildQueryResultDataFromDatasets, buildQueryResultDslFromDatasets } from "./query-result";
 import { executeDslViaBackend } from "../../data-query/dsl-executor";
@@ -103,6 +103,7 @@ export async function executeDslDirectly(params: {
       locale,
     });
     const truncation = combineResultTruncation(answerPayloads);
+    const sourceWindows = combineResultSourceWindows(answerPayloads);
     const tableMarkdown = renderDataAsTable(rawData, fieldDisplayPlan, {
       maxRows: 20,
       locale,
@@ -110,7 +111,7 @@ export async function executeDslDirectly(params: {
     });
 
     const dataset = convertChunkToDataset(
-      { data: rawData, dsl, truncation },
+      { data: rawData, dsl, truncation, sourceWindows },
       0,
       locale
     );

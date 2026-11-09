@@ -237,21 +237,25 @@ public class ABCAfterCalculateSubQueryExecutor implements Runnable {
 	 * The first partial dependency's limit and hint are carried.
 	 */
 	static void markPartialDependency(List<ABCSubQueryTask> dependencies, JSONObject answer) {
+		JSONArray sourceWindows = new JSONArray();
 		for (ABCSubQueryTask dependency : dependencies) {
 			JSONArray data = dependency.getRowPermissionDataMap().getJSONArray("data");
-			if (data == null) {
-				continue;
-			}
+			if (data == null) continue;
 			for (int i = 0; i < data.size(); i++) {
 				JSONObject datum = data.getJSONObject(i);
-				if (Boolean.TRUE.equals(datum.getBoolean(DslRowLimit.TRUNCATED))) {
+				JSONArray windows = datum.getJSONArray("sourceWindows");
+				if (windows != null) for (Object window : windows) if (!sourceWindows.contains(window)) sourceWindows.add(window);
+				JSONObject window = datum.getJSONObject("resultWindow");
+				if (window != null && !sourceWindows.contains(window)) sourceWindows.add(window);
+				if (sourceWindows.size() > 256) throw new IllegalStateException("Query source window evidence budget exceeded");
+				if (!Boolean.TRUE.equals(answer.getBoolean(DslRowLimit.TRUNCATED)) && Boolean.TRUE.equals(datum.getBoolean(DslRowLimit.TRUNCATED))) {
 					answer.put(DslRowLimit.TRUNCATED, true);
 					answer.put(DslRowLimit.ROW_LIMIT, datum.getInteger(DslRowLimit.ROW_LIMIT));
 					answer.put(DslRowLimit.TRUNCATION_HINT, datum.getString(DslRowLimit.TRUNCATION_HINT));
-					return;
 				}
 			}
 		}
+		if (!sourceWindows.isEmpty()) answer.put("sourceWindows", com.alibaba.fastjson2.JSON.parseArray(sourceWindows.toJSONString()));
 	}
 
 }

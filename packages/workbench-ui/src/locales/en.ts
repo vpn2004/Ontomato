@@ -1034,6 +1034,7 @@ export default {
     "askDataConversation": "Ask Data Conversation",
     "downloadData": "Download data details",
     "downloadDsl": "Download DSL",
+    "resultWindow": "Source: {total} matches; requested source rows {start}–{end} were read completely and checked against one data version.",
     "partialResult": "Partial result: a processing or output limit of {rowLimit} was reached, so these results (even if empty) may not cover all matches.",
     "partialFileSuffix": "partial",
     "downloadPartialJson": "Download partial data (JSON)",

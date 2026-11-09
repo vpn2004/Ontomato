@@ -1,9 +1,10 @@
+import type { ResultSourceWindows } from "@ontomato/contracts/result-window";
 import type { ResultTruncation } from "@ontomato/contracts/query-execution";
 
 const DEFAULT_MAX_CHARS = 6000;
 
 /** A sampled view of rows; the truncation marker is present only when the rows are a partial result. */
-export interface ModelDataView<T> extends Partial<ResultTruncation> {
+export interface ModelDataView<T> extends Partial<ResultTruncation>, ResultSourceWindows {
   totalRows: number;
   includedRows: number;
   omittedRows: number;
@@ -46,12 +47,12 @@ export function buildModelDataView<T>(
   {
     maxChars = DEFAULT_MAX_CHARS,
     truncation,
-  }: { maxChars?: number; truncation?: Partial<ResultTruncation> } = {}
+  }: { maxChars?: number; truncation?: Partial<ResultTruncation> & ResultSourceWindows } = {}
 ): ModelDataView<T> {
   if (!Number.isSafeInteger(maxChars) || maxChars <= 0) {
     throw new RangeError("maxChars must be a positive safe integer");
   }
-  const view = sampleRows(rows, maxChars);
+  const view = { ...sampleRows(rows, maxChars), ...(truncation?.sourceWindows?.length ? { sourceWindows: truncation.sourceWindows } : {}) };
   return truncation?.truncated
     ? {
         ...view,

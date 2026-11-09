@@ -33,6 +33,7 @@ final class OnnCoreHttpClient {
     private final Duration timeout;
     private final int maxBytes;
     private final Map<String, String> principalHeaders;
+    private final OnnCoreTiming timing;
 
     OnnCoreHttpClient(String url) { this(url, null, Duration.ofSeconds(12), MAX_BYTES); }
 
@@ -47,11 +48,20 @@ final class OnnCoreHttpClient {
     }
 
     private OnnCoreHttpClient(String url, String gatewayToken, Duration timeout, int maxBytes, Map<String, String> principalHeaders) {
+        this(url, gatewayToken, timeout, maxBytes, principalHeaders, null);
+    }
+    private OnnCoreHttpClient(String url, String gatewayToken, Duration timeout, int maxBytes, Map<String, String> principalHeaders, OnnCoreTiming timing) {
+        this.timing = timing;
         if (timeout == null || timeout.toMillis() < 1 || maxBytes < 1) throw new IllegalArgumentException("Invalid ONN read limits");
         this.configuredUrl = url; this.gatewayToken = gatewayToken == null || gatewayToken.isBlank() ? null : gatewayToken;
         this.timeout = timeout; this.maxBytes = maxBytes;
         this.principalHeaders = Map.copyOf(principalHeaders);
     }
+
+    OnnCoreHttpClient withTiming(OnnCoreTiming timing) {
+        return new OnnCoreHttpClient(configuredUrl, gatewayToken, timeout, maxBytes, principalHeaders, timing);
+    }
+    OnnCoreTiming timing() { return timing; }
 
     OnnCoreHttpClient asPrincipal(ConditionalObjectWrites.Principal principal) {
         if (gatewayToken == null) throw new UnsupportedOperationException("ONN conditional writes require a configured trusted gateway");
@@ -123,6 +133,11 @@ final class OnnCoreHttpClient {
         if (id == null || id.isBlank()) return;
         request("DELETE", "/query/snapshots/" + encode(id), null, false, remaining);
     }
+    void closeWindow(String token, Duration remaining) throws Exception {
+        var response = exchange("POST", "/query/windows/close", JSON.toJSONString(JSONObject.of("close_token", token)), remaining, Map.of());
+        if (response.statusCode() != 204 || response.body().length != 0)
+            throw new IllegalStateException("ONN binding window was not released");
+    }
     static String encode(String value) { return URLEncoder.encode(value, StandardCharsets.UTF_8); }
 
     private JSONObject request(String method, String route, String body) throws Exception {
@@ -134,10 +149,15 @@ final class OnnCoreHttpClient {
     }
 
     private JSONObject request(String method, String route, String body, boolean paged, Duration remaining, Map<String, String> headers) throws Exception {
-        return decode(exchange(method, route, body, remaining, headers), method, route, paged);
+        long started = System.nanoTime();
+        HttpResponse<byte[]> response = exchange(method, route, body, remaining, headers);
+        long decodeStart = System.nanoTime();
+        try { return decode(response, method, route, paged); }
+        finally { if (timing != null) { timing.add("responseDecode", decodeStart); timing.add("requestTotal", started); } }
     }
 
     private HttpResponse<byte[]> exchange(String method, String route, String body, Duration remaining, Map<String, String> headers) throws Exception {
+        long httpStart = System.nanoTime();
         Duration deadline = remaining.compareTo(timeout) < 0 ? remaining : timeout;
         if (deadline.isNegative() || deadline.isZero()) throw new HttpTimeoutException("ONN query exceeded its response deadline");
         HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(baseUrl() + route))
@@ -163,6 +183,7 @@ final class OnnCoreHttpClient {
             if (e.getCause() instanceof Exception cause) throw cause;
             throw new IllegalStateException("ONN response failed", e.getCause());
         }
+        if (timing != null) timing.add("httpExchange", httpStart);
         return response;
     }
 

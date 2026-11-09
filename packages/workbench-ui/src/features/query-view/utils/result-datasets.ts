@@ -45,6 +45,7 @@ export function buildResultDatasets(
       truncated: dataset?.truncated,
       rowLimit: dataset?.rowLimit,
       truncationHint: dataset?.truncationHint,
+      sourceWindows: dataset?.sourceWindows,
     }));
   }
   // Persisted legacy rows may have only flattened data rows without a structured dataset: same

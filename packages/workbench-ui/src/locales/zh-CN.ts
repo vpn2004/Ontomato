@@ -1034,6 +1034,7 @@ export default {
     "askDataConversation": "数据问答",
     "downloadData": "下载数据明细",
     "downloadDsl": "下载 DSL",
+    "resultWindow": "来源共匹配 {total} 条，来源请求第 {start}–{end} 条已完整读取；按同一数据版本校验。",
     "partialResult": "部分结果：已达到 {rowLimit} 行的处理或输出上限，这些结果（即使为空）可能未覆盖全部匹配数据。",
     "partialFileSuffix": "部分",
     "downloadPartialJson": "下载部分数据（JSON）",

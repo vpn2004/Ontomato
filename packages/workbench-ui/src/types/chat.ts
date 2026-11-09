@@ -1,3 +1,4 @@
+import type { ResultSourceWindows } from "@ontomato/contracts/result-window";
 import type {
   ThinkingBranchState,
   ThinkingAbcStep,
@@ -42,7 +43,7 @@ export interface QueryExecutionFacts extends Omit<
   /** Datasets saved before dataset ids existed have no `id`. */
   datasets?: Array<
     Partial<QueryDatasetIdentity> &
-      Partial<ResultTruncation> & {
+      Partial<ResultTruncation> & ResultSourceWindows & {
       name?: string;
       description?: string;
       data?: Array<Record<string, unknown>>;
@@ -122,7 +123,7 @@ export interface ResponseSnapshot {
     rows: Array<Record<string, unknown>>;
     dsl?: unknown;
     subQuestion?: string;
-  } & Partial<ResultTruncation>>;
+  } & Partial<ResultTruncation> & ResultSourceWindows>;
   /** API/live read model: composed from query_runs for history. */
   graphNodeIds?: string[];
   /** API/live read model: derived from the query data actually available in this turn. */

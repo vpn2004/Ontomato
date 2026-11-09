@@ -7,9 +7,9 @@ import java.util.Map;
 
 /** Negotiates only explicitly enabled, understood contracts; it never grants write access. */
 record OnnCoreCapabilities(String commit, boolean snapshotReads, int pageSize, boolean bindingReads,
-        boolean pushdown, boolean inlinePages, boolean returnReads, String buildIdentity) {
+        boolean pushdown, boolean inlinePages, boolean returnReads, String buildIdentity, boolean windowReads) {
     OnnCoreCapabilities(String commit, boolean snapshotReads, int pageSize, boolean bindingReads) {
-        this(commit, snapshotReads, pageSize, bindingReads, false, false, false, commit);
+        this(commit, snapshotReads, pageSize, bindingReads, false, false, false, commit, false);
     }
     static OnnCoreCapabilities discover(OnnCoreHttpClient client) throws Exception {
         try { return parse(client.capabilities()); }
@@ -55,9 +55,15 @@ record OnnCoreCapabilities(String commit, boolean snapshotReads, int pageSize, b
             && "single_class_identity_count_without_attribute_or_expr".equals(contract.getString("metrics_only_scope"))
             && contains(contract, "metrics_only_operators", "count");
         String build = commit + ":" + wire.getString("build_time") + ":" + OnnCoreSchema.digest(wire.toJSONString());
+        JSONObject window = contract == null ? null : contract.getJSONObject("binding_window");
+        boolean windowReads = pushdown && bindings && window != null && Boolean.TRUE.equals(window.get("enabled"))
+            && "version_checked".equals(window.getString("mode")) && "bindings".equals(window.getString("result_kind"))
+            && OnnCoreWindowReader.ORDERING.equals(window.getString("optional_ordering"))
+            && "binding_window_close_v1".equals(window.getString("close_contract"))
+            && "/api/v1/query/windows/close".equals(window.getString("close_endpoint"));
         return new OnnCoreCapabilities(commit, true, Math.min(500, max), bindings, pushdown,
             pushdown && Boolean.TRUE.equals(contract.get("single_page_elision")),
-            pushdown && bindings && contains(pagination, "result_kinds", "return"), build);
+            pushdown && bindings && contains(pagination, "result_kinds", "return"), build, windowReads);
     }
 
     private static boolean contains(JSONObject object, String key, String value) {

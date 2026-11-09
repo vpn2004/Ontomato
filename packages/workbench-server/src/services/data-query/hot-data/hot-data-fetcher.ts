@@ -10,6 +10,7 @@ import {
 } from "../adapter";
 import {
   combineResultTruncation,
+  combineResultSourceWindows,
   parseQueryAnswerPayload,
   parseQueryAnswerPayloads,
 } from "../protocol";
@@ -113,6 +114,7 @@ export async function fetchHotCards(params: {
           : [parseQueryAnswerPayload(payload, tApp("queryFixed.250"))];
         const rawData = rowsFromQueryAnswerPayloads(answerPayloads);
         const truncation = combineResultTruncation(answerPayloads);
+        const sourceWindows = combineResultSourceWindows(answerPayloads);
         const abcProgram = parseAbcProgram(json?.abcProgram);
         if (!abcProgram) {
           throw new Error(tApp("queryFixed.251"));
@@ -132,7 +134,7 @@ export async function fetchHotCards(params: {
         );
 
         const dataset = convertChunkToDataset(
-          { data: normalizedRows, truncation },
+          { data: normalizedRows, truncation, sourceWindows },
           0,
           locale
         );

@@ -1,3 +1,4 @@
+import type { ResultSourceWindows, SourceResultWindow } from "@ontomato/contracts/result-window";
 import type { OutKeyRef } from "../../data-query/replay-plan";
 import type { QueryExecutionFact } from "../../data-query/query-fact";
 import {
@@ -14,6 +15,8 @@ import { promisify } from "node:util";
 import { normalizeAnswerRows, type Dataset } from "../../data-query/adapter";
 import {
   combineResultTruncation,
+  combineResultSourceWindows,
+  parseResultSourceWindows,
   parseQueryAnswerPayload,
   parseResultTruncation,
   type QueryAnswerPayload,
@@ -94,7 +97,7 @@ export interface ExecuteSavedAbcReplayParams extends Omit<ExecuteAbcReplayPlanPa
   >;
 }
 
-type ReplayItem = {
+type ReplayItem = ResultSourceWindows & {
   title: string;
   status: "completed" | "failed" | "skipped";
   rows?: QueryResultRow[];
@@ -170,6 +173,7 @@ function parsePythonAnswer(stdout: string): {
   rows: QueryResultRow[];
   truncation?: ResultTruncation;
   error?: string;
+  sourceWindows?: SourceResultWindow[];
 } {
   const line = stdout
     .split(/\r?\n/)
@@ -188,6 +192,7 @@ function parsePythonAnswer(stdout: string): {
     return {
       rows: normalizeAnswerRows(payload.answer),
       truncation: combineResultTruncation([payload]),
+      sourceWindows: payload.sourceWindows,
       error,
     };
   } catch {
@@ -199,7 +204,8 @@ function dataset(
   title: string,
   rows: QueryResultRow[],
   dsl?: unknown,
-  truncation?: ResultTruncation
+  truncation?: ResultTruncation,
+  sourceWindows?: SourceResultWindow[]
 ): Dataset {
   return {
     id: randomUUID(),
@@ -210,6 +216,7 @@ function dataset(
     dsl,
     subQuestion: title,
     ...truncation,
+    sourceWindows,
   };
 }
 
@@ -224,7 +231,7 @@ function toResult(items: ReplayItem[], plan: HotReportReplayPlan): AbcReplayExec
   const datasetByItem = new Map(
     completed.map((item) => [
       item,
-      dataset(item.title, item.rows || [], item.dsl, item.truncation),
+      dataset(item.title, item.rows || [], item.dsl, item.truncation, item.sourceWindows),
     ])
   );
   const datasets = [...datasetByItem.values()];
@@ -502,6 +509,7 @@ export async function executeAbcProgram(params: {
       data: rawData,
       subQuestion,
       ...truncation,
+      sourceWindows: parseResultSourceWindows(payload as Record<string, unknown>),
     };
     baseResult.datasets = [dataset];
     baseResult.abcCodes = [code];
@@ -643,6 +651,7 @@ export async function executeAbcReplayPlan({
   const items: ReplayItem[] = [];
   const localPathByIndex = new Map<number, string>();
   const truncationByIndex = new Map<number, ResultTruncation>();
+  const windowsByIndex = new Map<number, SourceResultWindow[]>();
 
   for (const step of plan.steps) {
     if (!step.dsl) continue;
@@ -688,7 +697,9 @@ export async function executeAbcReplayPlan({
       await writeAnswerFile(replayDir, plan.sessionId, step.index, rows)
     );
     if (truncation) truncationByIndex.set(step.index, truncation);
-    items.push({ title, status: "completed", rows, dsl: step.dsl, truncation });
+    const sourceWindows = combineResultSourceWindows(result.datasets || []);
+    windowsByIndex.set(step.index, sourceWindows);
+    items.push({ title, status: "completed", rows, dsl: step.dsl, truncation, sourceWindows });
   }
 
   for (const afterCalculation of plan.afterCalculations) {
@@ -743,7 +754,8 @@ export async function executeAbcReplayPlan({
       items.push({ title, status: "failed", error: parsed.error || tApp("analysis.dimension.abc-replay.57") });
       continue;
     }
-    items.push({ title, status: "completed", rows: parsed.rows, code: rewritten.code, truncation });
+    const sourceWindows = [...afterCalculation.dependencySubQueryIndexes.flatMap(index => windowsByIndex.get(index) || []), ...(parsed.sourceWindows || [])];
+    items.push({ title, status: "completed", rows: parsed.rows, code: rewritten.code, truncation, sourceWindows });
   }
 
   return toResult(items, plan);

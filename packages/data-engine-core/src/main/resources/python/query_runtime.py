@@ -31,18 +31,27 @@ def _record_partial_queries():
         # Without requests the program cannot call /dsl/execute through the documented helper.
         return
     original_json = requests.Response.json
-    recorded = False
+    recorded = {}
 
     def json_with_query_status(self, **kwargs):
-        nonlocal recorded
         payload = original_json(self, **kwargs)
-        if not recorded and _is_engine_query(self.request):
-            # The engine answers {"data": [{"answer": [...], "truncated": true, ...}]}, or {"error": ...}.
-            data = payload.get("data")
-            if data and data[0].get("truncated") is True:
+        if _is_engine_query(self.request) and isinstance(payload, dict):
+            # 每个源窗口独立保留，后计算不会把其匹配总量误认为已经全量读取。
+            for datum in payload.get("data") or []:
+                if datum.get("truncated") is True and not recorded.get("truncated"):
+                    recorded.update({key: datum.get(key) for key in STATUS_KEYS})
+                windows = list(datum.get("sourceWindows") or [])
+                if datum.get("resultWindow") is not None:
+                    windows.append(datum["resultWindow"])
+                for window in windows:
+                    saved = recorded.setdefault("sourceWindows", [])
+                    if window not in saved:
+                        if len(saved) >= 256:
+                            raise RuntimeError("Query source window evidence budget exceeded")
+                        saved.append(window)
+            if recorded:
                 with open(STATUS_FILE, "w", encoding="utf-8") as status:
-                    json.dump({key: data[0].get(key) for key in STATUS_KEYS}, status, ensure_ascii=False)
-                recorded = True
+                    json.dump(recorded, status, ensure_ascii=False)
         return payload
 
     requests.Response.json = json_with_query_status

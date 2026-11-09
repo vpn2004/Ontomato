@@ -19,6 +19,10 @@ final class OnnCoreGraphCompiler {
     private final boolean extended;
     private boolean exactFilters = true;
     private final OnnCoreAggregatePlan aggregatePlan;
+    private final OnnCoreTiming timing;
+    record Window(int offset, int count) { int needed() { return offset + count; } }
+    private final Window window;
+    private final Map<String, Set<String>> neededFields = new LinkedHashMap<>();
 
     static boolean isGraph(JSONObject dsl) {
         JSONObject answer = dsl.getJSONObject("answer");
@@ -37,8 +41,15 @@ final class OnnCoreGraphCompiler {
         this(original, schema, mapping, false);
     }
     OnnCoreGraphCompiler(JSONObject original, OnnCoreSchema schema, Map<String, Object> mapping, boolean extended) {
+        this(original, schema, mapping, extended, new OnnCoreTiming());
+    }
+    OnnCoreGraphCompiler(JSONObject original, OnnCoreSchema schema, Map<String, Object> mapping, boolean extended, OnnCoreTiming timing) {
         this.schema = schema;
         this.extended = extended;
+        this.timing = timing;
+        long mappingStart = System.nanoTime();
+        OnnCoreMappingView mappingView = new OnnCoreMappingView(mapping);
+        timing.add("mapping", mappingStart); timing.count("mappingParses", 1);
         JSONObject lowered = JSON.parseObject(JSON.toJSONString(original, com.alibaba.fastjson2.JSONWriter.Feature.WriteMapNullValue));
         JSONObject step = lowered.getJSONObject("answer").getJSONArray("steps").getJSONObject(0);
         JSONObject pattern = step.getJSONObject("graph").getJSONArray("patterns").getJSONObject(0);
@@ -71,14 +82,14 @@ final class OnnCoreGraphCompiler {
             JSONArray types = link.getJSONArray("type");
             if (types == null || types.size() != 1 || !(types.get(0) instanceof String)) fail("relationship unions and wildcards");
             String type = types.getString(0);
-            schema.validateRelationship(mapping, type, objects.get(from).getString("class"), objects.get(to).getString("class"));
+            mappingView.validateRelationship(schema, type, objects.get(from).getString("class"), objects.get(to).getString("class"));
             pending.add(new Link(from, to, type));
         }
 
         JSONArray steps = new JSONArray();
         int root = objects.keySet().iterator().next();
         JSONObject rootObject = objects.get(root);
-        steps.add(JSONObject.of("name", rootObject.getString("variable"), "graph", nativeObject(rootObject, mapping)));
+        steps.add(JSONObject.of("name", rootObject.getString("variable"), "graph", nativeObject(rootObject, mappingView)));
         Set<Integer> bound = new HashSet<>(Set.of(root));
         while (!pending.isEmpty()) {
             boolean progress = false;
@@ -88,7 +99,7 @@ final class OnnCoreGraphCompiler {
                 if (from == to) continue;
                 JSONObject source = objects.get(from ? link.from : link.to), target = objects.get(from ? link.to : link.from);
                 JSONObject graph = JSONObject.of("from_step", source.getString("variable"), "traverse", JSONObject.of(
-                    "relation_path", link.type, "direction", from ? "out" : "in", "next", nativeObject(target, mapping)));
+                    "relation_path", link.type, "direction", from ? "out" : "in", "next", nativeObject(target, mappingView)));
                 steps.add(JSONObject.of("name", target.getString("variable"), "graph", graph));
                 bound.add(from ? link.to : link.from);
                 it.remove(); progress = true;
@@ -96,6 +107,7 @@ final class OnnCoreGraphCompiler {
             if (!progress) fail("disconnected or cyclic relationship pattern");
         }
         pipeline = JSONObject.of("steps", steps);
+        window = eligibleWindow(step.getJSONObject("output"), pattern, steps);
         if (pattern.getJSONObject("conditions") != null && !pattern.getJSONObject("conditions").isEmpty()) exactFilters = false;
         aggregatePlan = extended && exactFilters ? OnnCoreAggregatePlan.compile(original, schema, classes) : null;
 
@@ -132,11 +144,13 @@ final class OnnCoreGraphCompiler {
         for (String variable : classes.keySet()) {
             Set<String> fields = new HashSet<>(Set.of("id"));
             columns.keySet().stream().filter(c -> c.variable.equals(variable)).forEach(c -> fields.add(c.field));
-            schema.validateMapping(mapping, classes.get(variable), fields);
+            mappingView.validate(schema, classes.get(variable), fields);
+            Set<String> needed = new HashSet<>(fields); needed.remove("id");
+            neededFields.put(variable, Collections.unmodifiableSet(needed));
         }
     }
 
-    private JSONObject nativeObject(JSONObject object, Map<String, Object> mapping) {
+    private JSONObject nativeObject(JSONObject object, OnnCoreMappingView mapping) {
         JSONObject query = JSONObject.of("answer", JSONObject.of("steps", JSONArray.of(JSONObject.of(
             "graph", JSONObject.of("patterns", JSONArray.of(JSONObject.of("objects", JSONArray.of(object)))),
             "output", JSONObject.of("fields", JSONArray.of(JSONObject.of("variable", object.getString("variable"), "field", "id", "as", "id")))))));
@@ -164,6 +178,22 @@ final class OnnCoreGraphCompiler {
         } else if (value instanceof List<?> list) for (Object child : list) rewrite(child, defaultVariable, depth + 1);
     }
 
+    Window window() { return window; }
+    private Window eligibleWindow(JSONObject output, JSONObject pattern, JSONArray steps) {
+        if (!extended || output == null || output.containsKey("group_by") || output.containsKey("sort")
+            || pattern.getJSONObject("conditions") != null && !pattern.getJSONObject("conditions").isEmpty()) return null;
+        for (JSONObject object : objects.values()) if (object.getJSONObject("conditions") != null && !object.getJSONObject("conditions").isEmpty()) return null;
+        for (Object raw : output.getJSONArray("fields")) {
+            JSONObject field = JSONObject.from(raw);
+            if (field.get("function") != null || Boolean.TRUE.equals(field.get("distinct"))) return null;
+        }
+        List<String> declared = new ArrayList<>(classes.keySet());
+        for (int i = 0; i < steps.size(); i++) if (!declared.get(i).equals(steps.getJSONObject(i).getString("name"))) return null;
+        JSONObject limit = output.getJSONObject("limit");
+        if (limit == null || !limit.containsKey("count")) return null;
+        int offset = limit.getIntValue("offset", 0), count = limit.getIntValue("count");
+        return count > 0 && offset >= 0 && (long) offset + count <= 100_000 ? new Window(offset, count) : null;
+    }
     JSONObject nativePipeline() { return JSON.parseObject(pipeline.toJSONString()); }
     JSONObject projectedPipeline() {
         JSONObject query = nativePipeline();
@@ -185,20 +215,27 @@ final class OnnCoreGraphCompiler {
     Map<String, String> bindings() { return Collections.unmodifiableMap(classes); }
 
     JSONArray evaluate(List<JSONObject> bindings) {
+        long flattenStart = System.nanoTime();
         List<JSONObject> rows = new ArrayList<>();
         for (JSONObject binding : bindings) {
-            identity(binding); // Also reject invalid optional/null rows on the mandatory-join contract.
+            String identity = identity(binding);
             Map<String, JSONObject> flattened = new HashMap<>();
             classes.forEach((variable, cls) -> {
                 JSONObject instance = new JSONObject(binding.getJSONObject(variable));
                 instance.put("classPath", instance.getString("class_path"));
-                flattened.put(variable, schema.flatten(cls, instance));
+                Set<String> fields = neededFields.get(variable);
+                flattened.put(variable, schema.flatten(cls, instance, fields));
+                timing.count("flattenFields", fields.size());
             });
-            JSONObject row = JSONObject.of("id", identity(binding));
+            JSONObject row = JSONObject.of("id", identity);
             columns.forEach((column, name) -> row.put(name, flattened.get(column.variable).get(column.field)));
             rows.add(row);
         }
-        return residual.evaluate(rows);
+        timing.add("flatten", flattenStart);
+        long residualStart = System.nanoTime();
+        JSONArray result = residual.evaluate(rows);
+        timing.add("localEvaluate", residualStart);
+        return result;
     }
 
     String identity(JSONObject row) { return bindingIdentity(row, classes); }

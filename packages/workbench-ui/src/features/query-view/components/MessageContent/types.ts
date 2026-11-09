@@ -1,3 +1,4 @@
+import type { ResultSourceWindows } from "@ontomato/contracts/result-window";
 import type { ResultTruncation } from "@ontomato/contracts/query-execution";
 
 export type ChartType =
@@ -64,7 +65,7 @@ export interface ContentPart {
  * execution facts by dataset index, and datasets that did not produce that detail do not carry these
  * two fields.
  */
-export interface ResultDataset extends Partial<ResultTruncation> {
+export interface ResultDataset extends Partial<ResultTruncation>, ResultSourceWindows {
   /** Rendering key within this list (by index); not the dataset's identity. */
   id: string;
   /** The server's dataset id, which the body's placements refer to; absent on datasets saved before ids. */

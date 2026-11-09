@@ -1,3 +1,4 @@
+import type { ResultSourceWindows } from "@ontomato/contracts/result-window";
 import type {
   QueryFactDatasetPreview as QueryResultDatasetPreview,
   ResultTruncation,
@@ -14,7 +15,7 @@ export type QueryResultData = QueryResultRow[] | QueryResultRow[][];
 export type QueryResultDsl = unknown | unknown[];
 
 export interface QueryResultDatasetEntry
-  extends Omit<QueryResultDatasetPreview, "markdownTable">, Partial<ResultTruncation> {
+  extends Omit<QueryResultDatasetPreview, "markdownTable">, Partial<ResultTruncation>, ResultSourceWindows {
   index: number;
   data: QueryResultRow[];
   dsl?: unknown;
@@ -70,7 +71,7 @@ export function expandQueryResultDatasetEntries(options: {
       .map((dataset, index) => {
         const rows = Array.isArray(dataset?.data) ? dataset.data : [];
         // A partial dataset stays evidence even without rows: zero rows do not prove "no data".
-        if (rows.length === 0 && !dataset.truncated) return null;
+        if (rows.length === 0 && !dataset.truncated && !dataset.sourceWindows?.length) return null;
         return {
           index,
           title:
@@ -87,6 +88,7 @@ export function expandQueryResultDatasetEntries(options: {
           truncated: dataset.truncated,
           rowLimit: dataset.rowLimit,
           truncationHint: dataset.truncationHint,
+          sourceWindows: dataset.sourceWindows,
         } satisfies QueryResultDatasetEntry;
       })
       .filter(Boolean) as QueryResultDatasetEntry[];

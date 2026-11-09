@@ -21,7 +21,7 @@ import { createAbcLogger, type AbcLogger } from "./abc-logger";
 
 import { backendPost } from "../../utils/backend-client";
 import { truncateErrorForDisplay } from "./display-error";
-import { combineResultTruncation } from "./protocol";
+import { combineResultTruncation, combineResultSourceWindows } from "./protocol";
 import { buildAbcReplayPlanFromChunks, type HotReportReplayPlan } from "./replay-plan";
 import type { BaseQueryOutput, QueryBackendLocation } from "./branches/types";
 
@@ -422,6 +422,7 @@ export async function executeAbcQuery(
         t("query.summary.dataChunk", { n: chunkIndex + 1 });
 
       const truncation = combineResultTruncation(chunk.data);
+      const sourceWindows = combineResultSourceWindows(chunk.data);
       const { tableSegment, normalizedRows, fieldDisplayPlan } = await buildTableFromRows(
         actualData,
         currentSubQ,
@@ -436,7 +437,7 @@ export async function executeAbcQuery(
       );
 
       const dataset = convertChunkToDataset(
-        { data: normalizedRows, dsl: chunk.dsl, truncation },
+        { data: normalizedRows, dsl: chunk.dsl, truncation, sourceWindows },
         chunkIndex,
         locale
       );

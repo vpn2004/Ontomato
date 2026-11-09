@@ -110,6 +110,23 @@ const MULTI: QueryExecutionFacts = {
 const render = (facts: QueryExecutionFacts) =>
   mount(QueryExecutionView, { props: { facts }, global });
 
+describe("显式窗口范围展示", () => {
+  it("显示匹配总数及请求范围，下载保留窗口事实", async () => {
+    const sourceWindow = { contract: "onn_binding_window_v1" as const, answerComplete: true as const,
+      sourceExhausted: false, matchingTotal: 262144, totalExact: true as const, offset: 0, count: 5000,
+      returnedRows: 5000, consistency: "version_checked" as const, dataVersion: "boot:1" };
+    const facts = { ...MULTI, datasets: [{ ...MULTI.datasets![0]!, sourceWindows: [sourceWindow] }] };
+    const w = render(facts);
+    expect(w.find(".result-dataset-window").text()).toContain("262144");
+    expect(w.find(".result-dataset-window").text()).toContain("5000");
+    expect(w.find(".result-dataset-partial").exists()).toBe(false);
+    vi.mocked(downloadJson).mockClear();
+    await clickButton(w.find(".result-dataset"), t("chat.downloadData"));
+    expect(vi.mocked(downloadJson).mock.calls[0]?.[0]).toMatchObject({ sourceWindows: [sourceWindow] });
+    w.unmount();
+  });
+});
+
 describe("execution display view renders by facts", () => {
   it("removes the standalone data preview and ABC split blocks, presenting results where the body places them", () => {
     const w = render(MULTI);
