@@ -47,7 +47,10 @@ final class OnnCoreWindowReader {
         String close=null,version=null,previous=null;long total=-1;int pages=0;boolean exhausted=false,released=false;
         try {
             do {
-                JSONObject response=client.page(query,remaining(deadline),true,true);JSONObject meta=response.getJSONObject("pagination");
+                JSONObject response=client.page(query,remaining(deadline),true,true);
+                long validationStarted=System.nanoTime();
+                try {
+                JSONObject meta=response.getJSONObject("pagination");
                 String token=meta==null?null:meta.getString("close_token");if(token!=null&&!token.isBlank()&&close==null)close=token;
                 if(meta==null||!Boolean.TRUE.equals(meta.get("total_exact"))||!ORDERING.equals(meta.getString("ordering_contract"))||!"version_checked".equals(meta.getString("consistency"))||!"bindings".equals(meta.getString("result_kind"))||meta.get("snapshot_id")!=null||meta.get("fallback_reason")!=null||Boolean.TRUE.equals(response.get("truncated"))||!(meta.get("has_more") instanceof Boolean))throw invalid("window metadata");
                 long current=count(meta.get("total"));String currentVersion=meta.getString("data_version");
@@ -63,6 +66,7 @@ final class OnnCoreWindowReader {
                 if(more!=(rows.size()<total)||more&&(data.isEmpty()||cursor==null||cursor.isBlank()||!cursors.add(cursor))||!more&&cursor!=null&&!cursor.isBlank())throw invalid("continuation mismatch");
                 exhausted=!more;if(exhausted||rows.size()>=needed)break;
                 pagination.put("after",cursor);
+                } finally {if(client.timing()!=null)client.timing().add("pageValidation",validationStarted);}
             }while(true);
         }finally {
             if(close!=null){try{client.closeWindow(close,Duration.ofSeconds(1));released=true;}catch(Exception error){if(error instanceof InterruptedException)Thread.currentThread().interrupt();}}
@@ -74,7 +78,9 @@ final class OnnCoreWindowReader {
         void charge(JSONObject response, int pageRows) {
             // Failed attempts still consumed resources; only their result rows are discarded.
             rows += pageRows;
-            bytes += JSON.toJSONBytes(response).length;
+            long encodingStarted = System.nanoTime();
+            try { bytes += JSON.toJSONBytes(response).length; }
+            finally { if (client.timing() != null) client.timing().add("budgetEncode", encodingStarted); }
             if (rows > maxRows) throw invalid("row budget");
             if (bytes > maxBytes) throw invalid("byte budget");
         }
