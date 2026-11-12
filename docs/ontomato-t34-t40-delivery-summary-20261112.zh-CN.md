@@ -96,7 +96,7 @@ T34 汇总旧表曾混用基线ONN33.349和推算PG20.655。这里以T34原验�
 | 固定同轮baseline/candidate/PG | 明细paired退化、三跳/c4/c8未达、1–7组达标 | 安全回退候选是否防回退、门槛是否达到 |
 | 未覆盖/受限/不可识别部分 | 无普通OMS完整HTTP CPU采样、旧testbin身份受限、不能推出唯一根因 | 明确证据不能说明什么 |
 
-已到初步证据：候选domain 30.01s、全部进程CPU样本31.05s，ExecutePipeline cum58.45%、factor窗口24.67%、邻接19.13%、json.Marshal18.62%、mallocgc14.62%、sanitizer3.83%、BindingPaginationKey5.48%，domain close仅0.16%。这些累计栈嵌套、可含后台CPU，不能相加/当wall share；close低比例不含真实HTTP往返。分配仍是可见热点，明确撤回旧“时延主体已不在分配路径”。
+最终样本显示：候选domain 30.01s、全部进程CPU样本31.05s，ExecutePipeline cum58.45%、factor窗口24.67%、邻接19.13%、json.Marshal18.62%、mallocgc14.62%、sanitizer3.83%、BindingPaginationKey5.48%，domain close仅0.16%。这些累计栈嵌套、可含后台CPU，不能相加/当wall share；close低比例不含真实HTTP往返。分配仍是可见热点，明确撤回旧“时延主体已不在分配路径”。
 
 普通HTTP三跳候选30.882080/PG22.428045ms，比约1.376940未达。候选core直接阶段median：evaluate9.564011、page_encode1.353286、sanitize0.509294ms；adapter total21.584455、remoteRead18.101644、residual1.320645ms。基线Java JFR的60秒1610请求均正确，643 ExecutionSample中499截断，fastjson readObject/readArray/list写分别cum19.28%/15.40%/11.20%；这些只是转换/JSON线索，native采样含阻塞，不是CPU share。普通HTTP正式30样本直接adapter median：page.requestTotal15.971123ms、close.requestTotal1.058326（HTTP0.996943）、schema.requestTotal0.816921、flatten1.148469、responseDecode0.392220ms；不与JFR重启/采样段混合。候选Java JFR60秒1649请求0失败，689 ExecutionSample中554栈截断；readObject/readArray/list写cum22.50%/16.26%/10.60%、flatten5.22%，仍是线索而非完整因果归因。16段已完成：100551正式持续请求0失败；加两阶段3660×2+paired270，正式性能合计108141。候选c4两段77.722176/93.585499QPS、p9585.753063/66.359952ms，漂移显著原样保留不重跑择优。短C/A/C三跳候选两侧慢6.0953%/3.9795%、h7rows慢4.7041%/4.2005%，count快0.7007%/2.7655%；必须明确本轮明细观察到性能回退，不能称无回退或有提速，已知不安全基线只供参考不再发布。最终白名单已归档，独立审查已从两轮各3660请求重建共244组median/nearest-rank p95、16段全部100551数值/加权QPS/pooled统计，均匹配；不称独立重新计算全部答案oracle。
 
@@ -181,7 +181,7 @@ T34–T38的字段投影、身份跳扫、邻接后缀与scoped iterator、内�
 - PostgreAdapter布尔等值的`UNSUPPORTED_OPERATOR_FOR_TYPE`是应用待修，不是PG缺少布尔能力；修复需保留boolean/null类型并加单元和联合对拍。
 - 30条旧路径如primary_key_lookup沿既有协议没有版本元数据；不能宣称所有响应都有dataVersion。
 - 不提高读取/物化/快照预算，默认高扇出旧协议两题预算拒绝的历史不因新窗口成功被抹除；百万全量count、任意排序Top-K、选择性规划/权威属性索引仍未关闭。
-- 数据目录仅单OMS进程独占；包回退不代表可以回退已被新存储格式写入的数据，回滚按本轮核验的兼容版本与备份流程执行。T40若最终没有新格式/写路径，仍需以实际部署清单确认。
+- 数据目录仅单OMS进程独占；包回退不代表可以回退已被新存储格式写入的数据，回滚按本轮核验的兼容版本与备份流程执行。本轮产品仅移除不安全只读清理标记/分支，未新增存储格式或写路径；数据恢复仍按已验证备份与兼容流程执行。
 
 ## 9. 剩余缺口与下一步
 
