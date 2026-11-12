@@ -44,6 +44,9 @@ import {
 import { extractDatasetsFromQueryRun } from "../../data-query/query-run-artifacts";
 import { routeAfterTaskPlanner, routeAfterQuery, routeAfterAnalysis } from "./routes";
 
+import { timedNode } from "./utils/node-timing";
+import type { StageTiming } from "../../../logging/stage-timing";
+
 const logger = createLogger("workflow");
 
 export interface DataAgentWorkflowRuntimeArtifacts {
@@ -98,15 +101,15 @@ function findPreviousClarificationContext(input: {
   };
 }
 
-export function createDataAgentWorkflow() {
+export function createDataAgentWorkflow(onNodeFinished?: (name: string, timing: StageTiming) => void) {
   const workflow = new StateGraph(GraphStateAnnotation)
-    .addNode("taskPlanner", taskPlannerNode)
-    .addNode("reply", replyNode)
-    .addNode("knowledge", knowledgeNode)
-    .addNode("query", queryNode)
-    .addNode("analysis", analysisNode)
-    .addNode("visualization", visualizationNode)
-    .addNode("response", standardResponseNode)
+    .addNode("taskPlanner", timedNode("taskPlanner", taskPlannerNode, onNodeFinished))
+    .addNode("reply", timedNode("reply", replyNode, onNodeFinished))
+    .addNode("knowledge", timedNode("knowledge", knowledgeNode, onNodeFinished))
+    .addNode("query", timedNode("query", queryNode, onNodeFinished))
+    .addNode("analysis", timedNode("analysis", analysisNode, onNodeFinished))
+    .addNode("visualization", timedNode("visualization", visualizationNode, onNodeFinished))
+    .addNode("response", timedNode("response", standardResponseNode, onNodeFinished))
 
     .addEdge(START, "taskPlanner")
     .addConditionalEdges("taskPlanner", routeAfterTaskPlanner, {
@@ -376,7 +379,8 @@ export async function runDataAgentWorkflow(params: {
   };
 
   const workflowStartTime = Date.now();
-  const workflow = createDataAgentWorkflow();
+  const nodeTimings = new Map<string, StageTiming>();
+  const workflow = createDataAgentWorkflow((name, timing) => nodeTimings.set(name, timing));
   const stream = await workflow.stream(initialState, config);
   const streamStartTime = Date.now();
   logger.debug(tApp("queryFixed.146"), { durationMs: streamStartTime - workflowStartTime });
@@ -423,10 +427,9 @@ export async function runDataAgentWorkflow(params: {
 
         if (threadId) {
           // Stream node updates arrive after the node completes; only the terminal states known at that point are saved.
-          const startTime = nodeArrivalTime;
-          if (nodeDisplayNames[nodeName]) {
-            const endTime = Date.now();
-            const duration = endTime - startTime;
+          const timing = nodeTimings.get(nodeName);
+          if (nodeDisplayNames[nodeName] && timing) {
+            const { startedAt: startTime, endedAt: endTime, durationMs: duration } = timing;
             nodeExecutionDurations.set(nodeName, duration);
             const updatePromise = upsertExecutionEvent({
               threadId,
@@ -435,7 +438,7 @@ export async function runDataAgentWorkflow(params: {
               eventType: "node",
               eventName: nodeDisplayNames[nodeName].name,
               eventIcon: nodeDisplayNames[nodeName].icon,
-              status: "completed",
+              status: timing.outcome,
               startedAt: startTime,
               endedAt: endTime,
               durationMs: duration,

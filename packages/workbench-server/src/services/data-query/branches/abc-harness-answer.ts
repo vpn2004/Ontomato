@@ -1,3 +1,4 @@
+import { startStage, type StageOutcome } from "../../../logging/stage-timing";
 import { createModel } from "../../../config/model-factory";
 import { modelAgentName } from "../../../logging/model-agents";
 import { renderPrompt } from "../../../core/prompts/loader";
@@ -70,6 +71,10 @@ export async function polishHarnessAnswer(params: {
     locale
   );
 
+  const finish = startStage("harness.answer.generate");
+  const started = performance.now();
+  let firstTokenMs: number | undefined;
+  let outcome: StageOutcome | undefined;
   try {
     const model = await createModel({ temperature: 0.2, agentName: modelAgentName("abcHarnessAnswer") });
     const stream = await model.stream([{ role: "user", content: prompt }], { signal });
@@ -79,6 +84,7 @@ export async function polishHarnessAnswer(params: {
     for await (const chunk of stream) {
       const text = chunkText(chunk.content);
       if (!text) continue;
+      firstTokenMs ??= Math.round(performance.now() - started);
       polished += text;
       const stablePrefix = getContentBeforeDataPlaceholder(polished);
       if (stablePrefix && stablePrefix !== lastPushedStablePrefix) {
@@ -89,23 +95,29 @@ export async function polishHarnessAnswer(params: {
 
     polished = stripThinkingTags(polished);
     if (!polished) {
+      outcome = "fallback";
       pushStableContent(fallbackContent, pushContent);
       return fallbackContent;
     }
     const finalContent = insertDisplayDataResults(polished, displayDataMessages, labels);
     pushContent(finalContent, false);
+    outcome = "completed";
     return finalContent;
   } catch (error) {
     if (
       signal?.aborted ||
       (error instanceof Error && (error.name === "AbortError" || /abort/i.test(error.message)))
     ) {
+      outcome = "cancelled";
       throw error;
     }
     logger.warn(tApp("queryFixed.202"), {
       error: error instanceof Error ? error.message : String(error),
     });
+    outcome = "fallback";
     pushStableContent(fallbackContent, pushContent);
     return fallbackContent;
+  } finally {
+    finish(outcome ?? "failed", { firstTokenMs });
   }
 }

@@ -1,3 +1,4 @@
+import { measureStage, startStage } from "../../logging/stage-timing";
 import type { AbcQuestionMode } from "@ontomato/contracts/system-model";
 import type { BranchKey } from "@ontomato/contracts/query-thinking";
 import type { AbcContentEvent } from "@ontomato/contracts/chat";
@@ -193,6 +194,7 @@ export async function executeBaseQuery(
     }
   };
 
+  const finishSelection = startStage("query.branch.selection");
   return new Promise<BaseQueryExecutionResult>((resolve) => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let doneCount = 0;
@@ -219,6 +221,7 @@ export async function executeBaseQuery(
       settled = true;
       cleanup();
       const winner = "winner" in outcome ? outcome.winner : undefined;
+      finishSelection(options.signal?.aborted ? "cancelled" : winner ? "completed" : "failed", { winner });
       thinking.finish(winner);
       abortBranches(winner);
       const thinkingState = buildThinkingState();
@@ -309,7 +312,10 @@ export async function executeBaseQuery(
     });
 
     for (const branch of enabledBranches) {
-      runBranch(branch).then(
+      measureStage(`query.branch.${branch}`, () => runBranch(branch), {
+        signal: controllers.get(branch)?.signal,
+        classify: (output) => output ? output.errors?.length ? "fallback" : "completed" : "empty",
+      }).then(
         (output) => onDone(branch, output),
         (error) => onError(branch, error)
       );

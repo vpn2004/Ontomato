@@ -14,6 +14,7 @@ export type HarnessEvent = {
 
 export type HarnessDataContent = ResultSourceWindows & {
   question?: string;
+  dsl?: unknown;
   data?: unknown;
   code?: string;
   outputKeyDescriptionMDTable?: string;
@@ -65,6 +66,7 @@ export function normalizeHarnessDataContent(content: unknown): HarnessDataConten
 
   return {
     question: typeof question === "string" ? question : undefined,
+    dsl: parsed.dsl,
     data: parseMaybeJSON(rawData ?? parsed),
     code: typeof code === "string" ? code : undefined,
     outputKeyDescriptionMDTable:

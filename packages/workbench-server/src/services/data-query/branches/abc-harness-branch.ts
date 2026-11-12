@@ -1,3 +1,5 @@
+import { startStage, measureStage, type StageOutcome } from "../../../logging/stage-timing";
+import { logDslDiagnostic } from "../dsl-diagnostics";
 import { datasetPlacement } from "@ontomato/contracts/query-execution";
 import type { AbcBranchContext, BaseQueryOutput, OutKeyRef } from "./types";
 import { getApiConfig, buildHeaders, buildUrl } from "../../../config/data-query-api";
@@ -63,6 +65,10 @@ export async function runAbcHarnessBranch(
   let lastEventAt: number | undefined;
   let lastEventType: string | undefined;
   let answerContent = "";
+  const finishStream = startStage("harness.stream");
+  let outcome: StageOutcome | undefined;
+  let firstEventMs: number | undefined;
+  let firstDataMs: number | undefined;
 
   let abcLogger!: AbcLogger;
   abcLogger = createAbcLogger({
@@ -134,6 +140,7 @@ export async function runAbcHarnessBranch(
 
       const event = rawEvent as HarnessEvent;
       lastEventAt = Date.now();
+      firstEventMs ??= lastEventAt - requestStartedAt;
       lastEventType = event.type || (event.error ? "ERROR" : "UNKNOWN");
       const location = extractBackendLocation(event);
       if (location?.sessionId) {
@@ -155,7 +162,9 @@ export async function runAbcHarnessBranch(
       if (event.type === "DATA_TYPE") {
         abcLogger.setStage("data");
 
+        firstDataMs ??= Date.now() - requestStartedAt;
         const dataContent = normalizeHarnessDataContent(event.content);
+        logDslDiagnostic(dataContent.dsl, "harness.DATA_TYPE");
         const question =
           dataContent.question ||
           tForLocale(locale, "query.datasetFallbackTitle", { index: datasets.length + 1 });
@@ -187,7 +196,7 @@ export async function runAbcHarnessBranch(
         dataContent.code = code;
 
         const rows = normalizeRows(dataContent.data);
-        const { tableSegment, normalizedRows, fieldDisplayPlan } = await buildTableFromRows(
+        const { tableSegment, normalizedRows, fieldDisplayPlan } = await measureStage("harness.result.prepare", () => buildTableFromRows(
           rows,
           question,
           {
@@ -198,7 +207,7 @@ export async function runAbcHarnessBranch(
             locale,
             truncation: dataContent.truncation,
           }
-        );
+        ), { signal: ctx.signal, metadata: { sessionId, dataIndex: datasets.length } });
 
         logger.info("abcHarness data event normalized", {
           sessionId,
@@ -262,6 +271,7 @@ export async function runAbcHarnessBranch(
       }
     }
     ctx.signal.throwIfAborted();
+    finishStream("completed", { sessionId, firstEventMs, firstDataMs, eventTypeCounts, includesClientProcessing: true });
 
     let fullContent = buildAnswerContent();
     answerContent = fullContent;
@@ -283,6 +293,7 @@ export async function runAbcHarnessBranch(
         throw new Error(protocolErrors.join(tApp("queryFixed.183")));
       }
       thinking.set("not_found", t("query.status.noAvailableData"));
+      outcome = "empty";
       return undefined;
     }
 
@@ -324,6 +335,7 @@ export async function runAbcHarnessBranch(
       abcOutKeyRefGroupCount: abcOutKeyRefs.length,
     });
 
+    outcome = protocolErrors.length ? "fallback" : "completed";
     return {
       content: fullContent,
       datasets,
@@ -336,6 +348,7 @@ export async function runAbcHarnessBranch(
       errors: protocolErrors.length > 0 ? protocolErrors : undefined,
     };
   } catch (error: unknown) {
+    outcome = ctx.signal.aborted || (error instanceof Error && error.name === "AbortError") ? "cancelled" : "failed";
     if (error instanceof AuthFailedError) throw error;
 
     const errorMessage = error instanceof Error ? error.message : String(error);
@@ -364,5 +377,8 @@ export async function runAbcHarnessBranch(
       publishFallback(errorMessage);
     }
     throw error;
+  } finally {
+    finishStream(outcome ?? "failed", { sessionId, firstEventMs, firstDataMs, eventTypeCounts, includesClientProcessing: true });
+    logger.info("harness request timing", { sessionId, outcome: outcome ?? "failed", durationMs: Date.now() - requestStartedAt, firstEventMs, firstDataMs });
   }
 }

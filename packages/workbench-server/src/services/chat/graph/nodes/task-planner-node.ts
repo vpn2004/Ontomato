@@ -1,3 +1,4 @@
+import { measureStage } from "../../../../logging/stage-timing";
 import { createModel } from "../../../../config/model-factory";
 import { modelAgentName } from "../../../../logging/model-agents";
 import { datasetSchemaService } from "../../../data-query/dataset-schema";
@@ -235,7 +236,7 @@ async function invokeTaskPlannerWithRepair(
   historicalQueryRefsById: HistoricalQueryRefsById,
   logContext: { threadId?: string; requestSeq?: number }
 ): Promise<{ result: TaskPlannerResult; planningText: string; rawOutput: string }> {
-  const response = await model.invoke(messages);
+  const response = await measureStage("planner.model.initial", () => model.invoke(messages), { metadata: logContext });
   const rawOutput = String(response.content || "");
 
   try {
@@ -263,7 +264,7 @@ async function invokeTaskPlannerWithRepair(
       { role: "assistant" as const, content: rawOutput },
       { role: "user" as const, content: buildRepairMessage(error.validationMessage) },
     ];
-    const repairResponse = await model.invoke(repairMessages);
+    const repairResponse = await measureStage("planner.model.repair", () => model.invoke(repairMessages), { metadata: logContext });
     const repairedRawOutput = String(repairResponse.content || "");
 
     try {
@@ -305,12 +306,12 @@ export async function taskPlannerNode(state: GraphState, config?: any): Promise<
   try {
     const token = config?.configurable?.token;
     const apiKey = config?.configurable?.apiKey;
-    const datasetSchema = await datasetSchemaService.getSchemaForQuestion(
+    const datasetSchema = await measureStage("planner.schema", () => datasetSchemaService.getSchemaForQuestion(
       state.userQuestion,
       token,
       apiKey
-    );
-    const bizKnowledge = await fetchBizKnowledge(state.userQuestion, token);
+    ));
+    const bizKnowledge = await measureStage("planner.knowledge", () => fetchBizKnowledge(state.userQuestion, token));
     const historicalQueryRefsById =
       config?.configurable?.historicalQueryRefsById &&
       typeof config.configurable.historicalQueryRefsById === "object"
@@ -346,7 +347,7 @@ export async function taskPlannerNode(state: GraphState, config?: any): Promise<
       messagesLength: estimateMessagesSize(messages),
     });
 
-    const model = await createModel({ agentName: modelAgentName("taskPlanner") });
+    const model = await measureStage("planner.model.prepare", () => createModel({ agentName: modelAgentName("taskPlanner") }));
     const parsed = await invokeTaskPlannerWithRepair(model, messages, historicalQueryRefsById, {
       threadId: config?.configurable?.thread_id,
       requestSeq: config?.configurable?.requestSeq ?? state.requestSeq,
