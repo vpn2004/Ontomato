@@ -11,6 +11,8 @@ public class AgentCallContext {
     private final String agentName;
     private final String domainId;
     private int round;
+    private int consecutiveDslFailures;
+    private int pendingDslTrials;
 
     private AgentCallContext(String sessionId, String agentName, String domainId) {
         this.agentRunId = UUID.randomUUID().toString();
@@ -33,6 +35,27 @@ public class AgentCallContext {
 
     public int nextRound() {
         return ++round;
+    }
+
+    public synchronized boolean reserveDslTrial(int limit) {
+        if (limit <= 0 || consecutiveDslFailures + pendingDslTrials >= limit) return false;
+        pendingDslTrials++;
+        return true;
+    }
+
+    public synchronized int finishDslTrial(boolean success) {
+        if (pendingDslTrials > 0) pendingDslTrials--;
+        if (success) consecutiveDslFailures = 0;
+        else consecutiveDslFailures++;
+        return consecutiveDslFailures;
+    }
+
+    public synchronized int getConsecutiveDslFailures() {
+        return consecutiveDslFailures;
+    }
+
+    public synchronized int getPendingDslTrials() {
+        return pendingDslTrials;
     }
 
     public String getAgentRunId() {

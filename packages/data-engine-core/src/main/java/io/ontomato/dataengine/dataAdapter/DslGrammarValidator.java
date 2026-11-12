@@ -86,7 +86,8 @@ public final class DslGrammarValidator {
 				for (int o = 0; o < objects.size(); o++) {
 					JSONObject object = objects.getJSONObject(o);
 					JSONObject conditions = object == null ? null : object.getJSONObject("conditions");
-					String conditionsPath = "steps[" + s + "].patterns[" + p + "].objects[" + o + "].conditions";
+					String conditionsPath = "answer.steps[" + s + "].graph.patterns[" + p + "].objects[" + o + "].conditions";
+					checkProperties(conditions, conditionsPath);
 					checkVectorTopK(conditions == null ? null : conditions.getJSONObject("vector"), conditionsPath + ".vector");
 					JSONObject timeseries = conditions == null ? null : conditions.getJSONObject("timeseries");
 					if (timeseries == null) {
@@ -101,7 +102,47 @@ public final class DslGrammarValidator {
 					checkTimeseriesFields(timeseries.getJSONObject("properties"), path, object.getString("class"),
 							classDef);
 				}
+				checkProperties(pattern.getJSONObject("conditions"), "answer.steps[" + s + "].graph.patterns[" + p + "].conditions");
 			}
+		}
+	}
+
+	/** A property predicate is one object; boolean composition is represented by and/or/not objects. */
+	private static void checkProperties(JSONObject conditions, String path) {
+		if (conditions == null || !conditions.containsKey("properties")) return;
+		Object properties = conditions.get("properties");
+		if (!(properties instanceof JSONObject predicate)) {
+			throw new DslContractViolationException(DslContractViolationException.Code.INVALID_GRAMMAR,
+					path + ".properties", "expected one predicate object or an and/or/not logical object; arrays are not valid");
+		}
+		checkPredicate(predicate, path + ".properties", 0);
+	}
+
+	private static void checkPredicate(JSONObject predicate, String path, int depth) {
+		if (depth > 32) {
+			throw new DslContractViolationException(DslContractViolationException.Code.INVALID_GRAMMAR,
+					path, "logical predicate nesting exceeds 32 levels");
+		}
+		boolean logical = false;
+		for (String key : List.of("and", "or", "not")) {
+			if (!predicate.containsKey(key)) continue;
+			logical = true;
+			Object raw = predicate.get(key);
+			if (!(raw instanceof JSONArray terms) || terms.isEmpty() || ("not".equals(key) && terms.size() != 1)) {
+				throw new DslContractViolationException(DslContractViolationException.Code.INVALID_GRAMMAR,
+						path + "." + key, "expected a nonempty predicate array; not requires exactly one item");
+			}
+			for (int i = 0; i < terms.size(); i++) {
+				if (!(terms.get(i) instanceof JSONObject child)) {
+					throw new DslContractViolationException(DslContractViolationException.Code.INVALID_GRAMMAR,
+							path + "." + key + "[" + i + "]", "expected a predicate object");
+				}
+				checkPredicate(child, path + "." + key + "[" + i + "]", depth + 1);
+			}
+		}
+		if (!logical && (predicate.getString("field") == null || predicate.getString("operator") == null)) {
+			throw new DslContractViolationException(DslContractViolationException.Code.INVALID_GRAMMAR,
+					path, "expected a leaf predicate with field and operator");
 		}
 	}
 

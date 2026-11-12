@@ -50,3 +50,14 @@
 4. 配置并验证 embedding endpoint 后，再单独验收知识检索和 MetricView 校验链路。
 
 本轮没有进行持续压测、故障恢复演练或新的 ONN/PG 受控性能基准；也没有改变业务数据、模型配置或 ONN Core 服务。
+
+## 2026-11-13 DSL 重试优化代码验收
+
+针对上一轮 CUST-001 关系问数中 `conditions.properties` 数组形状错误、关系方向错误引发的 DSL 重试，本轮在 Ontomato 功能分支增加以下保护：
+
+- ONN DSL 在适配器执行前统一校验属性谓词形状；数组结构会返回具体 DSL 路径和“查询未执行”说明。合法的 `operator: "logic"` 与 and/or/not 组合继续接受。
+- ONN 关系类型未知、未导入或方向不匹配时，错误中列出 ontology 定义的方向和可用关系，便于 Agent 按已知 schema 修正。
+- ONN 单次 Agent 调用最多允许连续 4 次失败 DSL 尝试；成功后清零。预算通过同步预留统计在并发工具调用下生效，其他 adapter 不受此限制。
+- DSL 语法门通过后才发出 `m3.query.started`，因此前置拒绝不会伪装成已提交到 ONN 的查询。
+
+定向验证：`DslGrammarValidatorTest` 9 项、`AgentCallContextTest` 1 项、`OnnCoreGraphCompilerTest` 6 项通过；`git diff --check` 通过。未运行会连接数据库或外部系统的全量 Java 测试。本节为本地代码验收记录，**尚未部署到 108，也未复测相同网页问数的端到端耗时**；部署后需复测 CUST-001，确认错误 DSL 在调用次数上受控，并按阶段日志判断剩余耗时归属。本轮没有修改任何 onn-core 目录内容。

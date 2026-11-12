@@ -67,4 +67,53 @@ class DslGrammarValidatorTest {
 	void anUnknownClassIsLeftToTheOtherChecks() {
 		assertDoesNotThrow(() -> DslGrammarValidator.validate(timeseriesDsl("/Missing", "name"), CLASS_DEFS));
 	}
+
+	@Test
+	void rejectsArrayPropertiesAtTheExactPathBeforeAdapterDispatch() {
+		JSONObject dsl = JSON.parseObject("""
+				{"answer":{"steps":[{"graph":{"patterns":[{"objects":[{"class":"/Sensor",
+				  "conditions":{"properties":[{"field":"name","operator":"=","value":"x"}]}}]}]},
+				  "output":{"fields":[{"variable":"s","field":"id"}]}}]}}""");
+		DslContractViolationException error = assertThrows(DslContractViolationException.class,
+				() -> DslGrammarValidator.validate(dsl, CLASS_DEFS));
+		assertEquals("answer.steps[0].graph.patterns[0].objects[0].conditions.properties",
+				error.getViolations().get(0).getDslPath());
+		assertTrue(error.getMessage().contains("query was not executed"));
+	}
+
+	@Test
+	void acceptsNestedBooleanPropertyPredicates() {
+		JSONObject dsl = timeseriesDsl("/Sensor", "reading");
+		JSONObject condition = dsl.getJSONObject("answer").getJSONArray("steps").getJSONObject(0)
+				.getJSONObject("graph").getJSONArray("patterns").getJSONObject(0)
+				.getJSONArray("objects").getJSONObject(0).getJSONObject("conditions");
+		condition.put("properties", JSON.parseObject("""
+				{"and":[{"field":"name","operator":"=","value":"x"},
+				{"not":[{"field":"name","operator":"=","value":"y"}]}]}"""));
+		assertDoesNotThrow(() -> DslGrammarValidator.validate(dsl, CLASS_DEFS));
+	}
+
+	@Test
+	void acceptsDocumentedLogicOperatorWithMultiplePredicates() {
+		JSONObject dsl = timeseriesDsl("/Sensor", "reading");
+		JSONObject condition = dsl.getJSONObject("answer").getJSONArray("steps").getJSONObject(0)
+				.getJSONObject("graph").getJSONArray("patterns").getJSONObject(0)
+				.getJSONArray("objects").getJSONObject(0).getJSONObject("conditions");
+		condition.put("properties", JSON.parseObject("""
+				{"operator":"logic","and":[{"field":"name","operator":"=","value":"x"},
+				{"field":"id","operator":"!=","value":"y"}]}"""));
+		assertDoesNotThrow(() -> DslGrammarValidator.validate(dsl, CLASS_DEFS));
+	}
+
+	@Test
+	void rejectsMalformedLogicalPredicatesWithTheNestedPath() {
+		JSONObject dsl = timeseriesDsl("/Sensor", "reading");
+		JSONObject condition = dsl.getJSONObject("answer").getJSONArray("steps").getJSONObject(0)
+				.getJSONObject("graph").getJSONArray("patterns").getJSONObject(0)
+				.getJSONArray("objects").getJSONObject(0).getJSONObject("conditions");
+		condition.put("properties", JSON.parseObject("{\"and\":[{\"field\":\"name\",\"operator\":\"=\"},7]}"));
+		DslContractViolationException error = assertThrows(DslContractViolationException.class,
+				() -> DslGrammarValidator.validate(dsl, CLASS_DEFS));
+		assertTrue(error.getViolations().get(0).getDslPath().endsWith("conditions.properties.and[1]"));
+	}
 }

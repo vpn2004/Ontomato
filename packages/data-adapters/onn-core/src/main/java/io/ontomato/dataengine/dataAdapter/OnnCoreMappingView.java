@@ -3,10 +3,7 @@ package io.ontomato.dataengine.dataAdapter;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Set;
+import java.util.*;
 
 // 单次编译冻结mapping内容，所有对象与关系校验共用一次解析。
 final class OnnCoreMappingView {
@@ -54,12 +51,30 @@ final class OnnCoreMappingView {
     void validateRelationship(OnnCoreSchema schema, String type, String from, String to) {
         JSONObject expected = schema.mappingRelationship(type);
         JSONObject imported = rules == null ? null : rules.getJSONObject(type);
-        if (expected == null || imported == null || Boolean.FALSE.equals(imported.getBoolean("enable")))
-            throw new IllegalStateException("ONN relationship is unknown, disabled or not imported: " + type);
+        if (expected == null || imported == null || Boolean.FALSE.equals(imported.getBoolean("enable"))) {
+            throw new IllegalStateException("ONN relationship is unknown, disabled or not imported: " + type
+                + ". Available enabled relationships: " + availableRelationships(schema));
+        }
         for (String key : java.util.List.of("fromclass", "toclass", "fromField", "toField"))
             if (!Objects.equals(expected.getString(key), imported.getString(key)))
                 throw new IllegalStateException("ONN relationship mapping changed; re-import schema: " + type);
         if (!from.equals(expected.getString("fromclass")) || !to.equals(expected.getString("toclass")))
-            throw new IllegalArgumentException("ONN relationship direction or endpoints do not match: " + type);
+            throw new IllegalArgumentException("ONN relationship endpoint/direction mismatch at relationship.type[0]: requested "
+                + from + " -> " + to + " via " + type + "; ontology defines " + expected.getString("fromclass") + " -> "
+                + expected.getString("toclass") + ". Available enabled relationships: " + availableRelationships(schema));
+    }
+
+    private String availableRelationships(OnnCoreSchema schema) {
+        JSONObject definitions = rules == null ? null : rules;
+        if (definitions == null || definitions.isEmpty()) return "none; import enabled relationships in Ontology Manager";
+        List<String> available = new ArrayList<>();
+        for (String name : definitions.keySet()) {
+            JSONObject imported = definitions.getJSONObject(name);
+            JSONObject expected = schema.mappingRelationship(name);
+            if (expected == null || imported == null || Boolean.FALSE.equals(imported.getBoolean("enable"))) continue;
+            if (available.size() == 12) { available.add("..."); break; }
+            available.add(expected.getString("fromclass") + " --" + name + "--> " + expected.getString("toclass"));
+        }
+        return available.isEmpty() ? "none; import enabled relationships in Ontology Manager" : available.toString();
     }
 }

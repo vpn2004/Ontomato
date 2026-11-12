@@ -34,6 +34,7 @@ public final class OnnCoreAdapter implements DataAdapter, ConditionalObjectWrite
         this.versionCheckedWindows = versionCheckedWindows;
     }
     public boolean useM3() { return false; }
+    @Override public int consecutiveDslFailureLimit() { return 4; }
     public Connection openConnection() throws SQLException { throw new UnsupportedOperationException("ONN Core is not a JDBC data source"); }
     /** Probe the authenticated ONN HTTP API instead of routing a non-JDBC source through JDBC metadata. */
     @Override

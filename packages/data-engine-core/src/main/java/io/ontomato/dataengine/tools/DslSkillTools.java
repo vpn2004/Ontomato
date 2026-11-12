@@ -22,6 +22,7 @@ import io.ontomato.dataengine.config.BusinessConfig;
 import io.ontomato.dataengine.config.DataRagConfig;
 import io.ontomato.dataengine.dataAdapter.DataAdapter;
 import io.ontomato.dataengine.dataAdapter.DataAdapterRegistry;
+import io.ontomato.dataengine.dataAdapter.DslGrammarValidator;
 import io.ontomato.dataengine.dao.JSONRuleDao;
 import io.ontomato.dataengine.dao.VectorResourceDao;
 import io.ontomato.dataengine.logging.AgentCallContext;
@@ -93,6 +94,8 @@ public class DslSkillTools {
 		String ret = null;
 		String dslStr = null;
 		String error = null;
+		DataAdapter timeConditionAdapter = null;
+		boolean dslTrialReserved = false;
 		// ABC path m3.query event: sessionId takes the base sessionId of the outer AgentCallContext of the tool loop (no sub-query layer)
 		AgentCallContext callContext = AgentCallContext.current();
 		String sessionId = callContext == null ? null : callContext.getSessionId();
@@ -105,8 +108,17 @@ public class DslSkillTools {
 			BusinessConfig businessConfig = businessConfigService.get(callContext.getDomainId());
 			Map<String, Object> jsonRule = jsonRuleDao.query(callContext.getDomainId());
 			dslStr = DslUtil.normalizeClassNames(dslStr, (List<Map<String, Object>>)jsonRule.get("classDef"));
-			DataAdapter timeConditionAdapter = dataAdapterRegistry.create(businessConfig, jsonRule);
+			timeConditionAdapter = dataAdapterRegistry.create(businessConfig, jsonRule);
+			int failureLimit = timeConditionAdapter.consecutiveDslFailureLimit();
+			if (failureLimit > 0 && !callContext.reserveDslTrial(failureLimit)) {
+				error = "The DSL trial budget is exhausted after " + failureLimit
+						+ " consecutive failures. Do not execute another DSL in this Agent call; return a clear limitation.";
+				ret = "Query not executed:\n" + error;
+				return new DslOutcome(false, error, ret);
+			}
+			dslTrialReserved = failureLimit > 0;
 			dslStr = DslUtil.setConditionTimeColumnToCorrectFormat(dslStr, dataRagConfig.getDslMightTimeFormats(), (List<Map<String, Object>>)jsonRule.get("classDef"), timeConditionAdapter.timeConditionsAsEpochMillis(), timeConditionAdapter.timeConditionZone());
+			DslGrammarValidator.validate(JSON.parseArray(dslStr).getJSONObject(0), (List<Map<String, Object>>)jsonRule.get("classDef"));
 			JSONObject m3StartedPayload = new JSONObject();
 			m3StartedPayload.put("dsl", safeJson(dslStr));
 			m3StartedPayload.put("m3Mode", "V1");
@@ -180,6 +192,17 @@ public class DslSkillTools {
 				m3Failed.put("error", new JSONObject().fluentPut("message", rawError));
 				DiagnosticEventLogger.emit("m3.query.failed", sessionId, m3Failed);
 				DiagnosticEventLogger.emit("m3.query.finished", sessionId, new JSONObject().fluentPut("status", "error").fluentPut("durationMs", System.currentTimeMillis() - m3Start));
+			}
+		}
+		if (dslTrialReserved && callContext != null) {
+			int failureLimit = timeConditionAdapter.consecutiveDslFailureLimit();
+			int failures = callContext.finishDslTrial(error == null);
+			if (error != null) {
+				log.warn("[{}] Adapter DSL trial failed ({}/{} consecutive)", sessionId, failures, failureLimit);
+				if (failures >= failureLimit) {
+					ret += "\nSTOP: the adapter DSL trial budget is exhausted after " + failureLimit
+							+ " consecutive failures. Do not submit another query; return a clear limitation.";
+				}
 			}
 		}
 		return new DslOutcome(error == null, error, ret);

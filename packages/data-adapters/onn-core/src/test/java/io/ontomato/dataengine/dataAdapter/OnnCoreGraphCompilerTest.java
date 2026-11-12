@@ -110,4 +110,19 @@ class OnnCoreGraphCompilerTest {
             assertThrows(IllegalStateException.class, () -> new OnnCoreGraphCompiler(q, s, mapping), change);
         }
     }
+
+    @Test void relationshipFailuresNameTheDefinedDirectionAndUsableRelationship() {
+        OnnCoreSchema schema = new OnnCoreSchema(schemaWire());
+        Map<String, Object> mapping = schema.ontology();
+        OnnCoreMappingView view = new OnnCoreMappingView(mapping);
+        IllegalArgumentException wrongDirection = assertThrows(IllegalArgumentException.class,
+            () -> view.validateRelationship(schema, AB, B, A));
+        assertTrue(wrongDirection.getMessage().contains(A + " --" + AB + "--> " + B));
+        assertTrue(wrongDirection.getMessage().contains(B + " -> " + A));
+
+        IllegalStateException unknown = assertThrows(IllegalStateException.class,
+            () -> view.validateRelationship(schema, "/test/missing", A, B));
+        assertTrue(unknown.getMessage().contains("Available enabled relationships"));
+        assertTrue(unknown.getMessage().contains(AB));
+    }
 }

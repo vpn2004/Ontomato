@@ -23,6 +23,11 @@ public interface DataAdapter {
         return "";
     }
 
+    /** Maximum consecutive failed trial DSL executions in one Agent call; zero leaves legacy sources unchanged. */
+    default int consecutiveDslFailureLimit() {
+        return 0;
+    }
+
 	/** Product capabilities independent of the source query language. */
 	default DataAdapterCapabilities capabilities() {
         return DataAdapterCapabilities.legacy(useM3());
