@@ -19,7 +19,7 @@ T33 原隔离验收已经交付有界 schema/304 缓存、adapter 元数据锁�
 | 短混合 c8 | 99.7 QPS / p95 143.4ms | 114.0 / 106.0ms | 吞吐与尾延迟落后 |
 | 物化模式诊断，191行三跳 | 36.665ms | 22.339ms | 仅关闭窗口不能消除差距 |
 
-原报告 [T33 部署后 PG 比较](file:///Users/weichen/Documents/dev/worktrees/ontomato-v4.1.1-zh/docs/onn-core-t33-quality-pg-comparison-20261109.zh-CN.md) 的9710次正式请求均独立校验，环境是实际部署，非纯引擎基准、不含LLM；没有给后端增加相同隔离限额。T34 起改用固定四容器隔离环境，每轮与自己的同轮/相邻 PG 对照，不把跨轮毫秒差或比例差直接归因某个提交。
+原报告 [T33 部署后 PG 比较](/Users/weichen/Documents/dev/worktrees/ontomato-v4.1.1-zh/docs/onn-core-t33-quality-pg-comparison-20261109.zh-CN.md) 的9710次正式请求均独立校验，环境是实际部署，非纯引擎基准、不含LLM；没有给后端增加相同隔离限额。T34 起改用固定四容器隔离环境，每轮与自己的同轮/相邻 PG 对照，不把跨轮毫秒差或比例差直接归因某个提交。
 
 ## 2. T34–T40 每轮交付了什么
 
@@ -31,7 +31,7 @@ T33 原隔离验收已经交付有界 schema/304 缓存、adapter 元数据锁�
 | T37 | 多source批次复用两侧懒建scoped iterator | c698d29e | 三跳逻辑scans1215/suffix1212、实际iterator构建6次；domain分配与短反序改善，不等于逻辑读/物理I/O减少。 |
 | T38 | 三个内部纯读点复用私有只读权限策略 | 1d467cbc | 公共策略/有效定义/类读取仍深副本；domain三题B/op降低，同轮HTTP短反序改善；191行三跳严格1.3015845未达，持续c4未达、c8达标。 |
 | T39（历史，未发布） | 公开绑定结构带私有bool，首次清理原地删除 | 0105f658、9de6e1ef | 域分配下降；公开别名独占证明不成立，不能作为可发布安全结果；T40撤回。HTTP短反序未见一致显著收益。 |
-| T40（进行中） | 最小安全回退 + 三跳CPU/阶段定位 | 待冻结完整提交 | 新外部包真实旧路径红灯已出现；最终绿灯、profile结论、正式包与108部署待证。安全优先，不承诺本轮提速。 |
+| T40（进行中） | 最小安全回退 + 三跳CPU/阶段定位 | 产品39c3adf6；冻结HEAD aed62eda | 真实别名红灯后作者/独立专项绿；全仓test/vet/race通过，最终增强新请求测试另跑专项race；profile、普通包及108部署待证，不承诺提速。 |
 
 T34–T38 自动化覆盖包含各轮专项、全仓单测、vet、完整串行race、真实Core E2E与隔离完整应用。T38/T39 初始“红灯”有新增计量缺失，不能等同实际旧路径行为反证；实现后补反证应标明时间。T39 nil测试也不能追认为真正实现前红灯。详细更正在第4节，T40用真实别名回归建立新的红→绿证据。
 
@@ -73,7 +73,7 @@ T34 汇总旧表曾混用基线ONN33.349和推算PG20.655。这里以T34原验�
 3. **同轮c4。** T39同轮基线97.206509QPS/62.051777ms p95，候选97.973903/61.676251；原始变化约+0.789%/−0.605%，不是跨轮T38→T39的+7.18QPS/−12.4%归因。c4吞吐门槛实际差0.644061QPS，旧0.74有误。HTTP反序三题也没有双侧一致显著收益，不能由分配下降推出“时延主体不在分配”。
 4. **请求总数。** 69820正确：`(3660+3200+1800)×2+270+52230`；旧公式漏了两阶段各3200混合与1800CPU定向，共10000，不能把总数改为59820。
 5. **TDD。** 首次红灯主要是缺计量，不能证明旧分配行为；nil测试实现后补写且未保证实际nil前置，不能称“先测后修”。T40真实别名红灯为独立新证据；独立overlay对0105f658旧sanitizer的实际nil测试已真实exit1，是T40事后历史反证，不能追认T39当时TDD。
-6. **身份。** 原T39 build-manifest是首次未注入ldflags的无效发布候选，不是验收普通包；应用摘要pending/旧T38 buildIdentity为继承元数据。实际产品实现full commit为0105f658227eb0ccfeea6957667c9d9a5f1d0d2c和9de6e1ef3e3471dc8ffa98bcc6dc09c8abcabe59。四包实际Go VCS为5154e6e29a361b06841629f6716d66c6c15e571a、modified=true；显式build_commit却是短5154e6e2（未注入-dirty），UTC2026-11-11T10:26:24Z，保留差异不伪造后缀。四包均已由构建代理及独立审查只读核验，Linux包未执行。
+6. **身份。** 原T39 build-manifest是首次未注入ldflags的无效发布候选，不是验收普通包；应用摘要pending/旧T38 buildIdentity为继承元数据。实际产品实现full commit为0105f658227eb0ccfeea6957667c9d9a5f1d0d2c和9de6e1ef3e3471dc8ffa98bcc6dc09c8abcabe59。四包实际Go VCS为5154e6e29a361b06841629f6716d66c6c15e571a、modified=true；显式build_commit却是短5154e6e2（未注入-dirty），UTC2026-11-11T10:26:24Z，保留差异不伪造后缀。四包由构建代理只读核验；Linux两包另经独立审查核验，mac原文件未由独立审查者重复读取，Linux包未执行。
 
 | T39真实验收产物 | SHA256 |
 |---|---|
@@ -104,26 +104,28 @@ T34–T39每轮真实普通Core本机非权限7800项：质量60查询/183检查
 
 | T40 gate | 状态 |
 |---|---|
-| 外部公开引用/结构浅拷贝/替换属性身份/Return+Bindings+Data回归 | 实现前真实4顶层FAIL，完整exit1日志已留存；最终绿灯待证 |
-| nested map/slice、真实nil/空JSON/类型 | 两个不变量实现前PASS，不称修复红灯；最终回归待证 |
-| 全仓test/vet/完整串行race | 待结果，必须真实exit |
+| 外部公开引用/结构浅拷贝/替换属性身份/Return+Bindings+Data回归 | 实现前真实4顶层FAIL；作者绿灯exit0，独立34顶层专项全PASS/0SKIP，安全源码阻断解除 |
+| nested map/slice、真实nil/空JSON/类型 | 两个不变量实现前PASS；最终增强全新ReadTicket/ReadSnapshot并追加T40+类型专项race exit0；nil旧缺陷由事后overlay exit1反证 |
+| 全仓test/vet/完整串行race | 真实exit0/0/0；domain11.733s/race66.244s、storage race5.252s；最终新请求测试增强另经专项race通过，产品源不变 |
 | 本机最终普通包7800与mac权限 | 待结果 |
 | Linux双UID/同源专项/真实oracle | 待结果；无私有env SKIP单列 |
 | 真实应用/PG/历史/offset窗口/恢复 | 待结果，布尔adapter拒绝保留 |
 | 独立安全与数值审查、发布gate | 待结果 |
 
+完整test/vet/race与最终增强测试不是相同测试输入：完整检查之后仅增强新请求隔离用例，产品字节不变；最终专项race补齐，不称所有最终测试字节都曾运行全仓。原生全仓包含既有未跟踪审计probe，普通包不编入测试，Linux测试包overlay排除另记身份。逐字日志与JSON的SHA索引位于Core [自动化归档](/Users/weichen/Documents/dev/onn-core/docs/acceptance/t40/evidence/automated/archive-index.json)。
+
 历史失败保留：T34反序能力刷新拒绝；T35切换预热build变化拒绝；T36隔离PG临时socket误就绪；T38目录保护性拒绝、摘要器旧SHA、scp截断；T39管理socket长目录和本轮发现的安全/证据缺口。T26故障tag并非每轮重跑，不把前序成绩当本轮新覆盖。既有fixture类测试未设置私有env时的SKIP与显式oracle独立执行分开。
 
 ## 7. 最终包、108运行态和回滚
 
-当前仅历史预检可用，最终T40普通包与生产状态待填。需要同时记录full source commit、full build commit、实际dirty、Go版本、UTC、tags=[]、四产物SHA与产品/测试/probe各自清单；不以文档HEAD代替冻结源码。用户既有源码空行与审计probe、应用LiveInstanceGraph未提交改动保留，不入本轮提交。
+T40普通包已构建并经独立身份复核，完整E2E/Linux/发布gate仍待；生产状态仅有预检，不能把可用包当已部署。需要同时记录full source commit、full build commit、实际dirty、Go版本、UTC、tags=[]、四产物SHA与产品/测试/probe各自清单；不以文档HEAD代替冻结源码。用户既有源码空行与审计probe、应用LiveInstanceGraph未提交改动保留，不入本轮提交。
 
 | 最终T40构建字段 | 实际值 |
 |---|---|
-| 产品实现full commit/冻结manifest | 待结果 |
-| build VCS/显式commit/dirty/UTC/Go/tags | 待结果 |
-| Linux OMS/CLI SHA256 | 待结果 |
-| macOS OMS/CLI SHA256 | 待结果 |
+| 产品实现full commit/冻结manifest | 39c3adf6ae92caeacae5bc2c1c331dd55165ad5f；冻结HEAD aed62eda1a501da37a6281da4ba258ed85292434，255普通源/362tracked tests+t22；构建cmd/internal清单范围独立标注 |
+| build VCS/显式commit/dirty/UTC/Go/tags | full VCS aed62eda1a501da37a6281da4ba258ed85292434，modified=true；显式同full-dirty；UTC2026-11-12T01:03:16Z；tags=[]、CGO0；Go版本以manifest待补 |
+| Linux OMS/CLI SHA256 | fbd44325014cb96525dbae6d9ca0aec3dcbf41214e8e34962794f864f808e817 / 718b610ba8c19664f95e5b9d4dae8c97def8006b6d44438c6fd62b7216689ac3 |
+| macOS OMS/CLI SHA256 | 1106df4e026ced9d36e264e7b9307afc1cb3fb7fa9032dede6e2c5b81a961d3c / 74209ffffc63d94773f07547cf73ac33843be11c27da72946b5a4673d3162dd3 |
 
 | 108端口 | 预检旧状态 | 最终实际/proc exe SHA与版本 | 逐服务切换/就绪/smoke | 备份与回滚 |
 |---|---|---|---|---|
@@ -147,7 +149,7 @@ T34–T38的字段投影、身份跳扫、邻接后缀与scoped iterator、内�
 
 ### 属性、身份、iterator与窗口生命周期
 
-- 属性缺失、显式null与存在值三态要保留；Data的AttributeStates不能由Bindings中字段是否存在反推。JSON数值/嵌套map/slice与逐出现独立副本边界需保留，应用可修改公开返回副本而不影响其它出现或下次查询。
+- 属性缺失、显式null与存在值三态要保留；Data的AttributeStates不能由Bindings中字段是否存在反推。窗口水化从缓存取得的嵌套map/slice保持逐出现递归副本，int64/json.Number等原类型保持。通用sanitizer恢复的契约是逐出现顶层map重建，不能承诺对调用者任意注入的嵌套容器额外深复制；新请求隔离已用最终增强回归的全新ReadTicket/ReadSnapshot及专项race验证。
 - 身份枚举合并V2历史无marker对象、legacy和marker-only空对象，不仅扫描marker。逻辑读取计费与物理I/O/CPU不同，不能据profile counter减少收费或扩大预算。
 - scoped iterator仅用于正式Client、有效同库票据、owned readSnapshot的单批请求；正ScanLimit、Atomic/foreign/no snapshot/故障包装回旧路径。scope结束关闭，不跨请求借用；callback不递归KV/关闭快照。
 - `version_checked_window`是有界版本校验会话，不是历史物化快照。只有显式选择、能力/安全树/显式limit匹配才启用；省略limit按旧materialized路径。answerComplete与sourceExhausted分别表达，返回请求5000行不等于源全量耗尽。
@@ -167,4 +169,4 @@ T34–T38的字段投影、身份跳扫、邻接后缀与scoped iterator、内�
 
 T40三跳/c4/c8门槛尚未判定；历史T38一项接近或c8达标不自动关闭本轮目标。大对象数/高扇出/长时持续与生产持久盘需另立验证规模，固定1979对象、5740边与8×60秒无法推广到这些情景。GitHub官方参考若因地区限制不可用，应如实记录阻塞，不绕过限制，不声称已完成未实际核查的外部参考。
 
-本报告最终以 [T40验收报告](file:///Users/weichen/Documents/dev/onn-core/docs/acceptance/t40/report.zh-CN.md)、[独立审查](file:///Users/weichen/Documents/dev/onn-core/docs/acceptance/t40/independent-review.zh-CN.md) 与各轮原始证据为依据。当前独立审查/部署结果未完成，以上链接为预定交付入口；后续只在证据到齐后更新为最终结论。
+本报告最终以 [T40验收报告](/Users/weichen/Documents/dev/onn-core/docs/acceptance/t40/report.zh-CN.md)、[独立审查](/Users/weichen/Documents/dev/onn-core/docs/acceptance/t40/independent-review.zh-CN.md) 与各轮原始证据为依据。当前独立审查/部署结果未完成，以上链接为预定交付入口；后续只在证据到齐后更新为最终结论。
