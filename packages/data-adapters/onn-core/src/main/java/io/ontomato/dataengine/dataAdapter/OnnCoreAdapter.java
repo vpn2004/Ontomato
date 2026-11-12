@@ -64,6 +64,20 @@ public final class OnnCoreAdapter implements DataAdapter, ConditionalObjectWrite
         });
     }
     public DataAdapterCapabilities capabilities() { return DataAdapterCapabilities.onnReadOnly(); }
+    @Override public String queryPlanningRules() { return OnnCoreQueryPlan.RULES; }
+    @Override public String queryPlanningExample(List<String> classNames) {
+        if (classNames == null) return "";
+        String cls = classNames.stream().filter(Objects::nonNull).map(String::trim).filter(s -> !s.isEmpty()).findFirst().orElse(null);
+        if (cls == null) return "";
+        if (!cls.startsWith("/")) cls = "/" + cls;
+        JSONObject example = JSONObject.of("problem", "Count distinct objects of the selected class in one step",
+            "answer", JSONObject.of("steps", JSONArray.of(JSONObject.of(
+                "graph", JSONObject.of("patterns", JSONArray.of(JSONObject.of("objects", JSONArray.of(
+                    JSONObject.of("idx", 0, "class", cls, "variable", "obj"))))),
+                "output", JSONObject.of("to_user", true, "fields", JSONArray.of(JSONObject.of(
+                    "variable", "obj", "field", "id", "function", "count", "distinct", true, "as", "object_count")))))));
+        return "```json\n" + JSON.toJSONString(example, Feature.PrettyFormat) + "\n```";
+    }
     // Deliberately separate from legacy objectWrite: arbitrary predicate updates, sandbox writes
     // and existing Python Actions must not acquire write access by the existence of this API.
     @Override public JSONObject readVersionedObject(String className, String id, Principal principal) throws Exception {
@@ -85,12 +99,31 @@ public final class OnnCoreAdapter implements DataAdapter, ConditionalObjectWrite
     public String executeDsl(String json, String sessionId, DslExecutionMode mode, List<String> generated) throws Exception {
         long started = System.nanoTime();
         try { return executeCached(json, sessionId, mode, generated, started); }
+        catch (UnsupportedOperationException error) {
+            // A rejected query shape does not make cached schema/capabilities stale.
+            throw new UnsupportedOperationException(error.getMessage() + "\n" + queryPlanningRules(), error);
+        }
         catch (Exception error) { OnnCoreMetadataCache.invalidate(client); throw error; }
     }
     private String executeCached(String json, String sessionId, DslExecutionMode mode, List<String> generated, long started) throws Exception {
         JSONArray dsls=JSON.parseArray(json);
         if(dsls==null || dsls.size()!=1) throw new UnsupportedOperationException("ONN Core supports one query per execution");
         OnnCoreSchema schema=OnnCoreMetadataCache.schema(client, generated);
+        if (OnnCoreQueryPlan.isMultiStep(dsls.getJSONObject(0))) {
+            OnnCoreQueryPlan plan = new OnnCoreQueryPlan(dsls.getJSONObject(0), schema, mapping);
+            JSONObject source = JSON.parseArray(executeCached(JSONArray.of(plan.source).toJSONString(), sessionId, mode, generated, started)).getJSONObject(0);
+            long localStarted = System.nanoTime();
+            JSONArray answer = plan.evaluate(source.getJSONArray("answer"));
+            JSONObject evidence = source.getJSONObject("evidence");
+            evidence.put("localPipelineSteps", dsls.getJSONObject(0).getJSONObject("answer").getJSONArray("steps").size() - 1);
+            evidence.put("intermediateRows", source.getJSONArray("answer").size());
+            evidence.put("pipelineEvaluation", "bounded-request-local-materialized");
+            evidence.put("localPipelineMs", elapsed(localStarted));
+            JSONObject timing = evidence.getJSONObject("timingMs");
+            if (timing != null) timing.put("total", elapsed(started));
+            source.put("answer", answer);
+            return JSON.toJSONString(List.of(source), Feature.WriteMapNullValue);
+        }
         if (OnnCoreGraphCompiler.isGraph(dsls.getJSONObject(0))) return executeGraph(dsls.getJSONObject(0), schema, generated);
         OnnCoreDslCompiler plan=new OnnCoreDslCompiler(dsls.getJSONObject(0),schema,mapping);
         List<JSONObject> rows=new ArrayList<>();

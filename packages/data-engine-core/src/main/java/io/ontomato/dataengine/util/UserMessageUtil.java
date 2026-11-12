@@ -261,7 +261,7 @@ public class UserMessageUtil {
         questionPromptWithoutExample = questionPromptWithoutExample.replace(BUSSINESS_KNOWLEDGE, bussinessKnowledge);
 
         //DSL rules
-        String dslRule = DslRuleUtil.generateDslRule(subQuery, jsonRule);
+        String dslRule = DslRuleUtil.generateDslRule(subQuery, jsonRule) + "\n\n" + adapter.queryPlanningRules();
         questionPrompt = questionPrompt.replace(DSL_RULE, dslRule);
         questionPromptWithoutExample = questionPromptWithoutExample.replace(DSL_RULE, dslRule);
 

@@ -13,6 +13,16 @@ import io.ontomato.dataengine.dao.VectorResourceDao;
 
 public interface DataAdapter {
 
+    /** Source-specific planning constraints appended to the shared DSL grammar. */
+    default String queryPlanningRules() {
+        return "";
+    }
+
+    /** Optional complete example compatible with the current source, replacing generic examples. */
+    default String queryPlanningExample(List<String> classNames) {
+        return "";
+    }
+
 	/** Product capabilities independent of the source query language. */
 	default DataAdapterCapabilities capabilities() {
         return DataAdapterCapabilities.legacy(useM3());

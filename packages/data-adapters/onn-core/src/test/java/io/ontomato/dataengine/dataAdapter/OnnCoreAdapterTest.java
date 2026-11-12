@@ -38,6 +38,73 @@ class OnnCoreAdapterTest {
     private static final String CAPABILITIES = "/api/v1/system/capabilities";
 
     @Test
+    void providedPlanningExampleExecutesOnTheSelectedSource() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            String text = fixture.adapter().queryPlanningExample(List.of(CLASS));
+            JSONObject example = JSON.parseObject(text.substring(text.indexOf('\n') + 1, text.lastIndexOf("```")));
+            JSONObject result = execute(fixture.adapter(), example, new ArrayList<>());
+            assertEquals(2L, result.getJSONArray("answer").getJSONObject(0).getLongValue("object_count"));
+        }
+    }
+
+    @Test
+    void applicationEntryKeepsRowPermissionsBeforeTemporaryAggregation() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            JSONObject q = query(fields(field("id", "id"), field("name", "name")), null);
+            JSONObject output = q.getJSONObject("answer").getJSONArray("steps").getJSONObject(0).getJSONObject("output");
+            output.put("to_user", false); output.put("save_table", "/temp01");
+            JSONObject count = OnnCoreQueryPlanTest.field("t", "id", "total"); count.put("function", "count");
+            q.getJSONObject("answer").getJSONArray("steps").add(OnnCoreQueryPlanTest.step("/temp01", "t", JSONArray.of(count), null));
+            var permission = org.mockito.Mockito.mock(io.ontomato.dataengine.service.sys.bean.permission.UserDataPermission.class);
+            org.mockito.Mockito.when(permission.getRowPermissionMQLByClassName(CLASS)).thenReturn(predicate("name", "=", "Alpha"));
+            var results = io.ontomato.dataengine.util.HttpRequestUtil.executeDsl(null, fixture.adapter(), JSONArray.of(q).toJSONString(),
+                "local-permission-test", true, new OnnCoreSchema(fixture.schemaResponse).ontology(), null, permission,
+                DslExecutionMode.OPTIMIZED, "test-domain");
+            assertEquals(1L, results[1].data().getJSONArray("data").getJSONObject(0).getJSONArray("answer")
+                .getJSONObject(0).getLongValue("total"), results[1].data().toJSONString());
+        }
+    }
+
+    @Test
+    void executesLinearTemporaryChainThroughTheAdapterAndRetainsSourceEvidence() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            JSONObject first = query(fields(field("id", "id"), field("name", "name")), null);
+            JSONObject output = first.getJSONObject("answer").getJSONArray("steps").getJSONObject(0).getJSONObject("output");
+            output.remove("limit"); output.put("to_user", false); output.put("save_table", "/temp01");
+            JSONObject total = OnnCoreQueryPlanTest.field("t", "id", "total"); total.put("function", "count");
+            first.getJSONObject("answer").getJSONArray("steps").add(OnnCoreQueryPlanTest.step("/temp01", "t", JSONArray.of(total), null));
+            JSONObject result = execute(fixture.adapter(), first, new ArrayList<>());
+            assertEquals(2L, result.getJSONArray("answer").getJSONObject(0).getLongValue("total"));
+            assertEquals(1, fixture.requests(QUERY).size());
+            assertEquals(2, result.getJSONObject("evidence").getIntValue("objectsRead"));
+            assertEquals(1, result.getJSONObject("evidence").getIntValue("localPipelineSteps"));
+            assertEquals("bounded-request-local-materialized", result.getJSONObject("evidence").getString("pipelineEvaluation"));
+        }
+    }
+
+    @Test
+    void invalidLaterStageFailsBeforeBusinessReadsWithActionableRules() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            JSONObject q = OnnCoreQueryPlanTest.query();
+            JSONObject unknown = q;
+            var failure = assertThrows(RuntimeException.class, () -> execute(fixture.adapter(), unknown, new ArrayList<>()));
+            assertTrue(failure.getMessage().contains("Unknown ONN field"));
+            assertTrue(fixture.requests(QUERY).isEmpty());
+            assertTrue(fixture.requests(SAMPLE).isEmpty());
+            q = query(fields(field("id", "id")), null);
+            JSONObject output = q.getJSONObject("answer").getJSONArray("steps").getJSONObject(0).getJSONObject("output");
+            output.put("to_user", false); output.put("save_table", "/temp01"); output.remove("limit");
+            JSONObject later = OnnCoreQueryPlanTest.step("/wrong", "t", JSONArray.of(OnnCoreQueryPlanTest.field("t", "id", "id")), null);
+            q.getJSONObject("answer").getJSONArray("steps").add(later);
+            JSONObject invalid = q;
+            var rejected = assertThrows(UnsupportedOperationException.class, () -> execute(fixture.adapter(), invalid, new ArrayList<>()));
+            assertTrue(rejected.getMessage().contains("immediately previous"));
+            assertTrue(rejected.getMessage().contains("Current data source: ONN Core"));
+            assertTrue(fixture.requests(QUERY).isEmpty());
+        }
+    }
+
+    @Test
     void healthyBoundedClassChecksCountsBeforeAndAfterNativeRead() throws Exception {
         try (Fixture fixture = new Fixture()) {
             List<String> generated = new ArrayList<>();

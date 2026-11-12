@@ -37,7 +37,6 @@ class OnnCoreDslCompilerTest {
         unsupported.put("multiple patterns", dsl -> graph(dsl).getJSONArray("patterns").add(pattern(dsl)));
         unsupported.put("foreign variable", dsl -> output(dsl).getJSONArray("fields").getJSONObject(0).put("variable", "other"));
         unsupported.put("unsupported function", dsl -> output(dsl).getJSONArray("fields").getJSONObject(0).put("function", "median"));
-        unsupported.put("row distinct", dsl -> output(dsl).getJSONArray("fields").getJSONObject(0).put("distinct", true));
         unsupported.put("intermediate output", dsl -> output(dsl).put("to_user", false));
         unsupported.put("oversized page", dsl -> output(dsl).put("limit", JSONObject.of("count", 5001)));
         unsupported.put("negative offset", dsl -> output(dsl).put("limit", JSONObject.of("offset", -1)));
@@ -46,6 +45,32 @@ class OnnCoreDslCompilerTest {
             entry.getValue().accept(dsl);
             assertThrows(UnsupportedOperationException.class, () -> compile(dsl), entry.getKey());
         }
+    }
+
+    @Test
+    void rowDistinctUsesTheWholeTypedProjectionBeforePagination() {
+        JSONObject dsl = query(array(field("category", "category"), field("name", "value")), null);
+        output(dsl).getJSONArray("fields").getJSONObject(0).put("distinct", true);
+        List<JSONObject> rows = List.of(row("f", 0, "B", null), row("e", 0, "B", null),
+            row("d", 0, "A", 1L), row("c", 0, "A", new BigDecimal("1.00")),
+            row("b", 0, "A", "1"), row("a", 0, "B", "1"));
+        JSONArray all = compile(dsl).evaluate(rows);
+        assertEquals(4, all.size());
+        output(dsl).put("limit", JSONObject.of("offset", 1, "count", 2));
+        assertEquals(all.subList(1, 3), compile(dsl).evaluate(rows));
+        List<JSONObject> reversed = new java.util.ArrayList<>(rows); java.util.Collections.reverse(reversed);
+        assertEquals(all.subList(1, 3), compile(dsl).evaluate(reversed));
+    }
+
+    @Test
+    void distinctRejectsAmbiguousOrderingAndMixedAggregates() {
+        JSONObject dsl = query(array(field("category", "category")), null);
+        output(dsl).getJSONArray("fields").getJSONObject(0).put("distinct", true);
+        output(dsl).put("sort", JSONObject.of("fields", array(JSONObject.of("field", "id", "order", "asc"))));
+        assertThrows(UnsupportedOperationException.class, () -> compile(dsl));
+        output(dsl).remove("sort");
+        output(dsl).getJSONArray("fields").add(aggregate("amount", "count", "count", false));
+        assertThrows(UnsupportedOperationException.class, () -> compile(dsl));
     }
 
     @Test

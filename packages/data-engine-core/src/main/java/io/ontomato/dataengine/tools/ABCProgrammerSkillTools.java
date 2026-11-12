@@ -30,6 +30,7 @@ import io.ontomato.dataengine.service.PythonExecuteService;
 import io.ontomato.dataengine.service.sys.bean.permission.UserDataPermission;
 import io.ontomato.dataengine.util.DBSchemaUtil;
 import io.ontomato.dataengine.util.DslRuleUtil;
+import io.ontomato.dataengine.dataAdapter.DataAdapterRegistry;
 
 import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
@@ -44,6 +45,9 @@ public class ABCProgrammerSkillTools {
 	
 	@Autowired
 	private BusinessConfigService businessConfigService;
+
+	@Autowired
+	private DataAdapterRegistry dataAdapterRegistry;
 	
 	@Autowired
 	private ABCHarnessTaskService abcHarnessTaskService;
@@ -307,7 +311,8 @@ public class ABCProgrammerSkillTools {
 		try {
 			AgentCallContext callContext = AgentCallContext.current();
 			Map<String, Object> jsonRule = jsonRuleDao.query(callContext.getDomainId());
-			return DslRuleUtil.generateDslRule(dslScope(classNames), jsonRule);
+			var adapter = dataAdapterRegistry.create(businessConfigService.get(callContext.getDomainId()), jsonRule);
+			return DslRuleUtil.generateDslRule(dslScope(classNames), jsonRule) + "\n\n" + adapter.queryPlanningRules();
 		} catch (Exception e) {
 			log.error(e.getMessage(), e);
 			return "Failed to get the DSL syntax rules: " + e.getMessage();
@@ -322,7 +327,10 @@ public class ABCProgrammerSkillTools {
 		try {
 			AgentCallContext callContext = AgentCallContext.current();
 			Map<String, Object> jsonRule = jsonRuleDao.query(callContext.getDomainId());
-			return DslRuleUtil.generateDslExample(dslScope(classNames), jsonRule);
+			var adapter = dataAdapterRegistry.create(businessConfigService.get(callContext.getDomainId()), jsonRule);
+			String example = adapter.queryPlanningExample(classNames);
+			if (example == null || example.isBlank()) example = DslRuleUtil.generateDslExample(dslScope(classNames), jsonRule);
+			return example + "\n\n" + adapter.queryPlanningRules();
 		} catch (Exception e) {
 			log.error(e.getMessage(), e);
 			return "Failed to get the DSL example: " + e.getMessage();

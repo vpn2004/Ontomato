@@ -18,6 +18,7 @@ final class OnnCoreDslCompiler {
     private final List<JSONObject> predicates = new ArrayList<>();
     private final JSONArray fields, groups, having, sort;
     private final boolean aggregate;
+    private final boolean rowDistinct;
     private final int count, offset;
     private final Set<String> referenced = new HashSet<>();
     private final OnnCoreSchema schema;
@@ -48,14 +49,16 @@ final class OnnCoreDslCompiler {
         if (Boolean.FALSE.equals(output.getBoolean("to_user"))) fail("intermediate output");
         fields = output.getJSONArray("fields");
         if (fields == null || fields.isEmpty()) fail("empty output fields");
-        Set<String> aliases = new HashSet<>(); boolean anyAggregate = false;
+        Set<String> aliases = new HashSet<>(); boolean anyAggregate = false, anyRowDistinct = false;
         for (int i=0;i<fields.size();i++) {
             JSONObject f=fields.getJSONObject(i); field(f, true);
             if (!aliases.add(text(f,"as"))) fail("duplicate output alias");
             if (hasFunction(f)) anyAggregate=true;
-            else if (Boolean.TRUE.equals(f.getBoolean("distinct"))) fail("row DISTINCT");
+            else if (Boolean.TRUE.equals(f.getBoolean("distinct"))) anyRowDistinct=true;
         }
         aggregate=anyAggregate;
+        rowDistinct=anyRowDistinct;
+        if (aggregate && rowDistinct) fail("row DISTINCT mixed with aggregates; project/deduplicate in an intermediate step first");
         JSONObject grouping=output.getJSONObject("group_by");
         if (grouping != null) keys(grouping, "fields", "having");
         groups=grouping==null || grouping.getJSONArray("fields")==null ? new JSONArray() : grouping.getJSONArray("fields");
@@ -72,6 +75,8 @@ final class OnnCoreDslCompiler {
             if (!Set.of("asc","desc").contains(Objects.toString(f.getString("order"), "asc"))) fail("sort order");
             if (aggregate && !hasFunction(f) && !groupFields.contains(f.getString("field"))) fail("aggregate sorting by a non-grouped field");
             if (!aggregate && hasFunction(f)) fail("aggregate sort on object rows");
+            if (rowDistinct && fields.stream().map(JSONObject::from).noneMatch(selected -> selected.getString("field").equals(f.getString("field"))))
+                fail("row DISTINCT ordering must use projected fields");
         }
         JSONObject limit=output.getJSONObject("limit"); if(limit!=null) keys(limit,"count","offset");
         count=limit==null ? 100 : integer(limit,"count",100); offset=limit==null ? 0 : integer(limit,"offset",0);
@@ -270,6 +275,11 @@ final class OnnCoreDslCompiler {
         // An explicit identity tie-breaker makes pages deterministic over the complete set.
         comparator=comparator.thenComparing(bucket -> bucket.stream().map(row->row.getString("id")).min(String::compareTo).orElse(""));
         buckets.sort(comparator);
+        if (rowDistinct) {
+            Set<List<Object>> seen = new HashSet<>();
+            buckets.removeIf(bucket -> !seen.add(fields.stream().map(JSONObject::from)
+                .map(f -> typed(f, value(f, bucket))).toList()));
+        }
         JSONArray result=new JSONArray();
         for(int i=Math.min(offset,buckets.size());i<buckets.size() && result.size()<count;i++) {
             JSONObject row=new JSONObject(); for(Object raw:fields) { JSONObject f=JSONObject.from(raw); row.put(f.getString("as"),value(f,buckets.get(i))); } result.add(row);

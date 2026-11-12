@@ -388,7 +388,7 @@ public class LiveInstanceGraph {
     private List<JSONObject> sampleRows(DataAdapter adapter, ObjectType type, int quota) throws Exception {
         JSONObject dsl = dsl(objects(object(0, "n", type.name, null)), null,
                 fields(field("n", type.pk, "pk"), field("n", type.label, "name")),
-                sort(sortField("pk")), limit(quota, 0));
+                sort(sortField(type.pk)), limit(quota, 0));
         return runDsl(adapter, dsl);
     }
 
@@ -450,7 +450,7 @@ public class LiveInstanceGraph {
             }
             JSONObject dsl = dsl(objects(object(0, "n", type.name, conditions)), null,
                     fields(field("n", type.pk, "pk"), field("n", type.label, "name")),
-                    sort(sortField("pk")), limit(51, 0));
+                    sort(sortField(type.pk)), limit(51, 0));
             for (JSONObject row : runDsl(adapter, dsl)) {
                 nodes.add(node(type, row));
                 if (nodes.size() > 50) break;
