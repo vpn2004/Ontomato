@@ -123,7 +123,7 @@ T40普通包已构建并经独立身份复核，完整E2E/Linux/发布gate仍待
 | 最终T40构建字段 | 实际值 |
 |---|---|
 | 产品实现full commit/冻结manifest | 39c3adf6ae92caeacae5bc2c1c331dd55165ad5f；冻结HEAD aed62eda1a501da37a6281da4ba258ed85292434，255普通源/362tracked tests+t22；构建cmd/internal清单范围独立标注 |
-| build VCS/显式commit/dirty/UTC/Go/tags | full VCS aed62eda1a501da37a6281da4ba258ed85292434，modified=true；显式同full-dirty；UTC2026-11-12T01:03:16Z；tags=[]、CGO0；Go版本以manifest待补 |
+| build VCS/显式commit/dirty/UTC/Go/tags | full VCS aed62eda1a501da37a6281da4ba258ed85292434，modified=true；显式同full-dirty；UTC2026-11-12T01:03:16Z；tags=[]、CGO0；Go1.26.0 |
 | Linux OMS/CLI SHA256 | fbd44325014cb96525dbae6d9ca0aec3dcbf41214e8e34962794f864f808e817 / 718b610ba8c19664f95e5b9d4dae8c97def8006b6d44438c6fd62b7216689ac3 |
 | macOS OMS/CLI SHA256 | 1106df4e026ced9d36e264e7b9307afc1cb3fb7fa9032dede6e2c5b81a961d3c / 74209ffffc63d94773f07547cf73ac33843be11c27da72946b5a4673d3162dd3 |
 
@@ -167,6 +167,6 @@ T34–T38的字段投影、身份跳扫、邻接后缀与scoped iterator、内�
 
 先完成T40真实安全回归与独立gate，拿到CPU+阶段证据后选择下一轮最小可验证优化。若CPU仍集中在复制/反射/JSON，继续计量并对该路径写行为/性能反证；若Java转换、HTTP往返或close有直接占比证据，再由相应模块做同轮A/B，不先认定“非分配主导”。每次变更保留普通角色、三态、路径重数、排序、预算、票据终验、故障顺序与关闭生命周期。
 
-T40三跳/c4/c8门槛尚未判定；历史T38一项接近或c8达标不自动关闭本轮目标。大对象数/高扇出/长时持续与生产持久盘需另立验证规模，固定1979对象、5740边与8×60秒无法推广到这些情景。GitHub官方参考若因地区限制不可用，应如实记录阻塞，不绕过限制，不声称已完成未实际核查的外部参考。
+T40三跳/c4/c8门槛尚未判定；历史T38一项接近或c8达标不自动关闭本轮目标。大对象数/高扇出/长时持续与生产持久盘需另立验证规模，固定1979对象、5740边与8×60秒无法推广到这些情景。本轮已于UTC2026-11-12T00:53:18Z实际查询GitHub golang/go的JSON/map alias参考，官方搜索返回400 FAILED_PRECONDITION（location不支持）；已停止、不绕过，未完成在线优秀项目核查，原始摘录归档于Core自动化证据，不把T38阻塞当本轮核查。
 
 本报告最终以 [T40验收报告](/Users/weichen/Documents/dev/onn-core/docs/acceptance/t40/report.zh-CN.md)、[独立审查](/Users/weichen/Documents/dev/onn-core/docs/acceptance/t40/independent-review.zh-CN.md) 与各轮原始证据为依据。当前独立审查/部署结果未完成，以上链接为预定交付入口；后续只在证据到齐后更新为最终结论。
