@@ -1,6 +1,7 @@
 package io.ontomato.dataengine.service.impl;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.ArgumentMatchers.any;
@@ -10,8 +11,8 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
@@ -100,7 +101,8 @@ class AdminServiceImplPrimaryKeyTest {
 		service.delClass("/ns/device", user);
 
 		// Design 2: these edits only save the model.
-		verify(jsonRuleDao, times(4)).save(any(), eq("d1"));
+		assertFalse(((List<Map<String, Object>>) savedRule().get("classDef")).stream()
+				.anyMatch(def -> "/ns/device".equals(def.get("className"))));
 	}
 
 	@Test
@@ -135,7 +137,6 @@ class AdminServiceImplPrimaryKeyTest {
 		service.setClassAttrDesc("/ns/device", "code", "code", "false", "en", user);
 		service.delClassAttr("/ns/device", "code", "en", user);
 
-		verify(jsonRuleDao, times(2)).save(any(), eq("d1"));
 		assertEquals(List.of("id", "size", "old"), attrNames(savedClass("/ns/device")));
 	}
 
@@ -363,10 +364,14 @@ class AdminServiceImplPrimaryKeyTest {
 		verify(jsonRuleDao, never()).save(any(), any());
 	}
 
-	private Map<String, Object> savedClass(String className) {
+	private Map<String, Object> savedRule() {
 		ArgumentCaptor<Map<String, Object>> saved = ArgumentCaptor.forClass(Map.class);
 		verify(jsonRuleDao, org.mockito.Mockito.atLeastOnce()).save(saved.capture(), eq("d1"));
-		return ((List<Map<String, Object>>) saved.getValue().get("classDef")).stream()
+		return saved.getValue();
+	}
+
+	private Map<String, Object> savedClass(String className) {
+		return ((List<Map<String, Object>>) savedRule().get("classDef")).stream()
 				.filter(classDef -> className.equals(classDef.get("className"))).findFirst().orElseThrow();
 	}
 

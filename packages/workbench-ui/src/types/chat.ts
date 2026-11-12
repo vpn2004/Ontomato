@@ -104,6 +104,8 @@ export interface ResponseSnapshot {
   taskId?: string;
   lastEventSeq?: number;
   requestSeq?: number;
+  /** Server-recorded time to the answer, excluding the later quality-check wait; absent when not recorded. */
+  durationMs?: number;
   primaryText: string;
   analysisText?: string;
   visualizationHTML?: string;

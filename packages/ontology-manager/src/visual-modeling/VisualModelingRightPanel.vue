@@ -67,7 +67,6 @@ const { capabilities } = useManagerAdapter();
           <span class="label">{{ t("hotData.displayName") }}</span>
           <el-input
             :model-value="selectedNode.showName"
-            size="small"
             :placeholder="t('admin.displayName')"
             @update:model-value="emit('updateClassField', selectedNode, 'showName', String($event))"
             @focus="emit('classShowNameFocus', selectedNode)"
@@ -78,7 +77,6 @@ const { capabilities } = useManagerAdapter();
           <span class="label">{{ t("common.description") }}</span>
           <el-input
             :model-value="selectedNode.classDesc"
-            size="small"
             type="textarea"
             :autosize="{ minRows: 2, maxRows: 4 }"
             :placeholder="t('hotData.classDesc')"
@@ -159,7 +157,6 @@ const { capabilities } = useManagerAdapter();
               <span class="label">{{ t("hotData.displayName") }}</span>
               <el-input
                 :model-value="prop.showName"
-                size="small"
                 :placeholder="t('admin.displayName')"
                 @update:model-value="emit('updateAttrField', prop, 'showName', String($event))"
                 @focus="emit('attrShowNameFocus', selectedNode, prop)"
@@ -170,7 +167,6 @@ const { capabilities } = useManagerAdapter();
               <span class="label">{{ t("common.description") }}</span>
               <el-input
                 :model-value="prop.attrDesc"
-                size="small"
                 type="textarea"
                 :autosize="{ minRows: 1, maxRows: 3 }"
                 :placeholder="t('hotData.attributeDesc')"
@@ -187,6 +183,8 @@ const { capabilities } = useManagerAdapter();
 
 <style scoped>
 .right-panel {
+  min-height: 0;
+  flex-shrink: 0;
   width: 360px;
   background: var(--el-bg-color);
   border-left: 1px solid var(--el-border-color);
@@ -242,6 +240,7 @@ const { capabilities } = useManagerAdapter();
 
 .panel-content {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: var(--spacing-lg);
   background: var(--el-bg-color);
@@ -306,7 +305,7 @@ const { capabilities } = useManagerAdapter();
 }
 
 .label {
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   color: var(--el-text-color-secondary);
   font-weight: var(--font-medium);
 }
@@ -395,7 +394,7 @@ code {
 }
 
 .switch-label {
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   color: var(--el-text-color-secondary);
 }
 
@@ -403,6 +402,8 @@ code {
   display: grid;
   gap: var(--spacing-sm);
 }
+.attr-fields .field { margin-bottom: 0; }
+.right-panel :deep(.el-input), .right-panel :deep(.el-textarea) { font-size: var(--text-sm); }
 
 @container ontology-manager (max-width: 1400px) {
   .right-panel {

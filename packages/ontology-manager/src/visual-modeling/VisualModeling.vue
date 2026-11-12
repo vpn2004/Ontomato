@@ -30,6 +30,7 @@ const {
   getMetas,
   updateOntologyAttribute,
   updateOntologyObject,
+  updateOntologyRelation,
 } = useManagerClient();
 
 interface ClassDef {
@@ -146,8 +147,7 @@ let graph: Graph | null = null;
 
 const classList = ref<ClassDef[]>([]);
 const relationList = ref<RelationDef[]>([]);
-// Relations take join fields when the current data adapter requires them (its requiresJoinFields in the backend adapter list).
-const showJoinFields = computed(() => adapter.value?.requiresJoinFields ?? false);
+const requiresJoinFields = computed(() => adapter.value?.requiresJoinFields ?? null);
 
 const selectedNode = ref<ClassDef | null>(null);
 const selectedEdge = ref<RelationDef | null>(null);
@@ -762,6 +762,8 @@ async function loadData() {
         fromclass: rel.fromclass,
         toclass: rel.toclass,
         desc: rel.desc || "",
+        fromField: rel.fromField,
+        toField: rel.toField,
         isNew: false,
       })
     );
@@ -979,24 +981,27 @@ function handleTrash2Node() {
     .catch(() => {});
 }
 
-async function handleAddEdge() {
-  if (!capabilities.value.schemaWrite) return;
-  if (!editingEdge.value) return;
-
+function validateEdgeFields() {
   if (!newEdgeDesc.value.trim()) {
     message.warning(t("hotData.enterRelDesc"));
-    return;
+    return false;
   }
-  if (showJoinFields.value) {
+  if (requiresJoinFields.value) {
     if (!newEdgeFromField.value.trim()) {
       message.warning(t("hotData.enterSrcField"));
-      return;
+      return false;
     }
     if (!newEdgeToField.value.trim()) {
       message.warning(t("hotData.enterTgtField"));
-      return;
+      return false;
     }
   }
+  return true;
+}
+
+async function handleAddEdge() {
+  if (!capabilities.value.schemaWrite) return;
+  if (!editingEdge.value || !validateEdgeFields()) return;
 
   const edge = editingEdge.value;
   const existingRel = relationList.value.find(
@@ -1029,6 +1034,8 @@ async function handleAddEdge() {
     const idx = relationList.value.findIndex((r) => r.relationship === edge.relationship);
     if (idx >= 0) {
       relationList.value[idx].desc = newEdgeDesc.value.trim();
+      relationList.value[idx].fromField = newEdgeFromField.value;
+      relationList.value[idx].toField = newEdgeToField.value;
       relationList.value[idx].isNew = false;
       selectedEdge.value = relationList.value[idx];
     } else {
@@ -1069,20 +1076,26 @@ function handleCancelEdge() {
   edgeDialogVisible.value = false;
 }
 
-function handlePencilEdge() {
-  if (!editingEdge.value) return;
+async function handlePencilEdge() {
+  if (!editingEdge.value || !validateEdgeFields()) return;
 
   const edge = editingEdge.value;
-  const idx = relationList.value.findIndex((r) => r.relationship === edge.relationship);
-  if (idx >= 0) {
-    relationList.value[idx].desc = newEdgeDesc.value.trim();
-    relationList.value[idx].fromField = newEdgeFromField.value;
-    relationList.value[idx].toField = newEdgeToField.value;
-    selectedEdge.value = relationList.value[idx];
+  const changes = {
+    desc: newEdgeDesc.value.trim(),
+    fromField: newEdgeFromField.value.trim(),
+    toField: newEdgeToField.value.trim(),
+  };
+  try {
+    await updateOntologyRelation(edge.relationship, changes);
+    const saved = relationList.value.find((relation) => relation.relationship === edge.relationship)!;
+    Object.assign(saved, changes);
+    selectedEdge.value = saved;
     renderNodes();
-    message.warning(t("hotData.relDescSaved"));
+    message.success(ot("relationSaved"));
+    edgeDialogVisible.value = false;
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : ot("relationSaveFailed"));
   }
-  edgeDialogVisible.value = false;
 }
 
 function handleTrash2Edge() {
@@ -1421,22 +1434,22 @@ async function saveClassDesc(cls: ClassDef) {
   <div class="visual-modeling">
     <div class="toolbar">
       <div class="toolbar-group toolbar-group-primary">
-        <el-button v-if="backToPlayground" :icon="ArrowLeft" @click="emit('back')">
+        <el-button v-if="backToPlayground" text :icon="ArrowLeft" @click="emit('back')">
           {{ ot("backToGraph") }}
         </el-button>
         <el-button v-if="capabilities.schemaWrite" type="primary" :icon="Box" @click="openAddNodeDialog">
           {{ t("hotData.addClass") }}
         </el-button>
-        <el-button v-if="capabilities.schemaWrite" :icon="Link2" @click="openAddEdgeDialog">
+        <el-button v-if="capabilities.schemaWrite" type="primary" plain :icon="Link2" @click="openAddEdgeDialog">
           {{ t("hotData.addRelation") }}
         </el-button>
       </div>
 
       <div class="zoom-controls" role="toolbar" :aria-label="ot('fitCanvas')">
-        <el-button :title="ot('zoomIn')" :aria-label="ot('zoomIn')" @click="onZoomIn"><Plus :size="18" /></el-button>
-        <el-button :title="ot('zoomOut')" :aria-label="ot('zoomOut')" @click="onZoomOut"><Minus :size="18" /></el-button>
-        <el-button :title="ot('fitCanvas')" :aria-label="ot('fitCanvas')" @click="onZoomFit"><Maximize :size="18" /></el-button>
-        <el-button :title="ot('relayout')" :aria-label="ot('relayout')" :disabled="loading || layouting || !classList.length" @click="onRelayout"><Network :size="18" /></el-button>
+        <el-button text :title="ot('zoomIn')" :aria-label="ot('zoomIn')" @click="onZoomIn"><Plus :size="18" /></el-button>
+        <el-button text :title="ot('zoomOut')" :aria-label="ot('zoomOut')" @click="onZoomOut"><Minus :size="18" /></el-button>
+        <el-button text :title="ot('fitCanvas')" :aria-label="ot('fitCanvas')" @click="onZoomFit"><Maximize :size="18" /></el-button>
+        <el-button text :title="ot('relayout')" :aria-label="ot('relayout')" :disabled="loading || layouting || !classList.length" @click="onRelayout"><Network :size="18" /></el-button>
       </div>
 
       <div class="selection-cluster">
@@ -1451,6 +1464,8 @@ async function saveClassDesc(cls: ClassDef) {
         <div class="toolbar-group toolbar-group-selection">
           <el-button
             :icon="Pencil"
+            type="primary"
+            plain
             :disabled="(!selectedNode && !selectedEdge) || (!capabilities.schemaWrite && !!selectedEdge)"
             @click="
               selectedNode
@@ -1465,6 +1480,7 @@ async function saveClassDesc(cls: ClassDef) {
           <el-button
             v-if="capabilities.schemaWrite"
             type="danger"
+            plain
             :icon="Trash2"
             :disabled="!selectedNode && !selectedEdge"
             @click="selectedNode ? handleTrash2Node() : handleTrash2Edge()"
@@ -1512,7 +1528,7 @@ async function saveClassDesc(cls: ClassDef) {
       :editing-node="editingNode"
       :editing-edge="editingEdge"
       :class-list="classList"
-      :show-join-fields="showJoinFields"
+      :requires-join-fields="requiresJoinFields"
       @update-edge-field="updateEditingEdgeField"
       @add-node="handleAddNode"
       @pencil-node="handlePencilNode"

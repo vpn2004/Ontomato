@@ -1,6 +1,16 @@
 // Simplified Chinese UI messages. Identifiers and persisted values remain unchanged.
 export default {
   "admin": {
+    "qaAgentOrderOnly": "内置问数智能体：仅支持调整排序",
+    "actions": "操作",
+    "actionsHint": "此智能体可在对话中执行的已发布本体操作。执行前会列出操作及参数值，并等待用户确认。",
+    "actionsPlaceholder": "选择智能体可执行的操作",
+    "actionsLoadFailed": "操作列表加载失败，仍可保存智能体的其他设置。",
+    "metricViews": "指标视图",
+    "metricViewsHint": "此智能体可直接传入参数执行的已发布只读指标视图，例如对向量属性进行知识检索。请在智能体提示词中说明各视图的使用场景。",
+    "metricViewsPlaceholder": "选择智能体可执行的指标视图",
+    "metricViewsLoadFailed": "指标视图列表加载失败，仍可保存智能体的其他设置。",
+
     "agentEditorTools": "技能与工具",
     "agentEditorIntro": {
       "basic": "设置智能体在工作区中的名称、说明及可用状态。",
@@ -524,7 +534,6 @@ export default {
     "user": "你",
     "assistant": "智能体",
     "toolCall": "工具调用",
-    "messagesAndTools": "查看本轮消息与工具结果"
   },
   "governance": {
     "title": "知识治理",
@@ -575,6 +584,12 @@ export default {
     "back": "返回"
   },
   "analysis": {
+    "loopProcess": "执行过程",
+    "loopProcessFailures": "{n} 个步骤出现失败",
+    "loopOtherToolRecords": "本轮其他工具记录",
+    "hourInterval": "间隔",
+    "everyNHours": "每小时 | 每 {n} 小时",
+
     "agentNameRequired": "请输入智能体名称",
     "agentUpdated": "智能体更新成功",
     "agentCreated": "智能体创建成功",
@@ -636,9 +651,6 @@ export default {
     "queryComplete": "查询完成",
     "querying": "查询中",
     "partiallyComplete": "部分完成",
-    "analysisSkillExecution": "分析技能执行",
-    "executingSkills": "正在执行分析技能…",
-    "completedSkills": "已完成 {n} 个技能",
     "analysisFailed": "分析失败",
     "taskCreateFailed": "创建任务失败",
     "deleteTaskConfirm": "确认删除此任务？此操作无法撤销。",
@@ -650,9 +662,6 @@ export default {
     "stopFailed": "停止任务失败",
     "scheduledTaskCreated": "定时任务“{name}”已创建",
     "taskCreated": "任务“{name}”已创建并开始执行",
-    "everyDay": "每天",
-    "everyWeek": "每周",
-    "everyMonth": "每月",
     "scheduleSaved": "定时设置已保存",
     "scheduleSaveFailed": "定时设置保存失败",
     "noReportContent": "没有可下载的报告内容",
@@ -863,6 +872,8 @@ export default {
     "noTools": "此服务暂无工具。"
   },
   "task": {
+    "hourly": "按小时",
+
     "generatingReport": "正在生成报告",
     "daily": "每天",
     "executing": "执行中",
@@ -994,6 +1005,9 @@ export default {
     "defaultPrefix": "默认："
   },
   "chat": {
+    "turnDurationSeconds": "耗时 {seconds} 秒",
+    "turnDurationMinutes": "耗时 {minutes} 分 {seconds} 秒",
+
     "followUpFailed": "追问失败",
     "noContentCopy": "当前消息没有可复制内容",
     "copiedToClipboard": "已复制到剪贴板",

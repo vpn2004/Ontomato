@@ -1,5 +1,5 @@
 import type { RunNotFoundEvent } from "@ontomato/contracts/chat";
-import type { ChatClientEvent } from "@ontomato/contracts/chat";
+import type { ChatClientEvent, RunCancelResponse } from "@ontomato/contracts/chat";
 import { Request, Response, Router } from "express";
 import { z } from "zod";
 import { runDataAgentWorkflow } from "../../services/chat/graph/workflow";
@@ -9,7 +9,11 @@ import { createLogger } from "../../logging/logger";
 import { createSseErrorEvent, initializeSse } from "../../utils/sse";
 import { AuthFailedError } from "../../utils/backend-client";
 import { buildTurnIdentity, runWithTurnContext } from "../../logging/log-context";
-import { recordTurnRunFinish } from "../../services/turn-run/turn-run-store";
+import {
+  recordTurnAnswerCompletion,
+  recordTurnRunFinish,
+  turnRunDurationMs,
+} from "../../services/turn-run/turn-run-store";
 import { convertEventForFrontend } from "../../services/chat/event-projection";
 import { runStreamStore, requireRunAccess, type RunRecord } from "../utils/run-stream";
 import { generateTitleAsync } from "../utils/title";
@@ -64,18 +68,30 @@ router.post(
       : runStreamStore.getActiveRunByKey(chatRunKey(threadId));
     if (run) requireRunAccess(run, req as AuthenticatedRequest, chatRunKey(threadId));
 
-    runWithOptionalTurn(run, () => {
+    await runWithOptionalTurn(run, async () => {
       const cancelled = run ? runStreamStore.cancelByRunId(run.id) : false;
       logger.info(tApp("foundation.log.chat.cancelReq"), {
         threadId,
         runId: run?.id || runId || undefined,
         cancelled,
       });
+      // The cancel moment is the turn's end; the workflow's later cancelled finish keeps it.
+      const durationMs =
+        cancelled && run?.turn
+          ? turnRunDurationMs(
+              await recordTurnRunFinish({
+                threadId: run.turn.threadId,
+                requestSeq: run.turn.requestSeq,
+                status: "cancelled",
+              })
+            )
+          : undefined;
       res.json({
         success: true,
         cancelled,
         ...(run?.turn ? { turnKey: run.turn.turnKey, requestSeq: run.turn.requestSeq } : {}),
-      });
+        ...(durationMs === undefined ? {} : { durationMs }),
+      } satisfies RunCancelResponse);
     });
   })
 );
@@ -159,8 +175,16 @@ router.get(
 
     const turn = buildTurnIdentity(threadId, requestSeq);
     run.turn = turn;
-    const finishTurnRun = (status: "completed" | "failed" | "cancelled") =>
-      recordTurnRunFinish({ threadId, requestSeq, status });
+    const finishTurnRun = async (status: "completed" | "failed" | "cancelled") => {
+      const durationMs = turnRunDurationMs(await recordTurnRunFinish({ threadId, requestSeq, status }));
+      // Only a still-open run can carry the fact; a cancelled run already wrote its terminal frame.
+      if (durationMs !== undefined && run.status === "running") {
+        runStreamStore.appendJson(run.id, {
+          type: "turn_finished",
+          durationMs,
+        } satisfies ChatClientEvent);
+      }
+    };
 
     if (run.controller.signal.aborted) {
       await finishTurnRun("cancelled");
@@ -275,6 +299,8 @@ router.get(
           });
         }
 
+        await recordTurnAnswerCompletion({ threadId, requestSeq, completedAt: new Date() });
+
         // One execution covers the workflow execution plus the settlement of late facts registered on it; this turn's display
         // includes the quality-check panel, so the subscription channel closes only after both finalize. Past the bounded limit, waiting is abandoned.
         await finalState.pendingLateFacts?.settleAll();
@@ -287,8 +313,8 @@ router.get(
           return;
         }
 
-        runStreamStore.appendRaw(run.id, "[DONE]", true);
         await finishTurnRun("completed");
+        runStreamStore.appendRaw(run.id, "[DONE]", true);
         runStreamStore.finishRun(run.id, "completed");
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);

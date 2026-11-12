@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -67,7 +68,7 @@ class VectorResourceServiceImplTest {
 	@Test
 	void uploadAppendsTheOriginalTextUnderTheRelationalPrimaryKey() throws Exception {
 		InputStream file = new ByteArrayInputStream(new byte[] {1});
-		when(vectorResourceDao.insert(any(), eq(file), eq("png"), eq("d1"))).thenAnswer(call -> {
+		when(vectorResourceDao.insert(any(), eq(file), eq("png"), eq("d1"), isNull())).thenAnswer(call -> {
 			VectorResource saved = call.getArgument(0);
 			saved.setPath("idx/new.png");
 			saved.setContent("cleaned");
@@ -95,7 +96,7 @@ class VectorResourceServiceImplTest {
 
 	@Test
 	void textOnlyUploadSavesTxtResourceAndAttaches() throws Exception {
-		when(vectorResourceDao.insert(any(), eq(null), eq(null), eq("d1"))).thenAnswer(call -> {
+		when(vectorResourceDao.insert(any(), eq(null), eq(null), eq("d1"), isNull())).thenAnswer(call -> {
 			VectorResource saved = call.getArgument(0);
 			saved.setPath("idx/text.txt");
 			saved.setContent("cleaned");
@@ -112,7 +113,7 @@ class VectorResourceServiceImplTest {
 
 	@Test
 	void attachFailureRollsBackSavedResourceAndThrows() throws Exception {
-		when(vectorResourceDao.insert(any(), any(), any(), eq("d1"))).thenAnswer(call -> {
+		when(vectorResourceDao.insert(any(), any(), any(), eq("d1"), isNull())).thenAnswer(call -> {
 			VectorResource saved = call.getArgument(0);
 			saved.setPath("idx/new.png");
 			return saved;
@@ -126,7 +127,7 @@ class VectorResourceServiceImplTest {
 
 	@Test
 	void rollbackFailureIsSuppressedWhenAttachFails() throws Exception {
-		when(vectorResourceDao.insert(any(), any(), any(), eq("d1"))).thenAnswer(call -> {
+		when(vectorResourceDao.insert(any(), any(), any(), eq("d1"), isNull())).thenAnswer(call -> {
 			VectorResource saved = call.getArgument(0);
 			saved.setPath("idx/new.png");
 			return saved;
@@ -186,6 +187,20 @@ class VectorResourceServiceImplTest {
 				() -> service.saveAndAttach(resource("text"), new ByteArrayInputStream(new byte[] {1}), "png", "d1"));
 
 		verifyNoInteractions(vectorResourceDao);
+		verify(adapter, never()).queryVectorAttr(any(), any(), any());
+		verify(adapter, never()).updateObjects(any(), any(), any(), any());
+	}
+
+	@Test
+	void readOnlyAdaptersRejectBatchBeforeEmbeddingOrWriting() throws Exception {
+		doReturn(DataAdapterCapabilities.onnReadOnly()).when(adapter).capabilities();
+		var embedding = mock(io.ontomato.dataengine.service.ai.EmbeddingService.class);
+		var gate = mock(io.ontomato.dataengine.service.vector.VectorRetrievalGate.class);
+		ReflectionTestUtils.setField(service, "embeddingService", embedding);
+		ReflectionTestUtils.setField(service, "retrievalGate", gate);
+		assertThrows(UnsupportedOperationException.class,
+				() -> service.saveAndAttachAll(List.of(resource("text")), "d1"));
+		verifyNoInteractions(vectorResourceDao, embedding, gate);
 		verify(adapter, never()).queryVectorAttr(any(), any(), any());
 		verify(adapter, never()).updateObjects(any(), any(), any(), any());
 	}

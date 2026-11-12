@@ -3,7 +3,7 @@ import type {
   AnalysisTaskRun,
   AnalysisConversationTurn,
 } from "@ontomato/contracts/analysis-task";
-import type { AnalysisAgent } from "@ontomato/contracts/analysis-agent";
+import type { AgentLineupEntry, AnalysisAgent } from "@ontomato/contracts/analysis-agent";
 import { computed, ref } from "vue";
 import { defineStore } from "pinia";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -30,6 +30,7 @@ import {
   type ReportSection,
 } from "../../../utils/analysis-report";
 import { buildTaskProgressMap } from "../utils/taskProgress";
+import { buildScheduleExpression, type ScheduleSettings } from "../utils/schedule-expression";
 import { downloadPptx, type PptGenerationOptions } from "../utils/ppt";
 import { workbenchContent } from "../../../content";
 
@@ -43,6 +44,8 @@ export interface TaskSession {
   messages: Message[];
   input: string;
   isLoading: boolean;
+  /** The saved conversation of this task is being read on open; nothing is known to show yet. */
+  historyLoading?: boolean;
   streamingSnapshot: ResponseSnapshot | null;
   stopRequested: boolean;
   lastTaskEventSeq?: number;
@@ -59,7 +62,11 @@ function createRunId(prefix: string, id: string) {
 }
 
 export const useAnalysisStore = defineStore("analysis", () => {
-  const agents = ref<AnalysisAgent[]>([]);
+  /** Enabled entries of the domain's agent lineup, Q&A included, in the server's display order. */
+  const agentLineup = ref<AgentLineupEntry[]>([]);
+  const agents = computed<AnalysisAgent[]>(() =>
+    agentLineup.value.flatMap((entry) => (entry.kind === "agent" ? [entry.agent] : []))
+  );
   const selectedAgentId = ref("");
   const tasks = ref<AnalysisTask[]>([]);
   const taskTotal = ref(0);
@@ -168,6 +175,13 @@ export const useAnalysisStore = defineStore("analysis", () => {
   const displayIsLoading = computed(() =>
     isSelectedLatestRun.value ? (activeSession.value?.isLoading ?? false) : false
   );
+  /** A selected task whose session is not open yet, or whose saved history is still being read. */
+  const displayHistoryLoading = computed(
+    () =>
+      isSelectedLatestRun.value &&
+      !!currentTaskId.value &&
+      (!activeSession.value || !!activeSession.value.historyLoading)
+  );
   const displayTaskStatus = computed(() => selectedRun.value?.status || currentTask.value?.status);
   const showPendingTaskNotice = computed(
     () =>
@@ -238,7 +252,8 @@ export const useAnalysisStore = defineStore("analysis", () => {
 
   async function loadAgents(): Promise<void> {
     try {
-      agents.value = await analysisAgentApi.getEnabledAgents();
+      const lineup = await analysisAgentApi.getAgentLineup();
+      agentLineup.value = lineup.filter((entry) => entry.kind === "qa" || entry.agent.isEnabled);
     } catch (error) {
       console.error(workbenchContent().console.loadAgentsFailed, error);
     }
@@ -413,7 +428,12 @@ export const useAnalysisStore = defineStore("analysis", () => {
     const session = sessions.value[task.id];
     if (session) {
       session.messages = [];
-      await loadTaskHistory(task.id);
+      session.historyLoading = true;
+      try {
+        await loadTaskHistory(task.id);
+      } finally {
+        session.historyLoading = false;
+      }
       if (session.messages.length === 0 && task.question) {
         session.messages.push({ id: Date.now(), role: "user", content: task.question });
       }
@@ -1063,8 +1083,6 @@ export const useAnalysisStore = defineStore("analysis", () => {
     params?: {
       scheduleEnabled: boolean;
       scheduleExpression: string;
-      scheduleFrequency: string;
-      scheduleTime: string;
       emailEnabled: boolean;
       emailRecipient: string;
     }
@@ -1125,27 +1143,10 @@ export const useAnalysisStore = defineStore("analysis", () => {
     await refresh;
   }
 
-  function saveSchedule(settings: {
-    frequency: string;
-    time: string;
-    dayOfWeek: number;
-    dayOfMonth: number;
-    emailNotify: boolean;
-    emails: string;
-  }) {
+  function saveSchedule(settings: ScheduleSettings & { emailNotify: boolean; emails: string }) {
     const task = currentTask.value;
     if (!task) return;
-    const scheduleMap: Record<string, string> = {
-      [t("analysis.everyDay")]: "1d",
-      [t("analysis.everyWeek")]: "7d",
-      [t("analysis.everyMonth")]: "30d",
-    };
-    let scheduleExpression = `${scheduleMap[settings.frequency] || "1d"}@${settings.time}`;
-    if (settings.frequency === t("analysis.everyWeek")) {
-      scheduleExpression += `/${settings.dayOfWeek}`;
-    } else if (settings.frequency === t("analysis.everyMonth")) {
-      scheduleExpression += `/${settings.dayOfMonth}`;
-    }
+    const scheduleExpression = buildScheduleExpression(settings);
 
     analysisTaskApi
       .updateTask(task.id, {
@@ -1214,6 +1215,7 @@ export const useAnalysisStore = defineStore("analysis", () => {
   }
 
   return {
+    agentLineup,
     agents,
     selectedAgentId,
     tasks,
@@ -1232,6 +1234,7 @@ export const useAnalysisStore = defineStore("analysis", () => {
     displayMessages,
     displayStreamingSnapshot,
     displayIsLoading,
+    displayHistoryLoading,
     displayTaskStatus,
     sessions,
     activeSession,

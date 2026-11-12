@@ -6,6 +6,7 @@ import {
 } from "../data-query/query-fact";
 import { createHash } from "node:crypto";
 import { t } from "../../i18n";
+import { HttpError } from "../../utils/errors";
 import { getCheckpointer } from "../../infrastructure/connection";
 import type { ExtendedPostgresSaver, ThreadReadAccess } from "../../infrastructure/checkpointer";
 import { convertRowsToCsv, sanitizeDownloadName } from "./download";
@@ -20,9 +21,11 @@ import {
   listQueryRuns,
   type QueryRun,
 } from "../data-query/query-run-store";
-import { listTurnRuns } from "../turn-run/turn-run-store";
+import { listTurnRuns, turnRunDurationMs } from "../turn-run/turn-run-store";
 import { combineResultTruncation } from "../data-query/protocol";
 import { deleteThreadBusinessData, deleteThreadMetadata } from "./thread-store";
+import { getPostgresPool, qualifiedTable } from "../../infrastructure/postgres";
+import { deleteAnalysisNotebook } from "../analysis-agent/loop/notebook";
 
 type ThreadDownloadPayload = {
   fileName: string;
@@ -36,6 +39,17 @@ function requireCheckpointer(): ExtendedPostgresSaver {
     throw new Error(t("api.checkpointerNotInitialized"));
   }
   return checkpointer as unknown as ExtendedPostgresSaver;
+}
+
+export async function deleteUserThreads(userId: string): Promise<void> {
+  const { rows } = await getPostgresPool().query(
+    `SELECT thread_id, domain_id FROM ${qualifiedTable("thread_metadata")} WHERE user_id = $1 AND domain_id <> ''`, [userId]
+  );
+  for (const row of rows) {
+    const turns = await listTurnRuns(row.thread_id);
+    for (const turn of turns) await deleteAnalysisNotebook(`${row.thread_id}-${turn.requestSeq}`);
+    await deleteThread(row.thread_id, userId, row.domain_id);
+  }
 }
 
 export async function deleteThread(
@@ -183,6 +197,10 @@ export async function getThreadMessagesPayload(
     messages.push({ role: "user", content: turn.displayMessage, requestSeq });
     seenUserRequests.add(requestSeq);
   };
+  const turnDuration = (requestSeq: number) => {
+    const durationMs = turnRunDurationMs(turnsByRequest.get(requestSeq));
+    return durationMs === undefined ? {} : { durationMs };
+  };
   let requestCounter = 0;
 
   for (const msg of rawMessages) {
@@ -212,6 +230,7 @@ export async function getThreadMessagesPayload(
       role: "assistant",
       content: msg.content,
       requestSeq,
+      ...turnDuration(requestSeq),
       snapshot: buildHistoryReadSnapshot({
         persisted: snapshot,
         fallbackContent: msg.content,
@@ -242,6 +261,7 @@ export async function getThreadMessagesPayload(
         role: "assistant",
         content,
         requestSeq: snapshot.requestSeq,
+        ...turnDuration(snapshot.requestSeq),
         snapshot: {
           mode: "standard",
           status: snapshot.snapshot.status || "completed",
@@ -259,6 +279,7 @@ export async function getThreadMessagesPayload(
         role: "assistant",
         content,
         requestSeq: snapshot.requestSeq,
+        ...turnDuration(snapshot.requestSeq),
         snapshot: buildHistoryReadSnapshot({
           persisted: snapshot.snapshot,
           fallbackContent: content,
@@ -291,7 +312,7 @@ export async function getThreadDataDownload(
   const truncation = combineResultTruncation(datasets);
 
   if (!rows.length && !truncation) {
-    throw new Error(t("api.threadNoDataDownload"));
+    throw new HttpError(404, t("api.threadNoDataDownload"));
   }
 
   const baseName = await getQuestionBaseName(
@@ -328,7 +349,7 @@ export async function getThreadDslDownload(
   const dsl = queryRun ? extractDslTextFromQueryRun(queryRun) : "";
 
   if (!dsl) {
-    throw new Error(t("api.threadNoDslDownload"));
+    throw new HttpError(404, t("api.threadNoDslDownload"));
   }
 
   const baseName = await getQuestionBaseName(

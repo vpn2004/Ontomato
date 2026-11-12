@@ -25,7 +25,11 @@ import { renderPrompt } from "../../../core/prompts/loader";
 import { t } from "../../../i18n";
 import { buildTurnIdentity, runWithLogContext } from "../../../logging/log-context";
 import { createLogger } from "../../../logging/logger";
-import { recordTurnRunFinish, recordTurnRunStart } from "../../turn-run/turn-run-store";
+import {
+  recordTurnRunFinish,
+  recordTurnRunStart,
+  turnRunDurationMs,
+} from "../../turn-run/turn-run-store";
 import { allocateRequestSeq } from "../../chat/thread-store";
 import type { AnalysisRunIdentity } from "../task/run-history";
 import { datasetSchemaService } from "../../data-query/dataset-schema";
@@ -42,6 +46,8 @@ import { assembleLoopEvidenceCapability } from "./evidence";
 import { combineResultTruncation } from "../../data-query/protocol";
 import { partialReportNotice } from "../report/partial-result-notice";
 import { assembleLoopExternalMcpCapability } from "./external-mcp";
+import { assembleLoopActionCapability } from "./actions";
+import { assembleLoopMetricViewCapability } from "./metric-views";
 import { assembleLoopNotebookCapability } from "./notebook";
 import { assembleLoopDataProbeCapability } from "./probe";
 import { collectPptConversation } from "../delivery/ppt-conversation";
@@ -69,6 +75,8 @@ export const ANALYSIS_LOOP_COMPACTION_PROMPT_KEYS: CompactionPromptKeys = {
 export interface RunAnalysisLoopParams {
   userQuestion: string;
   userId: string;
+  /** Display name of the user the session talks to; regular-session turns carry it from the verified caller. */
+  userName?: string;
   threadId: string;
   taskId?: string;
   /** Run identity captured at acceptance; artifacts and terminal states use it to confirm the current task is still writable. */
@@ -94,9 +102,14 @@ function buildSystemPrompt(params: {
   dataProbeCapability: string;
   deliverableCapability: string;
   completionInstruction: string;
+  evidenceRequirements: string;
+  workingMethod: string;
   chartCapability: string;
   skillCapability: string;
   externalMcpCapability: string;
+  actionCapability: string;
+  metricViewCapability: string;
+  userName?: string;
 }): string {
   const trimmed = params.loopPrompt?.trim();
   return renderPrompt("analysis-agent.loop.system", {
@@ -105,9 +118,16 @@ function buildSystemPrompt(params: {
     dataProbeCapability: params.dataProbeCapability,
     deliverableCapability: params.deliverableCapability,
     completionInstruction: params.completionInstruction,
+    evidenceRequirements: params.evidenceRequirements,
+    workingMethod: params.workingMethod,
     chartCapability: params.chartCapability,
     skillCapability: params.skillCapability,
     externalMcpCapability: params.externalMcpCapability,
+    actionCapability: params.actionCapability,
+    metricViewCapability: params.metricViewCapability,
+    currentUser: params.userName?.trim()
+      ? tApp("analysis.loop.current-user", { userName: params.userName.trim() })
+      : "",
   });
 }
 
@@ -167,6 +187,13 @@ export async function runAnalysisLoopWorkflow(
       params.onEvent?.({ ...event, requestSeq });
     };
     const loopSignal = signal || new AbortController().signal;
+    /** Ends the turn run and reports its recorded duration on the turn's event channel. */
+    const finishTurnRun = async (status: "completed" | "failed" | "cancelled") => {
+      const durationMs = turnRunDurationMs(await recordTurnRunFinish({ threadId, requestSeq, status }));
+      if (durationMs !== undefined) {
+        params.onEvent?.({ type: "turn_finished", durationMs, requestSeq });
+      }
+    };
 
     const trajectory = createDeepAnalysisArtifactStore({
       taskId,
@@ -254,6 +281,28 @@ export async function runAnalysisLoopWorkflow(
       const externalMcpCapability = await assembleLoopExternalMcpCapability({
         selectedServiceNames: enabledMcpServiceNames,
         domainId,
+        signal: loopSignal,
+        trajectory,
+      });
+
+      // Only a regular session has a user who can confirm an Action before it runs.
+      const actionCapability = await assembleLoopActionCapability({
+        selectedActionIds: conversationTurn ? agent.enabledActionIds || [] : [],
+        token,
+        apiKey,
+        userId,
+        locale: params.locale,
+        signal: loopSignal,
+        trajectory,
+      });
+
+      // Read-only, so every run of the agent may call its metric views, unlike Actions.
+      const metricViewCapability = await assembleLoopMetricViewCapability({
+        selectedMetricViewIds: agent.enabledMetricViewIds || [],
+        token,
+        apiKey,
+        userId,
+        locale: params.locale,
         signal: loopSignal,
         trajectory,
       });
@@ -361,6 +410,7 @@ export async function runAnalysisLoopWorkflow(
         },
         workerTools: {
           evidence: evidenceCapability.createWorkerTool,
+          readEvidence: evidenceCapability.readTool,
           probe: dataProbeCapability.createWorkerTools,
           skills: skillCapability.workerTools,
           notebook: notebookCapability.createWorkerTools,
@@ -381,10 +431,13 @@ export async function runAnalysisLoopWorkflow(
 
       const tools = [
         evidenceCapability.supervisorTool,
+        evidenceCapability.readTool,
         dispatchTool,
         ...dataProbeCapability.supervisorTools,
         ...skillCapability.supervisorTools,
         ...externalMcpCapability.supervisorTools,
+        ...actionCapability.supervisorTools,
+        ...metricViewCapability.supervisorTools,
         ...notebookCapability.supervisorTools,
         ...chartCapability.supervisorTools,
       ];
@@ -396,9 +449,14 @@ export async function runAnalysisLoopWorkflow(
           dataProbeCapability: dataProbeCapability.prompt,
           deliverableCapability: notebookCapability.supervisorPrompt,
           completionInstruction: notebookCapability.completionInstruction,
+          evidenceRequirements: notebookCapability.evidenceRequirements,
+          workingMethod: notebookCapability.workingMethod,
           chartCapability: chartCapability.prompt,
           skillCapability: skillCapability.prompt,
           externalMcpCapability: externalMcpCapability.prompt,
+          actionCapability: actionCapability.prompt,
+          metricViewCapability: metricViewCapability.prompt,
+          userName: params.userName,
         }),
         messages: [],
         tools,
@@ -454,18 +512,18 @@ export async function runAnalysisLoopWorkflow(
           finalAnswerLength: finalAnswer?.length || 0,
         });
         const payload = await persistArtifacts("cancelled", report, finalAnswer);
-        await recordTurnRunFinish({ threadId, requestSeq, status: "cancelled" });
+        await finishTurnRun("cancelled");
         return payload;
       }
 
       if (reportDeliverableEnabled && !report.trim()) {
         await persistArtifacts("failed", report);
-        await recordTurnRunFinish({ threadId, requestSeq, status: "failed" });
+        await finishTurnRun("failed");
         throw new Error(tApp("analysis.loop.loop-workflow.269"));
       }
 
       const payload = await persistArtifacts("completed", report, finalAnswer);
-      await recordTurnRunFinish({ threadId, requestSeq, status: "completed" });
+      await finishTurnRun("completed");
 
       logger.info(tApp("analysis.loop.loop-workflow.270"), {
         taskId,
@@ -486,7 +544,7 @@ export async function runAnalysisLoopWorkflow(
         reportDeliverableEnabled ? undefined : lastAssistantText(state?.messages || []).text,
         message
       );
-      await recordTurnRunFinish({ threadId, requestSeq, status });
+      await finishTurnRun(status);
       if (status === "cancelled") return trajectory.current();
       throw error;
     } finally {

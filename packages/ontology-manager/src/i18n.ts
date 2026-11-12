@@ -2,6 +2,7 @@ import en from "element-plus/es/locale/lang/en";
 import type { Language as ElementLocale } from "element-plus/es/locale";
 import sharedEn from "./locales/en";
 export { chineseMessages } from "./chinese-messages";
+import { objectViewEn } from "./object-views/messages";
 
 export type TextParams = Record<string, string | number>;
 
@@ -20,6 +21,7 @@ const ontologyEn = {
   importAdapterOntology: "Replace model with this schema",
   adapterOntologyImportNotice: "This replaces the current Ontomato model, including its display names and descriptions, with the reviewed schema. Export any edits you want to keep first. Business data in the source is unchanged.",
   adapterOntologyImported: "Source schema imported",
+  ...objectViewEn,
   browseObjectData: "Browse Object Data",
   ontologyGraphDesc:
     "Search and inspect objects, properties, and relations in the current Ontology.",
@@ -203,7 +205,7 @@ const ontologyEn = {
   deleteRelationConfirm: 'Delete relation "{name}"?',
   objectConnections: "Object Connections",
   relationConnectionNote:
-    "A relation connects a source object to a target object. This interface currently supports editing relation descriptions and deleting relations.",
+    "A relation connects a source object to a target object. You can edit its description and join fields.",
   objectMissing: "Object type does not exist or has been deleted",
   attributeMissing: "Property does not exist or has been deleted",
   relationMissing: "Relation type does not exist or has been deleted",
@@ -351,6 +353,13 @@ const ontologyEn = {
   assetGenerateFromNl: "New Metric View",
   assetFieldName: "Name",
   assetStatusPendingReview: "Pending review",
+  assetChecked: "{n} selected",
+  assetCheckAll: "Select all filtered items",
+  assetCheckNamed: "Select {name}",
+  assetClearChecked: "Clear selection",
+  assetBatchStatus: "Update status",
+  assetBatchStatusSaved: "Status updated for {n} items",
+  assetBatchStatusFailed: "Failed to update {failed} of {total} items; failed items remain selected",
   assetMetricType: "Metric type",
   assetMetricTypeGeneral: "General",
   assetMetricTypeStatic: "Static",
@@ -360,6 +369,8 @@ const ontologyEn = {
   assetOperationRead: "Read",
   assetOperationWrite: "Write",
   taskCron: "Cron expression",
+  taskBatchStart: "Start selected tasks",
+  taskBatchStop: "Stop selected tasks",
   taskCronPlaceholder: "e.g. 0 */5 * * * ?",
   taskLinkedFunction: "Linked function",
   taskSelectFunction: "Select write function",
@@ -424,6 +435,7 @@ const ontologyEn = {
   staleResponseDropped: "Host context changed; the stale response was discarded",
   knowledgeAdd: "Add Knowledge",
   knowledgeEdit: "Edit Knowledge",
+  knowledgeDesc: "Maintain business rules, terminology and context to support business understanding and queries.",
   knowledgeTitle: "Knowledge Title",
   knowledgeContent: "Knowledge Content",
   knowledgeTags: "Tags",

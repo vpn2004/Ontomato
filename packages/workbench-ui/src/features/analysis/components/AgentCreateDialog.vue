@@ -126,6 +126,12 @@ const classesLoading = ref(false);
 const externalMcpServiceNames = ref<string[]>([]);
 const mcpServicesLoading = ref(false);
 const mcpServicesLoadFailed = ref(false);
+const publishedActions = ref<Array<{ id: string; name: string }>>([]);
+const actionsLoading = ref(false);
+const actionsLoadFailed = ref(false);
+const publishedMetricViews = ref<Array<{ id: string; name: string }>>([]);
+const metricViewsLoading = ref(false);
+const metricViewsLoadFailed = ref(false);
 const hotReports = ref<AnalysisReportHotCardSummary[]>([]);
 const hotReportsLoading = ref(false);
 const hotReportsLoadFailed = ref(false);
@@ -168,6 +174,36 @@ async function loadExternalMcpServices() {
     mcpServicesLoadFailed.value = true;
   } finally {
     mcpServicesLoading.value = false;
+  }
+}
+
+async function loadPublishedActions() {
+  actionsLoading.value = true;
+  actionsLoadFailed.value = false;
+  try {
+    const json = await queryViewApi.listPublishedActions();
+    publishedActions.value = (Array.isArray(json.data) ? json.data : [])
+      .filter((action: any) => typeof action?.id === "string")
+      .map((action: any) => ({ id: action.id, name: String(action.name || action.id) }));
+  } catch {
+    actionsLoadFailed.value = true;
+  } finally {
+    actionsLoading.value = false;
+  }
+}
+
+async function loadPublishedMetricViews() {
+  metricViewsLoading.value = true;
+  metricViewsLoadFailed.value = false;
+  try {
+    const json = await queryViewApi.listPublishedMetricViews();
+    publishedMetricViews.value = (Array.isArray(json.data) ? json.data : [])
+      .filter((metricView: any) => typeof metricView?.id === "string")
+      .map((metricView: any) => ({ id: metricView.id, name: String(metricView.name || metricView.id) }));
+  } catch {
+    metricViewsLoadFailed.value = true;
+  } finally {
+    metricViewsLoading.value = false;
   }
 }
 
@@ -342,6 +378,8 @@ const form = ref({
   hotReportEnabled: true,
   summaryPosition: "bottom" as AnalysisReportSummaryPosition,
   enabledMcpServiceNames: [] as string[],
+  enabledActionIds: [] as string[],
+  enabledMetricViewIds: [] as string[],
   analysisDimensionPrompt: "",
   summarizerPrompt: "",
   conclusionMakerPrompt: "",
@@ -352,7 +390,6 @@ const form = ref({
   graphScopeRootClassNames: [] as string[],
   graphScopeMaxDepth: 1 as number | undefined,
   isEnabled: true,
-  sortOrder: 0 as number,
   avatarKey: "Brain",
   avatarColor: defaultAvatarColor.value,
 });
@@ -387,6 +424,8 @@ function fillFormFromAgent(agent: AnalysisAgent) {
     hotReportEnabled: agent.hotReportEnabled !== false,
     summaryPosition: agent.summaryPosition === "top" ? "top" : "bottom",
     enabledMcpServiceNames: agent.enabledMcpServiceNames || [],
+    enabledActionIds: agent.enabledActionIds || [],
+    enabledMetricViewIds: agent.enabledMetricViewIds || [],
     analysisDimensionPrompt: agent.analysisDimensionPrompt || "",
     summarizerPrompt: agent.summarizerPrompt || "",
     conclusionMakerPrompt: agent.conclusionMakerPrompt || "",
@@ -398,7 +437,6 @@ function fillFormFromAgent(agent: AnalysisAgent) {
       agent.graphScope?.mode === "subgraph" ? [...agent.graphScope.rootClassNames] : [],
     graphScopeMaxDepth: agent.graphScope?.mode === "subgraph" ? agent.graphScope.maxDepth : 1,
     isEnabled: agent.isEnabled,
-    sortOrder: agent.sortOrder ?? 0,
     avatarKey,
     avatarColor,
   };
@@ -414,6 +452,8 @@ function resetForm() {
     hotReportEnabled: true,
     summaryPosition: "bottom",
     enabledMcpServiceNames: [],
+    enabledActionIds: [],
+    enabledMetricViewIds: [],
     analysisDimensionPrompt: "",
     summarizerPrompt: "",
     conclusionMakerPrompt: "",
@@ -424,7 +464,6 @@ function resetForm() {
     graphScopeRootClassNames: [],
     graphScopeMaxDepth: 1,
     isEnabled: true,
-    sortOrder: 0,
     avatarKey: "Brain",
     avatarColor: defaultAvatarColor.value,
   };
@@ -503,6 +542,8 @@ watch(
         loadObjectClasses();
       }
       loadExternalMcpServices();
+      loadPublishedActions();
+      loadPublishedMetricViews();
       if (props.editingAgent) {
         fillFormFromAgent(props.editingAgent);
         if (props.editingAgent.id) {
@@ -824,8 +865,6 @@ watch(isDark, () => {
             v-model="form.enabledMcpServiceNames"
             multiple
             filterable
-            collapse-tags
-            collapse-tags-tooltip
             clearable
             :loading="mcpServicesLoading"
             :disabled="mcpServicesLoading || mcpServicesLoadFailed"
@@ -848,6 +887,66 @@ watch(isDark, () => {
             type="warning"
             :closable="false"
             :title="t('admin.externalMcpServicesLoadFailed')"
+          />
+          <template v-if="!form.reportDeliverableEnabled">
+            <AgentConfigurationHeader class="actions-header" :title="t('admin.actions')" :hint="t('admin.actionsHint')" :count="form.enabledActionIds.length">
+              <template #icon><Workflow :size="16" /></template>
+              <template #actions>
+                <el-button size="small" :loading="actionsLoading" :icon="RefreshCw" @click="loadPublishedActions">{{ t('common.refresh') }}</el-button>
+              </template>
+            </AgentConfigurationHeader>
+            <el-select
+              popper-class="agent-editor-select-dropdown"
+              v-model="form.enabledActionIds"
+              multiple
+              filterable
+              clearable
+              :loading="actionsLoading"
+              :disabled="actionsLoading || actionsLoadFailed"
+              :aria-label="t('admin.actions')"
+              :placeholder="t('admin.actionsPlaceholder')"
+              fit-input-width
+              style="width: 100%"
+            >
+              <el-option v-for="action in publishedActions" :key="action.id" :label="action.name" :value="action.id" />
+              <el-option v-for="id in form.enabledActionIds.filter(id => !publishedActions.some(action => action.id === id))" :key="id" :label="id" :value="id" disabled />
+            </el-select>
+            <el-alert
+              v-if="actionsLoadFailed"
+              class="mcp-load-alert"
+              type="warning"
+              :closable="false"
+              :title="t('admin.actionsLoadFailed')"
+            />
+          </template>
+          <AgentConfigurationHeader class="actions-header" :title="t('admin.metricViews')" :hint="t('admin.metricViewsHint')" :count="form.enabledMetricViewIds.length">
+            <template #icon><BarChart3 :size="16" /></template>
+            <template #actions>
+              <el-button size="small" :loading="metricViewsLoading" :icon="RefreshCw" @click="loadPublishedMetricViews">{{ t('common.refresh') }}</el-button>
+            </template>
+          </AgentConfigurationHeader>
+          <el-select
+            popper-class="agent-editor-select-dropdown"
+            v-model="form.enabledMetricViewIds"
+            multiple
+            filterable
+            clearable
+            :loading="metricViewsLoading"
+            :disabled="metricViewsLoading || metricViewsLoadFailed"
+            :aria-label="t('admin.metricViews')"
+            :placeholder="t('admin.metricViewsPlaceholder')"
+            fit-input-width
+            style="width: 100%"
+          >
+            <el-option v-for="metricView in publishedMetricViews" :key="metricView.id" :label="metricView.name" :value="metricView.id" />
+            <el-option v-for="id in form.enabledMetricViewIds.filter(id => !publishedMetricViews.some(metricView => metricView.id === id))" :key="id" :label="id" :value="id" disabled />
+          </el-select>
+          <el-alert
+            v-if="metricViewsLoadFailed"
+            class="mcp-load-alert"
+            type="warning"
+            :closable="false"
+            :title="t('admin.metricViewsLoadFailed')"
           />
         </div>
       </div>
@@ -963,6 +1062,7 @@ watch(isDark, () => {
 .mcp-manage-link { text-decoration: none; }
 .mcp-manage-link:hover, .mcp-manage-link:focus { text-decoration: none; }
 .mcp-load-alert { width: 100%; }
+.tools-panel .actions-header { margin-top: var(--spacing-lg); }
 
 .form-left,
 .form-right {

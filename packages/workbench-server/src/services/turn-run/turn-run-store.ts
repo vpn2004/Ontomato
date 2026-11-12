@@ -11,6 +11,7 @@ export interface TurnRun {
   source?: string;
   displayMessage?: string;
   startedAt: Date;
+  answerCompletedAt?: Date;
   endedAt?: Date;
   createdAt: Date;
   updatedAt: Date;
@@ -38,10 +39,37 @@ function mapTurnRunRow(row: any): TurnRun {
     source: row.source || undefined,
     displayMessage: row.display_message || undefined,
     startedAt: row.started_at,
+    answerCompletedAt: row.answer_completed_at || undefined,
     endedAt: row.ended_at || undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+/**
+ * Time to the answer, excluding the later quality-check wait. Runs without a separate
+ * answer boundary (including old stored rows) retain their recorded terminal duration.
+ */
+export function turnRunDurationMs(turn: TurnRun | null | undefined): number | undefined {
+  if (!turn) return undefined;
+  const completedAt = turn.answerCompletedAt ?? (turn.status === "running" ? undefined : turn.endedAt);
+  if (!completedAt) return undefined;
+  const durationMs = new Date(completedAt).getTime() - new Date(turn.startedAt).getTime();
+  return Number.isFinite(durationMs) && durationMs > 0 ? durationMs : undefined;
+}
+
+/** Saves the answer boundary while the run remains open for quality-check results. */
+export async function recordTurnAnswerCompletion(input: {
+  threadId: string;
+  requestSeq: number;
+  completedAt: Date;
+}): Promise<void> {
+  await getPostgresPool().query(
+    `UPDATE ${qualifiedTable("turn_runs")}
+       SET answer_completed_at = $3
+       WHERE thread_id = $1 AND request_seq = $2`,
+    [input.threadId, input.requestSeq, input.completedAt]
+  );
 }
 
 export async function startStandardTurnRun(input: {
@@ -108,19 +136,28 @@ export async function startTurnRun(input: StartTurnRunInput): Promise<void> {
   );
 }
 
-export async function finishTurnRun(input: FinishTurnRunInput): Promise<void> {
+/** The first terminal write wins: a turn already ended (e.g. at a user cancel) keeps its status and end. */
+export async function finishTurnRun(input: FinishTurnRunInput): Promise<TurnRun | null> {
   const endedAt = input.endedAt ?? new Date();
-  await getPostgresPool().query(
+  const result = await getPostgresPool().query(
     `INSERT INTO ${qualifiedTable("turn_runs")}
         (thread_id, request_seq, status, started_at, ended_at, created_at, updated_at)
        VALUES ($1,$2,$3,$4,$4,$4,$4)
        ON CONFLICT (thread_id, request_seq)
        DO UPDATE SET
-         status = EXCLUDED.status,
-         ended_at = EXCLUDED.ended_at,
-         updated_at = EXCLUDED.updated_at`,
+         status = CASE
+           WHEN ${qualifiedTable("turn_runs")}.ended_at IS NULL THEN EXCLUDED.status
+           ELSE ${qualifiedTable("turn_runs")}.status
+         END,
+         ended_at = COALESCE(${qualifiedTable("turn_runs")}.ended_at, EXCLUDED.ended_at),
+         updated_at = CASE
+           WHEN ${qualifiedTable("turn_runs")}.ended_at IS NULL THEN EXCLUDED.updated_at
+           ELSE ${qualifiedTable("turn_runs")}.updated_at
+         END
+       RETURNING *`,
     [input.threadId, input.requestSeq, input.status, endedAt]
   );
+  return result.rows[0] ? mapTurnRunRow(result.rows[0]) : null;
 }
 
 export async function getTurnRun(threadId: string, requestSeq: number): Promise<TurnRun | null> {
@@ -161,9 +198,9 @@ export async function recordTurnRunStart(input: StartTurnRunInput): Promise<void
   }
 }
 
-export async function recordTurnRunFinish(input: FinishTurnRunInput): Promise<void> {
+export async function recordTurnRunFinish(input: FinishTurnRunInput): Promise<TurnRun | null> {
   try {
-    await finishTurnRun(input);
+    return await finishTurnRun(input);
   } catch (error) {
     logger.warn("Turn run finish record failed", {
       threadId: input.threadId,
@@ -171,5 +208,6 @@ export async function recordTurnRunFinish(input: FinishTurnRunInput): Promise<vo
       status: input.status,
       error: error instanceof Error ? error.message : String(error),
     });
+    return null;
   }
 }
