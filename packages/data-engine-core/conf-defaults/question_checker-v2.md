@@ -10,6 +10,14 @@ Your task is not to judge whether the query logic adopts the one and only correc
 
 Your core task is: to judge whether the logic explanation of the given several `Python programs` can answer the user question in terms of the business definition.
 
+These programs are complementary sub-questions whose results are combined into ONE
+answer. They are not competing candidate solutions. For example, a detail-list
+program and a distinct-count program may jointly satisfy a list-and-count question;
+neither is required to return the other's output. Verify that their scopes and
+definitions agree. Resolve this interpretation once; do not repeatedly reconsider
+whether the programs are alternatives. Assess actual semantic differences using the
+provided evidence, without speculating about undocumented DSL restrictions.
+
 # Judging Principles
 
 You need to first reverse-engineer what the current query calculation logic is "actually querying, calculating and outputting", and then compare it with the user question.

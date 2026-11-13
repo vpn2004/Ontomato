@@ -7,16 +7,63 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 import io.ontomato.dataengine.bean.abcHarness.ABCHarnessCheck;
 import io.ontomato.dataengine.bean.abcHarness.ABCHarnessProgram;
+import io.ontomato.dataengine.bean.abcHarness.ABCHarnessProgramDescription;
 import io.ontomato.dataengine.service.LangService;
 import io.ontomato.dataengine.service.BusinessConfigService;
 import io.ontomato.dataengine.dao.CheckDaoV2;
 import io.ontomato.dataengine.util.UserMessageUtil;
 
 class QualityAssessmentTest {
+    @Test void describesAtMostTwoProgramsConcurrentlyAndPreservesInputOrder() throws Exception {
+        var service = spy(new CheckServiceV2Impl());
+        var secondDone = new CountDownLatch(1);
+        var active = new AtomicInteger();
+        var maximum = new AtomicInteger();
+        doAnswer(call -> {
+            int index = call.getArgument(1);
+            maximum.accumulateAndGet(active.incrementAndGet(), Math::max);
+            try {
+                if (index == 0) assertTrue(secondDone.await(2, TimeUnit.SECONDS));
+                var description = new ABCHarnessProgramDescription();
+                description.setSummary("program-" + index);
+                return description;
+            } finally {
+                active.decrementAndGet();
+                if (index == 1) secondDone.countDown();
+            }
+        }).when(service).describeProgram(any(), anyInt(), any(), any(), any(), any(), any());
+        var result = service.describePrograms(new ABCHarnessCheck(), List.of(new ABCHarnessProgram(),
+            new ABCHarnessProgram(), new ABCHarnessProgram(), new ABCHarnessProgram()), List.of(), "domain");
+        assertEquals(List.of("program-0", "program-1", "program-2", "program-3"),
+            result.stream().map(ABCHarnessProgramDescription::getSummary).toList());
+        assertEquals(2, maximum.get());
+    }
+
+    @Test void aFailedExplanationCancelsOtherPendingExplanations() throws Exception {
+        var service = spy(new CheckServiceV2Impl());
+        var slowStarted = new CountDownLatch(1);
+        var interrupted = new CountDownLatch(1);
+        doAnswer(call -> {
+            if ((int) call.getArgument(1) == 0) {
+                slowStarted.countDown();
+                try { new CountDownLatch(1).await(5, TimeUnit.SECONDS); }
+                catch (InterruptedException e) { interrupted.countDown(); throw e; }
+                throw new AssertionError("Slow explanation should have been cancelled");
+            }
+            assertTrue(slowStarted.await(2, TimeUnit.SECONDS));
+            throw new IllegalStateException("synthetic model failure");
+        }).when(service).describeProgram(any(), anyInt(), any(), any(), any(), any(), any());
+        assertThrows(ExecutionException.class, () -> service.describePrograms(new ABCHarnessCheck(),
+            List.of(new ABCHarnessProgram(), new ABCHarnessProgram()), List.of(), "domain"));
+        assertTrue(interrupted.await(2, TimeUnit.SECONDS));
+    }
+
     @Test void failedReviewIsSavedAsTerminalWithoutAScore() throws Exception {
         var service = new CheckServiceV2Impl();
         var configuration = mock(BusinessConfigService.class);
@@ -74,7 +121,7 @@ class QualityAssessmentTest {
             Map.of("className", "/Unrelated", "classDesc", "Excluded", "attrs", List.of())),
             "relationship_rule", Map.of("/placed_by", Map.of("fromclass", "/Order", "toclass", "/Customer", "desc", "Placed by")));
         String prompt = UserMessageUtil.getABCProgramDescriberUserMessage(program, "zh", language,
-            List.of("/Order", "/Customer"), rule);
+            List.of("/Order", "/Customer"), rule, "COUNT DISTINCT is supported in one step");
         assertTrue(prompt.contains("customer_code"));
         assertTrue(prompt.contains("External customer code"));
         assertTrue(prompt.contains("| /Order | /Customer | /placed_by |"));
@@ -82,5 +129,6 @@ class QualityAssessmentTest {
         assertFalse(prompt.contains("/Unrelated"));
         assertFalse(prompt.contains("{{CLASS_DEF}}"));
         assertFalse(prompt.contains("{{RELATIONSHIP_DEF}}"));
+        assertTrue(prompt.contains("COUNT DISTINCT is supported in one step"));
     }
 }

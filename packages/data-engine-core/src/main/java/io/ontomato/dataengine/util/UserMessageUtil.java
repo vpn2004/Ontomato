@@ -690,7 +690,12 @@ public class UserMessageUtil {
 	}
 	
 	public static String getABCProgramDescriberUserMessage(ABCHarnessProgram program, String lang, LangService langService, List<String> classNames, Map<String, Object> jsonRule) {
+		return getABCProgramDescriberUserMessage(program, lang, langService, classNames, jsonRule, "");
+	}
+
+	public static String getABCProgramDescriberUserMessage(ABCHarnessProgram program, String lang, LangService langService, List<String> classNames, Map<String, Object> jsonRule, String sourceQueryRules) {
 		String prompt = FileUtil.getResourceFileLoadAll(ABC_PROGRAM_DESCRIBER_PROMPT, "utf-8");
+		prompt = prompt.replace("{{SOURCE_QUERY_RULES}}", sourceQueryRules == null ? "" : sourceQueryRules);
 		
 		Map<String, String> mapDBSchema =DBSchemaUtil.getDBSchema(jsonRule, classNames, false);
         // dataset description

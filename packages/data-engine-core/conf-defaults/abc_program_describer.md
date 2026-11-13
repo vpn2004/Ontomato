@@ -19,6 +19,13 @@ missing; do not retrieve definitions that are already supplied.
 # DSL reference
 {{DSL_RULE}}
 
+# Current data source execution rules
+{{SOURCE_QUERY_RULES}}
+
+The source-specific rules take precedence over generic examples. Explain the actual
+supported query, not a preferred way of writing it. Do not invent a requirement for
+temporary steps when this source supports the operation directly.
+
 # Program to review
 ```python
 {{PYTHON_CODE}}

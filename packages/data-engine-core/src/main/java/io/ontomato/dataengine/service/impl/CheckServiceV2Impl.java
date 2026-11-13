@@ -1,10 +1,15 @@
 package io.ontomato.dataengine.service.impl;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ExecutorCompletionService;
+import java.util.concurrent.Future;
+import io.ontomato.dataengine.dataAdapter.DataAdapterRegistry;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -41,6 +46,9 @@ public class CheckServiceV2Impl implements CheckServiceV2 {
 	
 	@Autowired
 	private BusinessConfigService businessConfigService;
+
+	@Autowired
+	private DataAdapterRegistry dataAdapterRegistry;
 	
 	@Autowired
     private AdminService adminService;
@@ -101,14 +109,7 @@ public class CheckServiceV2Impl implements CheckServiceV2 {
 			public void run() {
 				try {
 					// Call the quality checker
-					List<ABCHarnessProgramDescription> programDescriptions = new ArrayList<ABCHarnessProgramDescription>();
-					if (programs != null) {
-						for (int i = 0; i < programs.size(); i++) {
-							ABCHarnessProgram program = programs.get(i);
-							ABCHarnessProgramDescription programDescription = describeProgram(check.getSessionId(), i, check.getOriginQuestion(), program, classNames, check.getLang(), domainId);
-							programDescriptions.add(programDescription);
-						}
-					}
+					List<ABCHarnessProgramDescription> programDescriptions = describePrograms(check, programs, classNames, domainId);
 					check.setProgramDescriptions(programDescriptions);
 					check(check, domainId);
 					
@@ -171,13 +172,44 @@ public class CheckServiceV2Impl implements CheckServiceV2 {
 		
 	}
 	
-	private ABCHarnessProgramDescription describeProgram(String sessionId, int index, String originQuestion, ABCHarnessProgram program, List<String> classNames, String lang, String domainId) {
+	List<ABCHarnessProgramDescription> describePrograms(ABCHarnessCheck check, List<ABCHarnessProgram> programs,
+			List<String> classNames, String domainId) throws Exception {
+		if (programs == null || programs.isEmpty()) return List.of();
+		// At most two model requests per review; each has its own derived session and context.
+		var executor = Executors.newFixedThreadPool(Math.min(2, programs.size()));
+		var completed = new ExecutorCompletionService<IndexedDescription>(executor);
+		List<Future<IndexedDescription>> tasks = new ArrayList<>();
+		try {
+			for (int i = 0; i < programs.size(); i++) {
+				int index = i;
+				tasks.add(completed.submit(() -> new IndexedDescription(index, describeProgram(check.getSessionId(), index,
+					check.getOriginQuestion(), programs.get(index), classNames, check.getLang(), domainId))));
+			}
+			List<ABCHarnessProgramDescription> result = new ArrayList<>(Collections.nCopies(programs.size(), null));
+			for (int i = 0; i < programs.size(); i++) {
+				var item = completed.take().get();
+				result.set(item.index(), item.description());
+			}
+			return result;
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			throw e;
+		} finally {
+			for (var task : tasks) task.cancel(true);
+			executor.shutdownNow();
+		}
+	}
+
+	private record IndexedDescription(int index, ABCHarnessProgramDescription description) {}
+
+	ABCHarnessProgramDescription describeProgram(String sessionId, int index, String originQuestion, ABCHarnessProgram program, List<String> classNames, String lang, String domainId) {
 		OriginalQuestion originalQuestion = new OriginalQuestion();
 		originalQuestion.setId(sessionId);
 		originalQuestion.setQuestion(originQuestion);
 		BusinessConfig businessConfig = businessConfigService.get(domainId);
 		Map<String, Object> jsonRule = adminService.getJSONRule(domainId);
-		String userMessage = UserMessageUtil.getABCProgramDescriberUserMessage(program, lang, langService, classNames, jsonRule);
+		String rules = dataAdapterRegistry.create(businessConfig, jsonRule).queryPlanningRules();
+		String userMessage = UserMessageUtil.getABCProgramDescriberUserMessage(program, lang, langService, classNames, jsonRule, rules);
 		String str = multiThreadAIChatService.chat(
 				MultiThreadAIChatService.ABC_PROGRAM_DESCRIBER,
 				originalQuestion,
