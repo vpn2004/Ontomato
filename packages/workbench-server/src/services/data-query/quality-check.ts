@@ -46,6 +46,7 @@ export async function streamSelfCheckSSE(
 
   const consumeEvent = (parsed: any) => {
     if (!parsed || typeof parsed !== "object") return;
+    if (parsed.error) throw new Error(String(parsed.error));
 
     // Step events
     const hasSummary = typeof parsed.summary === "string" && parsed.summary.trim().length > 0;
@@ -63,15 +64,16 @@ export async function streamSelfCheckSSE(
     // Conclusion events
     const hasConclusion =
       typeof parsed.conclusion === "string" && parsed.conclusion.trim().length > 0;
-    const hasScore = typeof parsed.score !== "undefined" && parsed.score !== null;
+    const score = typeof parsed.score === "number" || (typeof parsed.score === "string" && parsed.score.trim())
+      ? Number(parsed.score) : NaN;
+    const hasScore = Number.isFinite(score) && score >= 0 && score <= 100;
     const hasFittedQuestion =
       typeof parsed.fittedQuestion === "string" && parsed.fittedQuestion.trim().length > 0;
 
-    if (hasConclusion || hasScore || hasFittedQuestion) {
-      if (hasScore) result.score = Number(parsed.score);
-      if (hasFittedQuestion) result.fittedQuestion = String(parsed.fittedQuestion).trim();
-      if (hasConclusion) result.conclusion = String(parsed.conclusion).trim();
-
+    if (hasScore) result.score = score;
+    if (hasFittedQuestion) result.fittedQuestion = String(parsed.fittedQuestion).trim();
+    if (hasConclusion) result.conclusion = String(parsed.conclusion).trim();
+    if (result.conclusion && result.score !== undefined && result.fittedQuestion) {
       finishedPushed = true;
       onFinish?.(result);
     }
@@ -97,6 +99,7 @@ export async function streamSelfCheckSSE(
     const error = err instanceof Error ? err : new Error(String(err));
     logger.error(opened ? tApp("queryFixed.268") : tApp("queryFixed.269"), error);
     onError?.(error);
+    return null;
   }
 
   // Has progress but no conclusion
@@ -104,5 +107,5 @@ export async function streamSelfCheckSSE(
     logger.warn(tApp("queryFixed.270"));
   }
 
-  return opened ? result : null;
+  return finishedPushed ? result : null;
 }

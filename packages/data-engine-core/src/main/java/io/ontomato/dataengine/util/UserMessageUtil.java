@@ -698,8 +698,9 @@ public class UserMessageUtil {
         prompt = prompt.replace(DATASET_DESC, datasetDesc);
 
         // class definition description
-        String classDef = DBSchemaUtil.generateClassNameMarkDown(jsonRule, classNames);
+        String classDef = mapDBSchema.get(DBSchemaUtil.KEY_CLASS_DEF);
         prompt = prompt.replace(CLASS_DEF, classDef);
+        prompt = prompt.replace(RELATIONSHIP_DEF, mapDBSchema.get(DBSchemaUtil.KEY_RELATIONSHIP_DEF));
         
         // DSL syntax
         String dslRule = DslRuleUtil.generateWholeDslRule(jsonRule);

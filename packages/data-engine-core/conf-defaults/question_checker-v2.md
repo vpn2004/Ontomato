@@ -62,6 +62,12 @@ Your analysis should be concise and direct, focusing on explaining:
 
 Do not look for problems just for the sake of finding problems. Do not treat the recommended way of writing as the only correct answer.
 
+Keep the conclusion to 3–5 short bullets, normally at most 200 words (or 400 Chinese
+characters). State the actual scope and calculation, the material differences if any,
+and the overall judgement. Do not repeat each program's explanation or routine
+transport details. Preserve every discrepancy that affects correctness even if the
+normal length target must be exceeded. Brevity must not change the scoring rules.
+
 # Overall Query Calculation Logic
 
 {{PROGRAM_DESCRIPTIONS}}

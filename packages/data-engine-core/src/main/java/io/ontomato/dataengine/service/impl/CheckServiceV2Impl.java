@@ -157,6 +157,14 @@ public class CheckServiceV2Impl implements CheckServiceV2 {
 						return;
 					}
 					log.error(e.getMessage(), e);
+					if (!Boolean.TRUE.equals(check.getFinished())) {
+						// A terminal failure has no score; readers must not wait forever or accept it as a review.
+						check.setFinished(true);
+						check.setScore(null);
+						check.setConclusion(null);
+						check.setFittedQuestion(null);
+						saveCheckTask(check);
+					}
 				}
 			}
 		}).start();
@@ -177,6 +185,10 @@ public class CheckServiceV2Impl implements CheckServiceV2 {
 				userMessage,
 				ModelResolver.resolve(businessConfig, AgentRole.QUERY, langService),
 				domainId);
+		return parseDescription(program.getCode(), str);
+	}
+
+	static ABCHarnessProgramDescription parseDescription(String code, String str) {
 		if (str.startsWith("```markdown")) {
 			str = str.substring(11);
 			if (str.endsWith("```")) {
@@ -194,7 +206,10 @@ public class CheckServiceV2Impl implements CheckServiceV2 {
     	}
 		
 		ABCHarnessProgramDescription description = new ABCHarnessProgramDescription();
-		description.setCode(program.getCode());
+		if (logic.isBlank() || summary.isBlank() || !str.contains("</summary>")) {
+			throw new IllegalArgumentException("Incomplete program explanation");
+		}
+		description.setCode(code);
 		description.setMeaning(logic);
 		description.setSummary(summary);
 		return description;
@@ -215,6 +230,10 @@ public class CheckServiceV2Impl implements CheckServiceV2 {
 				userMessage,
 				ModelResolver.resolve(businessConfig, AgentRole.QUERY, langService),
 				domainId);
+		applyAssessment(check, str);
+	}
+
+	static void applyAssessment(ABCHarnessCheck check, String str) {
 		if (str.startsWith("```markdown")) {
 			str = str.substring(11);
 			if (str.endsWith("```")) {
@@ -243,10 +262,11 @@ public class CheckServiceV2Impl implements CheckServiceV2 {
 		if (fittedQuestion.endsWith("\n")) {
 			fittedQuestion = fittedQuestion.substring(0, fittedQuestion.length() - 1);
 		}
-		Double score = 0D;
-		try {
-			score = Double.parseDouble(scoreStr);
-		} catch (Exception e) {}
+		double score = Double.parseDouble(scoreStr.trim());
+		if (!Double.isFinite(score) || score < 0 || score > 100 || conclusion.isBlank()
+				|| fittedQuestion.isBlank() || !str.contains("</score>") || !str.contains("</fitted_question>")) {
+			throw new IllegalArgumentException("Incomplete quality assessment");
+		}
 		
 		check.setConclusion(conclusion);
 		check.setScore(score);

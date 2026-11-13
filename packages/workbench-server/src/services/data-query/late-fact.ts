@@ -67,8 +67,8 @@ export function startQualityCheckSettlement(input: QualityCheckSettlementInput):
   let state: QcState = { status: "running", steps: [] };
   const publish = () => onState?.(state, buildQcMarkdown(state));
 
-  // The bounded time limit is owned by this fact itself: the backend quality-check read has no server-side timeout, so past the limit it is
-  // considered dead — abort the read, finalize as not ready, and skip the write-back. This is a resource boundary, not "how long to wait for a valid result".
+  // This bound also protects callers against stalled or older backend readers. On expiry, abort
+  // the read and persist the not-ready state; it is not a deadline for declaring an answer valid.
   const bound = new AbortController();
   const abortOnCaller = () => bound.abort();
   // Cancellation on entry and cancellation received while running reuse the same finalization; attaching only a listener is not enough.
@@ -127,22 +127,19 @@ export function startQualityCheckSettlement(input: QualityCheckSettlementInput):
         },
       });
 
-      // Past the time limit: finalize as not ready and push, but skip the write-back — there is no result to write.
+      // A timeout has no assessment, but its terminal state must survive a page reload.
+      if (signal?.aborted) return;
       if (timedOut) {
         state = { ...state, status: "unsettled" };
         publish();
-        return;
-      }
-      // Cancellation is not a failure, and no write-back — this run no longer cares about this evidence.
-      if (signal?.aborted) return;
-      if (!result) {
+      } else if (!result) {
         state = { ...state, status: "failed" };
         publish();
       }
 
       const updated = await updateQueryRunQualityCheck({
         ...identity,
-        qcResult: result ?? undefined,
+        qcResult: timedOut ? undefined : result ?? undefined,
         qcState: state,
       });
       if (updated === 0) {
