@@ -146,7 +146,7 @@ public class BusinessConfigController {
             if (!agentsMap.keySet().containsAll(AgentRole.ALL)
                     || agentsMap.keySet().stream().anyMatch(role -> !AgentRole.ALL.contains(role) && !AgentRole.OPTIONAL.contains(role))) {
 				throw new IllegalArgumentException(
-						"agents must contain the five required roles, optionally qualityCheck, and no unknown roles: " + agentsMap.keySet());
+                        "agents must contain all five roles, optionally qualityCheck, and no unknown roles: " + agentsMap.keySet());
 			}
 
 			BusinessConfig stored = businessConfigService.get(user.getDomainId());
