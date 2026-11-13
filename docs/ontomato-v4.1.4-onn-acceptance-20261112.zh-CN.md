@@ -61,3 +61,5 @@
 - DSL 语法门通过后才发出 `m3.query.started`，因此前置拒绝不会伪装成已提交到 ONN 的查询。
 
 定向验证：`DslGrammarValidatorTest` 9 项、`AgentCallContextTest` 1 项、`OnnCoreGraphCompilerTest` 6 项通过；`git diff --check` 通过。未运行会连接数据库或外部系统的全量 Java 测试。本节为本地代码验收记录，**尚未部署到 108，也未复测相同网页问数的端到端耗时**；部署后需复测 CUST-001，确认错误 DSL 在调用次数上受控，并按阶段日志判断剩余耗时归属。本轮没有修改任何 onn-core 目录内容。
+
+后续部署状态：2026-11-13 已完成两套 108 引擎更新与网页复测，详见 [DSL 重试保护：108 部署与 Node 环境核查](ontomato-dsl-guard-108-deployment-20261113.zh-CN.md)。该记录同时说明关系题的质检超时限制。
