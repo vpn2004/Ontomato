@@ -1,0 +1,102 @@
+[
+  {
+    "id": "Q01",
+    "category": "计数",
+    "question": "质量追溯数据中共有多少条客户（customer）记录？按记录计数，返回一行一列 total。 请实际查询并返回完整结果表，不要仅说明查询方法。"
+  },
+  {
+    "id": "Q02",
+    "category": "计数",
+    "question": "质量追溯数据中共有多少条产品（product）记录？按记录计数，返回一行一列 total。 请实际查询并返回完整结果表，不要仅说明查询方法。"
+  },
+  {
+    "id": "Q03",
+    "category": "精确查找",
+    "question": "查询产品技术对象 ID 等于 quality_traceability_demo_product:SN-2025-0001 的记录，只返回 id、sn 两列。 请实际查询并返回完整结果表，不要仅说明查询方法。"
+  },
+  {
+    "id": "Q04",
+    "category": "空结果",
+    "question": "在质量追溯数据中，统计 customer_id 严格等于 CUST-NOT-EXIST-AB20 的客户记录数。即使没有匹配记录也返回一行 total=0；请实际查询。"
+  },
+  {
+    "id": "Q05",
+    "category": "等值过滤",
+    "question": "统计产品 model_code 严格等于 E4000 的记录数，返回一行 total。 请实际查询并返回完整结果表，不要仅说明查询方法。"
+  },
+  {
+    "id": "Q06",
+    "category": "布尔过滤",
+    "question": "统计批次（batch）中布尔字段 defect_flag 为 true 的记录数；false 和 null 均不计入。返回一行 total。 请实际查询并返回完整结果表，不要仅说明查询方法。"
+  },
+  {
+    "id": "Q07",
+    "category": "日期边界",
+    "question": "按 UTC+08:00 的时间边界统计产品 manufacture_date 大于等于 2025-01-01T00:00:00+08:00 且严格小于 2025-02-01T00:00:00+08:00 的记录数。返回一行 total。 请实际查询并返回完整结果表，不要仅说明查询方法。"
+  },
+  {
+    "id": "Q08",
+    "category": "空值语义",
+    "question": "统计批次（batch）中 raw_material_code 为数据库 null 的记录数，空字符串不算 null。返回一行 total。 请实际查询并返回完整结果表，不要仅说明查询方法。"
+  },
+  {
+    "id": "Q09",
+    "category": "数值聚合",
+    "question": "对全部订单（f_order）的 quantities 计算 SUM、AVG、MIN、MAX，忽略 null；只返回一行，列名依次为 total、average、minimum、maximum。 请实际查询并返回完整结果表，不要仅说明查询方法。"
+  },
+  {
+    "id": "Q10",
+    "category": "分组聚合",
+    "question": "按产品 model_code 分组统计产品记录数，返回所有分组，列名为 category、total。若有 null 型号也应保留该分组，不要只取前几个型号。 请实际查询并返回完整结果表，不要仅说明查询方法。"
+  },
+  {
+    "id": "Q11",
+    "category": "分组聚合",
+    "question": "按检验事件（inspection_event）的 overall_result 分组统计事件记录数，返回所有分组，列名 category、total。 请实际查询并返回完整结果表，不要仅说明查询方法。"
+  },
+  {
+    "id": "Q12",
+    "category": "排序TopN",
+    "question": "将全部产品按 vibration_value 降序排列，振动值相同则按技术 id 升序排列；取前 10 条，仅返回 sn、vibration 两列，vibration 来自 vibration_value。保持要求的行顺序。 请实际查询并返回完整结果表，不要仅说明查询方法。"
+  },
+  {
+    "id": "Q13",
+    "category": "排序分页",
+    "question": "将全部产品按 vibration_value 降序、技术 id 升序排列，然后跳过前 30 条、取接下来的 20 条。只返回 sn、vibration 两列，vibration 来自 vibration_value；保持行顺序。 请实际查询并返回完整结果表，不要仅说明查询方法。"
+  },
+  {
+    "id": "Q14",
+    "category": "一跳关系",
+    "question": "沿产品与订单的 belongs_to_order 关系，列出所有已关联产品的序列号和对应订单号，列名 sn、order_no。不丢弃任何关系匹配行，不要仅取样本。 请实际查询并返回完整结果表，不要仅说明查询方法。"
+  },
+  {
+    "id": "Q15",
+    "category": "两跳去重",
+    "question": "沿客户→订单→产品关系，查询 customer_id 为 CUST-001 对应的全部非空产品序列号。按 sn 去重并升序，返回第一张表（列 sn）；再返回第二张表（列 total），统计这些去重序列号的数量。请实际查询完整数据。"
+  },
+  {
+    "id": "Q16",
+    "category": "三跳明细",
+    "question": "沿供应商←批次←装配事件→产品的 supplied_by、uses_batch、creates 关系，返回所有完整路径的明细：supplier 取 supplier_code，batch 取 batch_no，assembly 取 assembly_id，sn 取产品序列号。保留路径对应的重复行，返回 supplier、batch、assembly、sn 四列，不能只取样本。 请实际查询并返回完整结果表，不要仅说明查询方法。"
+  },
+  {
+    "id": "Q17",
+    "category": "三跳去重聚合",
+    "question": "沿供应商←批次←装配事件→产品的 supplied_by、uses_batch、creates 关系，按供应商统计关联产品数量。同一供应商的同一产品技术 id 只计一次，只返回存在完整路径的供应商。列名 supplier（supplier_code）、products（去重产品数）。 请实际查询并返回完整结果表，不要仅说明查询方法。"
+  },
+  {
+    "id": "Q18",
+    "category": "七跳路径计数",
+    "question": "沿以下七跳关系统计全部完整匹配路径条数：供应商←批次←装配事件→产品←检验事件←检验项结果→检验项→检验计划。对应关系依次为 supplied_by、uses_batch、creates、inspects_product、has_item_result、references、belongs_to_plan。按完整路径计数，不按终点检验计划去重；返回一行 total，不能用限量样本推算总数。 请实际查询并返回完整结果表，不要仅说明查询方法。"
+  },
+  {
+    "id": "Q19",
+    "category": "三跳质量追溯",
+    "question": "沿检验项结果→检验事件→产品→订单的 has_item_result、inspects_product、belongs_to_order 关系，列出全部完整匹配行，返回 result（result_id）、actual（actual_value）、sn、order_no 四列。保留每条路径，不要截断为示例或 TopN。 请实际查询并返回完整结果表，不要仅说明查询方法。"
+  },
+  {
+    "id": "Q20",
+    "category": "多步骤三表",
+    "question": "请沿客户、订单、产品关系，完整比较客户编号 CUST-001 与 CUST-002 对应的发动机产品。按非空产品序列号 sn 去重，不按订单关联行数计数。请返回三个表：1）两位客户的全部序列号明细，列名 customer_id、sn，先按客户编号再按序列号升序；2）分客户去重产品数量，列名 customer_id、product_count；3）两个客户产品集合的并集数量、交集数量以及各自独有数量，列名 union_count、intersection_count、only_001_count、only_002_count。请实际执行完整查询及所需集合计算，不能以样本作为全集。"
+  }
+]
