@@ -171,13 +171,24 @@ export async function getThreadMessagesPayload(
   const checkpointer = requireCheckpointer();
   if (access.scope === "domain") await checkpointer.verifyThreadDomain(threadId, access.domainId);
   else await checkpointer.verifyThreadAccess(threadId, access.userId, access.domainId);
-  const [rawMessages, snapshots, queryRuns, events, turnRuns] = await Promise.all([
+  const [rawMessages, persistedSnapshots, queryRuns, events, turnRuns] = await Promise.all([
     checkpointer.getThreadMessages(threadId),
     listChatRenderSnapshots(threadId),
     listQueryRuns(threadId),
     listExecutionEvents(threadId),
     listTurnRuns(threadId),
   ]);
+
+  // A cancelled query can save its execution facts before the response node ever runs.
+  // Recover its existing body for history without duplicating query data in the snapshot store.
+  const snapshots: Array<{ requestSeq: number; snapshot: PersistedChatRenderSnapshot }> = [...persistedSnapshots];
+  for (const turn of turnRuns) {
+    if (turn.source !== "chat" || turn.status !== "cancelled" || snapshots.some(row => row.requestSeq === turn.requestSeq)) continue;
+    const queryRun = getPrimaryQueryRun(queryRuns.filter(row => row.requestSeq === turn.requestSeq));
+    if (!queryRun?.fullContent || isWonByRetiredBranch(queryRun)) continue;
+    snapshots.push({ requestSeq: turn.requestSeq, snapshot: { mode: "standard", status: "completed", primaryText: queryRun.fullContent } });
+  }
+  snapshots.sort((a, b) => a.requestSeq - b.requestSeq);
 
   const snapshotsByRequest = new Map(snapshots.map((snapshot) => [snapshot.requestSeq, snapshot]));
   const queryRunsByRequest = groupByRequestSeq(queryRuns);
@@ -293,7 +304,11 @@ export async function getThreadMessagesPayload(
   for (const turn of turnRuns) appendTurnQuestion(turn.requestSeq);
 
   return {
-    messages,
+    messages: messages.map(message => {
+      if (message.role !== "assistant" || message.requestSeq === undefined || turnsByRequest.get(message.requestSeq)?.status !== "cancelled") return message;
+      const snapshot = message.snapshot && typeof message.snapshot === "object" ? message.snapshot : {};
+      return { ...message, snapshot: { ...snapshot, status: "completed", stoppedByUser: true } };
+    }),
     ...(activeTurn ? { activeTurn: { requestSeq: activeTurn.requestSeq } } : {}),
   };
 }
