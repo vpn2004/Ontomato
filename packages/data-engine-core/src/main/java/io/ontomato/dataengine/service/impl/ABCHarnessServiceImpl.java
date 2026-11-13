@@ -5,8 +5,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -74,6 +74,8 @@ public class ABCHarnessServiceImpl implements ABCHarnessService {
         String failure = null;
         boolean interrupted = false;
         boolean cancelled = false;
+        AtomicLong modelCompletedAt = new AtomicLong();
+        Long modelToDeliveryMs = null;
     	try {
             if (Thread.currentThread().isInterrupted()) throw new InterruptedException("ABC task cancelled");
     		DiagnosticEventLogger.emit("abc.program.started", sessionId, new JSONObject().fluentPut("question", question));
@@ -95,6 +97,10 @@ public class ABCHarnessServiceImpl implements ABCHarnessService {
 
 			// Completion/failure signal of the ABC programmer sub-thread: complete on success, carry the actual error on failure, no new message type is added
 			CompletableFuture<Void> agentDone = new CompletableFuture<Void>();
+            agentDone.whenComplete((result, error) -> {
+                modelCompletedAt.set(System.nanoTime());
+                abcHarnessTaskService.signalActivity(sessionId);
+            });
     		// Call the ABC programmer
     		OriginalQuestion originalQuestion = new OriginalQuestion();
     		originalQuestion.setId(sessionId);
@@ -139,7 +145,7 @@ public class ABCHarnessServiceImpl implements ABCHarnessService {
             });
             agentThread.start();
 
-	    	// Poll until all tasks finish, while emitting SSE
+            // Deliver queued messages and wait for session activity or model completion.
 	    	while (true) {
 	    		if (BackendSessionEntrance.isCancelled(sessionId)) {
 	    			// Session cancelled: interrupt the programmer thread, finish with the existing interrupt cleanup, and do not send to the quality check.
@@ -166,10 +172,10 @@ public class ABCHarnessServiceImpl implements ABCHarnessService {
 	    		}
 				Boolean flag = null;
 				try {
-					agentDone.get(1L, TimeUnit.SECONDS);
-					flag = true;
-				} catch (TimeoutException e) {
-					// Sub-thread not finished: keep waiting along the existing one-second polling rhythm
+					if (agentDone.isDone()) {
+                        agentDone.get();
+                        flag = true;
+                    }
 				} catch (ExecutionException e) {
 					// ABC programmer model failure: go into the existing failure and SSE error channel; if cancelled (on the chain or by flag), finish silently.
 					Throwable cause = e.getCause() != null ? e.getCause() : e;
@@ -203,9 +209,11 @@ public class ABCHarnessServiceImpl implements ABCHarnessService {
 		    		}
 	    			break;
 	    		} else {
-	    			Thread.sleep(10000L);
+                    abcHarnessTaskService.awaitActivity(sessionId, 1000L);
 	    		}
 	    	}
+
+            if (modelCompletedAt.get() != 0) modelToDeliveryMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - modelCompletedAt.get());
 
 	    	// Send to quality check: the quality check under a cancelled session stops, and it is only sent after a normal completion.
 	    	if (!cancelled) checkServiceV2.check(check, programs, classNames, user.getDomainId());
@@ -244,6 +252,7 @@ public class ABCHarnessServiceImpl implements ABCHarnessService {
                 JSONObject abcFinished = new JSONObject();
                 abcFinished.put("status", failure != null || interrupted || programs.isEmpty() ? "error" : "success");
                 abcFinished.put("durationMs", System.currentTimeMillis() - abcStart);
+                abcFinished.put("modelToDeliveryMs", modelToDeliveryMs);
                 abcFinished.put("programs", buildProgramsPayload(programs));
                 if (failure != null) abcFinished.put("error", new JSONObject().fluentPut("message", failure));
                 DiagnosticEventLogger.emit("abc.program.finished", sessionId, abcFinished);

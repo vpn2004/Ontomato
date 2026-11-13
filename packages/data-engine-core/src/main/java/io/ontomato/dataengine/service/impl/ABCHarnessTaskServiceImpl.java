@@ -6,6 +6,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.LinkedBlockingQueue;
 
 import org.springframework.beans.factory.annotation.Autowired;
@@ -18,6 +21,7 @@ import io.ontomato.dataengine.service.AgentWorkspaceService;
 import io.ontomato.dataengine.service.sys.bean.permission.UserDataPermission;
 
 import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 
@@ -40,22 +44,26 @@ public class ABCHarnessTaskServiceImpl implements ABCHarnessTaskService {
 	
 	private BlockingQueue<Operation> queue = new LinkedBlockingQueue<Operation>();
 
+	private final Map<String, Semaphore> activity = new ConcurrentHashMap<>();
+	private Thread worker;
+
 	@Autowired
 	private AgentWorkspaceService workspaceService;
 	
 	@PostConstruct
 	public void initService() {
-		new Thread(new Runnable() {
+		worker = new Thread(new Runnable() {
 
 			@Override
 			public void run() {
 				Map<String, ABCHarnessTask> taskMap = new HashMap<String, ABCHarnessTask>();
-				while (true) {
+				while (!Thread.currentThread().isInterrupted()) {
 					try {
 						Operation operation = queue.take();
 						if (OP_CREATE_TASK.equals(operation.getType())) {
 							ABCHarnessTask task = (ABCHarnessTask)operation.getInput();
 							taskMap.put(task.getSessionId(), task);
+							activity.put(task.getSessionId(), new Semaphore(0));
 						} else if (OP_GET_TASK.equals(operation.getType())) {
 							String sessionId = (String)operation.getInput();
 							BlockingQueue<Object> output = operation.getOutput();
@@ -70,12 +78,15 @@ public class ABCHarnessTaskServiceImpl implements ABCHarnessTaskService {
 									task.setMessages(messages);
 								}
 								messages.add(message);
+								activity.get(message.getSessionId()).release();
 							}
 						} else if (OP_GET_MESSAGES.equals(operation.getType())) {
 							String sessionId = (String)operation.getInput();
 							BlockingQueue<Object> output = operation.getOutput();
 							if (output != null) {
 								List<ABCHarnessTaskMessage> retMsgs = new ArrayList<ABCHarnessTaskMessage>();
+								Semaphore signal = activity.get(sessionId);
+								if (signal != null) signal.drainPermits();
 								ABCHarnessTask task = taskMap.get(sessionId);
 								if (task != null) {
 									List<ABCHarnessTaskMessage> messages = task.getMessages();
@@ -90,21 +101,42 @@ public class ABCHarnessTaskServiceImpl implements ABCHarnessTaskService {
 						} else if (OP_REMOVE_TASK.equals(operation.getType())) {
 							String sessionId = (String)operation.getInput();
 							taskMap.remove(sessionId);
+							Semaphore signal = activity.remove(sessionId);
+							if (signal != null) signal.release();
 							workspaceService.removeWorkspace(sessionId);
 						}
+					} catch (InterruptedException e) {
+						Thread.currentThread().interrupt();
 					} catch (Exception e) {
 						log.error(e.getMessage(), e);
 					}
-					
-					try {
-						Thread.sleep(10L);
-					} catch (Exception e) {}
+
 				}
 			}
 			
-		}).start();
+		}, "abc-harness-tasks");
+		worker.start();
 	}
 	
+    @PreDestroy
+    public void stopService() {
+        if (worker != null) worker.interrupt();
+        activity.values().forEach(Semaphore::release);
+        activity.clear();
+    }
+
+    @Override
+    public void awaitActivity(String sessionId, long timeoutMillis) throws InterruptedException {
+        Semaphore signal = activity.get(sessionId.trim());
+        if (signal != null) signal.tryAcquire(timeoutMillis, TimeUnit.MILLISECONDS);
+    }
+
+    @Override
+    public void signalActivity(String sessionId) {
+        Semaphore signal = activity.get(sessionId.trim());
+        if (signal != null) signal.release();
+    }
+
 	@Override
 	public void createTask(String sessionId, int timeoutMinutes, String userId, UserDataPermission curUserDataPermission, String lang) throws Exception {
 		try {

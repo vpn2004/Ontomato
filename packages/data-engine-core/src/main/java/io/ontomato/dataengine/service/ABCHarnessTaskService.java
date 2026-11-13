@@ -16,6 +16,11 @@ public interface ABCHarnessTaskService {
 	
 	public List<ABCHarnessTaskMessage> takeMessages(String sessionId);
 	
+	/** Wait for new messages or an explicit completion signal, with bounded cancellation checks. */
+	void awaitActivity(String sessionId, long timeoutMillis) throws InterruptedException;
+
+	void signalActivity(String sessionId);
+
 	public void removeTask(String sessionId);
 	
 }

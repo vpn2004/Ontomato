@@ -32,6 +32,8 @@ import {
 } from "./abc-harness-markdown";
 import { polishHarnessAnswer } from "./abc-harness-answer";
 
+import { OrderedPreparation } from "./ordered-preparation";
+
 const ABC_HARNESS_ENDPOINT = "/abcHarness";
 
 export async function runAbcHarnessBranch(
@@ -69,6 +71,10 @@ export async function runAbcHarnessBranch(
   let outcome: StageOutcome | undefined;
   let firstEventMs: number | undefined;
   let firstDataMs: number | undefined;
+  let firstDatasetMs: number | undefined;
+  let receivedDataCount = 0;
+  const preparation = new OrderedPreparation(ctx.signal);
+  const signal = preparation.signal;
 
   let abcLogger!: AbcLogger;
   abcLogger = createAbcLogger({
@@ -132,11 +138,11 @@ export async function runAbcHarnessBranch(
         question: queryQuestion,
         ...(ctx.classNames?.length ? { classNames: ctx.classNames } : {}),
       }),
-      signal: ctx.signal,
+      signal,
     });
 
     for await (const rawEvent of stream) {
-      ctx.signal.throwIfAborted();
+      signal.throwIfAborted();
 
       const event = rawEvent as HarnessEvent;
       lastEventAt = Date.now();
@@ -164,14 +170,16 @@ export async function runAbcHarnessBranch(
 
         firstDataMs ??= Date.now() - requestStartedAt;
         const dataContent = normalizeHarnessDataContent(event.content);
+        const dataIndex = receivedDataCount++;
+        const receivedAt = performance.now();
         logDslDiagnostic(dataContent.dsl, "harness.DATA_TYPE");
         const question =
           dataContent.question ||
-          tForLocale(locale, "query.datasetFallbackTitle", { index: datasets.length + 1 });
+          tForLocale(locale, "query.datasetFallbackTitle", { index: dataIndex + 1 });
         logger.info("abcHarness data event received", {
           sessionId,
           eventType,
-          dataIndex: datasets.length + 1,
+          dataIndex: dataIndex + 1,
           question,
           data: describeUnknownData(dataContent.data),
           contentKeys: getContentKeys(event.content),
@@ -196,51 +204,54 @@ export async function runAbcHarnessBranch(
         dataContent.code = code;
 
         const rows = normalizeRows(dataContent.data);
-        const { tableSegment, normalizedRows, fieldDisplayPlan } = await measureStage("harness.result.prepare", () => buildTableFromRows(
+        await preparation.add(() => measureStage("harness.result.prepare", () => buildTableFromRows(
           rows,
           question,
           {
-            signal: ctx.signal,
+            signal,
             maxRows: 10,
             outputKeyDescriptionMDTable: dataContent.outputKeyDescriptionMDTable,
             code: dataContent.code,
             locale,
             truncation: dataContent.truncation,
           }
-        ), { signal: ctx.signal, metadata: { sessionId, dataIndex: datasets.length } });
+        ), { signal, metadata: { sessionId, dataIndex } }), ({ tableSegment, normalizedRows, fieldDisplayPlan }) => {
 
-        logger.info("abcHarness data event normalized", {
-          sessionId,
-          eventType,
-          question,
-          hasTableSegment: !!tableSegment,
-          tablePreview: previewText(tableSegment),
-          normalizedRowCount: normalizedRows.length,
-          normalizedColumns: collectColumns(normalizedRows),
-        });
+          logger.info("abcHarness data event normalized", {
+            sessionId,
+            eventType,
+            question,
+            hasTableSegment: !!tableSegment,
+            tablePreview: previewText(tableSegment),
+            normalizedRowCount: normalizedRows.length,
+            normalizedColumns: collectColumns(normalizedRows),
+          });
 
-        const dataset = buildDataset(
-          dataContent,
-          datasets.length,
-          normalizedRows,
-          fieldDisplayPlan,
-          locale
-        );
-        dataMessages.push(`### ${question}\n\n${tableSegment}\n\n${datasetPlacement(dataset.id)}`);
-        datasets.push(dataset);
-        abcCodes.push(code);
-        abcOutKeyRefs.push(Array.isArray(dataContent.outKeyRefs) ? dataContent.outKeyRefs : []);
-        answerContent = buildAnswerContent();
-        abcLogger.setProgress(
-          datasets.length,
-          datasets.length,
-          t("query.progress.queryingData", { n: datasets.length })
-        );
-        publishFallback();
-        pushEvent({
-          type: "query_datasets",
-          datasets: [...datasets],
-          nodeIds: [],
+          const dataset = buildDataset(
+            dataContent,
+            dataIndex,
+            normalizedRows,
+            fieldDisplayPlan,
+            locale
+          );
+          dataMessages.push(`### ${question}\n\n${tableSegment}\n\n${datasetPlacement(dataset.id)}`);
+          datasets.push(dataset);
+          abcCodes.push(code);
+          abcOutKeyRefs.push(Array.isArray(dataContent.outKeyRefs) ? dataContent.outKeyRefs : []);
+          answerContent = buildAnswerContent();
+          abcLogger.setProgress(
+            datasets.length,
+            datasets.length,
+            t("query.progress.queryingData", { n: datasets.length })
+          );
+          publishFallback();
+          firstDatasetMs ??= Date.now() - requestStartedAt;
+          logger.info("harness dataset published", { sessionId, dataIndex, firstDatasetMs, preparationAndQueueMs: Math.round(performance.now() - receivedAt) });
+          pushEvent({
+            type: "query_datasets",
+            datasets: [...datasets],
+            nodeIds: [],
+          });
         });
         continue;
       }
@@ -270,8 +281,9 @@ export async function runAbcHarnessBranch(
         });
       }
     }
-    ctx.signal.throwIfAborted();
+    signal.throwIfAborted();
     finishStream("completed", { sessionId, firstEventMs, firstDataMs, eventTypeCounts, includesClientProcessing: true });
+    await measureStage("harness.results.drain", () => preparation.finish(), { signal, metadata: { sessionId } });
 
     let fullContent = buildAnswerContent();
     answerContent = fullContent;
@@ -308,7 +320,7 @@ export async function runAbcHarnessBranch(
         publishFallback();
         pushContent(content, loading);
       },
-      signal: ctx.signal,
+      signal,
       locale,
       labels,
     });
@@ -348,6 +360,7 @@ export async function runAbcHarnessBranch(
       errors: protocolErrors.length > 0 ? protocolErrors : undefined,
     };
   } catch (error: unknown) {
+    preparation.stop(error);
     outcome = ctx.signal.aborted || (error instanceof Error && error.name === "AbortError") ? "cancelled" : "failed";
     if (error instanceof AuthFailedError) throw error;
 
@@ -378,7 +391,8 @@ export async function runAbcHarnessBranch(
     }
     throw error;
   } finally {
+    preparation.stop();
     finishStream(outcome ?? "failed", { sessionId, firstEventMs, firstDataMs, eventTypeCounts, includesClientProcessing: true });
-    logger.info("harness request timing", { sessionId, outcome: outcome ?? "failed", durationMs: Date.now() - requestStartedAt, firstEventMs, firstDataMs });
+    logger.info("harness request timing", { sessionId, outcome: outcome ?? "failed", durationMs: Date.now() - requestStartedAt, firstEventMs, firstDataMs, firstDatasetMs });
   }
 }
