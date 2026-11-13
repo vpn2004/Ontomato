@@ -55,6 +55,7 @@ export async function streamSelfCheckSSE(
     if (hasSummary || hasMeaning) {
       sawAnyStep = true;
       const step: QcStepEvent = {};
+      if (typeof parsed.label === "string") step.label = parsed.label;
       if (hasSummary) step.summary = parsed.summary.trim();
       if (hasMeaning) step.meaning = parsed.meaning.trim();
       result.steps.push(step);

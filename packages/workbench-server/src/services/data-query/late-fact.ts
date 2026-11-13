@@ -96,7 +96,7 @@ export function startQualityCheckSettlement(input: QualityCheckSettlementInput):
         signal: bound.signal,
         onStep: (step) => {
           if (bound.signal.aborted) return;
-          const key = JSON.stringify([step.summary?.trim() ?? "", step.meaning?.trim() ?? ""]);
+          const key = JSON.stringify([step.label ?? "", step.summary?.trim() ?? "", step.meaning?.trim() ?? ""]);
           if (!explanations.has(key) && (step.summary?.trim() || step.meaning?.trim())) {
             explanations.add(key);
             clearTimeout(timer);

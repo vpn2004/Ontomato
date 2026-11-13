@@ -7,6 +7,8 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
+import java.util.function.BiConsumer;
+import java.util.BitSet;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
@@ -69,21 +71,17 @@ public class CheckController {
                         if (!SseEmitterUtil.sendHeartbeat(sseId)) return false;
                     }
                     return true;
-                }, 60_000, 250);
+                }, 60_000, 250, (index, description) -> {
+                    JSONObject step = JSONObject.of("label", "program-" + index,
+                            "summary", description.getSummary(), "meaning", description.getMeaning());
+                    if (!SseEmitterUtil.sendSseEmitter(sseId, JSON.toJSONString(step))) disconnected.set(true);
+                });
                 if (check == null || disconnected.get()) return;
                 if (check.getScore() == null || !Double.isFinite(check.getScore())
                         || check.getScore() < 0 || check.getScore() > 100
                         || check.getConclusion() == null || check.getConclusion().isBlank()
                         || check.getFittedQuestion() == null || check.getFittedQuestion().isBlank()) {
                     throw new IllegalStateException("No valid quality assessment");
-                }
-                if (check.getProgramDescriptions() != null) {
-                    for (ABCHarnessProgramDescription description : check.getProgramDescriptions()) {
-                        JSONObject step = new JSONObject();
-                        step.put("summary", description.getSummary());
-                        step.put("meaning", description.getMeaning());
-                        if (!SseEmitterUtil.sendSseEmitter(sseId, JSON.toJSONString(step))) return;
-                    }
                 }
                 JSONObject result = new JSONObject();
                 result.put("conclusion", check.getConclusion());
@@ -107,12 +105,28 @@ public class CheckController {
 
     ABCHarnessCheck awaitCheck(String sessionId, BooleanSupplier keepWaiting,
             long timeoutMs, long pollMs) throws InterruptedException, TimeoutException {
+        return awaitCheck(sessionId, keepWaiting, timeoutMs, pollMs, (index, description) -> {});
+    }
+
+    ABCHarnessCheck awaitCheck(String sessionId, BooleanSupplier keepWaiting,
+            long timeoutMs, long pollMs, BiConsumer<Integer, ABCHarnessProgramDescription> onProgress)
+            throws InterruptedException, TimeoutException {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+        BitSet delivered = new BitSet();
         while (keepWaiting.getAsBoolean()) {
             long remaining = deadline - System.nanoTime();
             if (remaining <= 0) throw new TimeoutException("Quality check wait expired");
             ABCHarnessCheck check = checkServiceV2.queryBySessionId(sessionId);
             if (check == null) throw new IllegalStateException("Quality check not found");
+            if (check.getProgramDescriptions() != null) {
+                for (int i = 0; i < check.getProgramDescriptions().size(); i++) {
+                    var description = check.getProgramDescriptions().get(i);
+                    if (description == null || delivered.get(i)) continue;
+                    delivered.set(i);
+                    onProgress.accept(i, description);
+                    deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+                }
+            }
             if (Boolean.TRUE.equals(check.getFinished())) return check;
             TimeUnit.NANOSECONDS.sleep(Math.min(TimeUnit.MILLISECONDS.toNanos(pollMs), remaining));
         }

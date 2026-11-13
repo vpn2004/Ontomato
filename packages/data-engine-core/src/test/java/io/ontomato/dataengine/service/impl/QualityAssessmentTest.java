@@ -20,8 +20,36 @@ import io.ontomato.dataengine.dao.CheckDaoV2;
 import io.ontomato.dataengine.util.UserMessageUtil;
 
 class QualityAssessmentTest {
+    @Test void persistsCompletedExplanationsBeforeSlowerProgramsFinish() throws Exception {
+        var service = spy(new CheckServiceV2Impl());
+        var dao = mock(CheckDaoV2.class);
+        ReflectionTestUtils.setField(service, "checkDaoV2", dao);
+        var firstSaved = new CountDownLatch(1);
+        doAnswer(call -> {
+            ABCHarnessCheck snapshot = call.getArgument(0);
+            assertFalse(Boolean.TRUE.equals(snapshot.getFinished()));
+            assertNull(snapshot.getScore());
+            if (snapshot.getProgramDescriptions().get(0) == null) {
+                assertEquals("fast", snapshot.getProgramDescriptions().get(1).getSummary());
+                firstSaved.countDown();
+            }
+            return null;
+        }).when(dao).save(any());
+        doAnswer(call -> {
+            int index = call.getArgument(1);
+            if (index == 0) assertTrue(firstSaved.await(1, TimeUnit.SECONDS), "Fast explanation must be visible while another runs");
+            var description = new ABCHarnessProgramDescription();
+            description.setSummary(index == 0 ? "slow" : "fast");
+            return description;
+        }).when(service).describeProgram(any(), anyInt(), any(), any(), any(), any(), any());
+        var result = service.describePrograms(new ABCHarnessCheck(), List.of(new ABCHarnessProgram(), new ABCHarnessProgram()), List.of(), "domain");
+        assertEquals(List.of("slow", "fast"), result.stream().map(ABCHarnessProgramDescription::getSummary).toList());
+        verify(dao, times(2)).save(any());
+    }
+
     @Test void describesAtMostTwoProgramsConcurrentlyAndPreservesInputOrder() throws Exception {
         var service = spy(new CheckServiceV2Impl());
+        ReflectionTestUtils.setField(service, "checkDaoV2", mock(CheckDaoV2.class));
         var secondDone = new CountDownLatch(1);
         var active = new AtomicInteger();
         var maximum = new AtomicInteger();
@@ -47,6 +75,7 @@ class QualityAssessmentTest {
 
     @Test void aFailedExplanationCancelsOtherPendingExplanations() throws Exception {
         var service = spy(new CheckServiceV2Impl());
+        ReflectionTestUtils.setField(service, "checkDaoV2", mock(CheckDaoV2.class));
         var slowStarted = new CountDownLatch(1);
         var interrupted = new CountDownLatch(1);
         doAnswer(call -> {

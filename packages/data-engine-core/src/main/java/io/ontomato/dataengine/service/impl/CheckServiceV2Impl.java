@@ -189,6 +189,9 @@ public class CheckServiceV2Impl implements CheckServiceV2 {
 			for (int i = 0; i < programs.size(); i++) {
 				var item = completed.take().get();
 				result.set(item.index(), item.description());
+                // Preserve source indices, including unfinished slots, while publishing completed evidence.
+                check.setProgramDescriptions(new ArrayList<>(result));
+                saveCheckTask(check);
 			}
 			return result;
 		} catch (InterruptedException e) {

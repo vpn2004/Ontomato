@@ -19,11 +19,12 @@ describe("quality check completion contract", () => {
   beforeEach(() => { transport.frames = []; });
 
   it("accepts a complete negative assessment including a zero score", async () => {
-    transport.frames = [{ meaning: "Missing filter" }, { conclusion: "Wrong scope", score: 0, fittedQuestion: "All rows" }];
+    transport.frames = [{ label: "program-1", meaning: "Missing filter" }, { conclusion: "Wrong scope", score: 0, fittedQuestion: "All rows" }];
     const finish = vi.fn();
     const result = await streamSelfCheckSSE({ sessionId: "test", abcQuestionMode: "harness", onFinish: finish });
     expect(result?.score).toBe(0);
     expect(result?.steps).toHaveLength(1);
+    expect(result?.steps[0]?.label).toBe("program-1");
     expect(finish).toHaveBeenCalledOnce();
   });
 
