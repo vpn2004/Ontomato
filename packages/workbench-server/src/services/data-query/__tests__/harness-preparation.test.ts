@@ -40,7 +40,10 @@ describe("Harness result preparation", () => {
   it("publishes the first ready table while the backend stream is still open", async () => {
     const streamEnd = deferred<void>(); mocks.events = [event(0)]; mocks.afterEvents = () => streamEnd.promise;
     mocks.prepare.mockResolvedValue(table(0)); const ctx = context(); const run = runAbcHarnessBranch(ctx);
-    try { await vi.waitFor(() => expect(ctx.pushEvent).toHaveBeenCalledWith(expect.objectContaining({ type: "query_datasets" }))); }
+    try {
+      await vi.waitFor(() => expect(ctx.pushEvent).toHaveBeenCalledWith(expect.objectContaining({ type: "query_datasets" })));
+      expect(ctx.pushContent).toHaveBeenCalledWith(expect.stringContaining("table-0"), true);
+    }
     finally { streamEnd.resolve(); await run; }
   });
   it("does not publish queued results after cancellation", async () => {

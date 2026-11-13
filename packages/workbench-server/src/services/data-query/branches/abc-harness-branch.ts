@@ -252,6 +252,7 @@ export async function runAbcHarnessBranch(
             datasets: [...datasets],
             nodeIds: [],
           });
+          pushContent(formatDataResultSection(dataMessages, labels), true);
         });
         continue;
       }
@@ -318,7 +319,7 @@ export async function runAbcHarnessBranch(
       pushContent: (content, loading) => {
         answerContent = content;
         publishFallback();
-        pushContent(content, loading);
+        pushContent(answerContent, loading);
       },
       signal,
       locale,

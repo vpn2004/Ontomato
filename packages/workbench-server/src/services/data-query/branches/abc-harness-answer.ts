@@ -11,9 +11,11 @@ import {
   getContentBeforeDataPlaceholder,
   insertDisplayDataResults,
   stripThinkingTags,
+  joinMarkdownSections,
+  formatDataResultSection,
   type HarnessLabels,
 } from "./abc-harness-markdown";
-import { chunkText, pushStableContent } from "./abc-harness-stream";
+import { chunkText } from "./abc-harness-stream";
 
 function buildHarnessDataEvidence(datasets: Dataset[], locale?: string): string {
   return datasets
@@ -89,14 +91,14 @@ export async function polishHarnessAnswer(params: {
       const stablePrefix = getContentBeforeDataPlaceholder(polished);
       if (stablePrefix && stablePrefix !== lastPushedStablePrefix) {
         lastPushedStablePrefix = stablePrefix;
-        pushContent(stablePrefix, true);
+        pushContent(joinMarkdownSections([stablePrefix, formatDataResultSection(displayDataMessages, labels)]), true);
       }
     }
 
     polished = stripThinkingTags(polished);
     if (!polished) {
       outcome = "fallback";
-      pushStableContent(fallbackContent, pushContent);
+      pushContent(fallbackContent, false);
       return fallbackContent;
     }
     const finalContent = insertDisplayDataResults(polished, displayDataMessages, labels);
@@ -115,7 +117,7 @@ export async function polishHarnessAnswer(params: {
       error: error instanceof Error ? error.message : String(error),
     });
     outcome = "fallback";
-    pushStableContent(fallbackContent, pushContent);
+    pushContent(fallbackContent, false);
     return fallbackContent;
   } finally {
     finish(outcome ?? "failed", { firstTokenMs });
