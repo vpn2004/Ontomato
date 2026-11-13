@@ -251,6 +251,13 @@ export async function getThreadMessagesPayload(
     });
   }
 
+  const insertHistoryMessage = (message: ThreadMessagesPayload["messages"][number]) => {
+    const nextTurn = messages.findIndex(existing => existing.requestSeq !== undefined
+      && message.requestSeq !== undefined && existing.requestSeq > message.requestSeq);
+    if (nextTurn < 0) messages.push(message);
+    else messages.splice(nextTurn, 0, message);
+  };
+
   for (const snapshot of snapshots) {
     if (snapshot.requestSeq === activeRequestSeq) {
       appendTurnQuestion(snapshot.requestSeq);
@@ -261,14 +268,14 @@ export async function getThreadMessagesPayload(
     const content = snapshot.snapshot?.primaryText || "";
     if (snapshot.snapshot?.mode === "follow-up") {
       if (snapshot.snapshot.followUpUserMessage && !seenUserRequests.has(snapshot.requestSeq)) {
-        messages.push({
+        insertHistoryMessage({
           role: "user",
           content: snapshot.snapshot.followUpUserMessage,
           requestSeq: snapshot.requestSeq,
         });
         seenUserRequests.add(snapshot.requestSeq);
       }
-      messages.push({
+      insertHistoryMessage({
         role: "assistant",
         content,
         requestSeq: snapshot.requestSeq,
@@ -286,7 +293,7 @@ export async function getThreadMessagesPayload(
     const primaryQueryRun = getPrimaryQueryRun(queryRunsByRequest.get(snapshot.requestSeq) || []);
     if (content && !isWonByRetiredBranch(primaryQueryRun)) {
       const requestEvents = eventsByRequest.get(snapshot.requestSeq) || [];
-      messages.push({
+      insertHistoryMessage({
         role: "assistant",
         content,
         requestSeq: snapshot.requestSeq,
