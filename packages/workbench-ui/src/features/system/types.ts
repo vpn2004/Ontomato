@@ -2,7 +2,7 @@ import { z } from "zod";
 import type {
   BackendAgentConfig,
   BackendModelConfig,
-  ModelRole,
+  ModelRoleBindings,
 } from "@ontomato/contracts/model-settings";
 import type {
   ConfigurationProblem,
@@ -35,8 +35,8 @@ export type ModelEntry = Omit<
 /** A save the page hands to a card's dialog: resolves to whether the value was saved; the dialog closes only on success. */
 export type SaveAction<T> = (value: T) => Promise<boolean>;
 
-/** Draft model references of the five roles: a config ID or not configured (null); same shape as agents in the saveModelSettings request. */
-export type RoleModels = Record<ModelRole, string | null>;
+/** Required model references plus optional quality checking, which inherits query when unset. */
+export type RoleModels = ModelRoleBindings<string | null>;
 
 export interface EmbeddingModelConfig {
   baseUrl: string;
@@ -116,7 +116,7 @@ export interface SystemSettings {
 
 /** The parts of GET /businessConfig/getConfig the two pages read: the system config page reads general settings and the skill directory, the model configuration page reads Embedding. */
 export interface BusinessConfig extends SystemSettings {
-  agents: Record<ModelRole, BackendAgentConfig>;
+  agents: ModelRoleBindings<BackendAgentConfig>;
   embeddingModelProperties: EmbeddingModelConfig | null;
   /** The saved multi-source definition; null until one is saved. */
   multiDataSource: MultiDataSourceDefinition | null;

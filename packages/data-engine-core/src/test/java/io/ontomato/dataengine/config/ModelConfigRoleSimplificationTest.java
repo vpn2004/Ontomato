@@ -126,10 +126,10 @@ class ModelConfigRoleSimplificationTest {
 
     @Test
     void langFilesContainRoleTranslations() throws Exception {
-        // Every pack this edition installs; the open-source edition installs English only.
+        // Verify every language pack installed by this edition.
         java.io.File langDir = new java.io.File("conf-defaults/lang");
         java.io.File[] files = langDir.listFiles((dir, name) -> name.endsWith(".json"));
-        assertEquals(List.of("en.json"), java.util.Arrays.stream(files).map(java.io.File::getName).toList());
+        assertEquals(java.util.Set.of("en.json", "zh-CN.json"), java.util.Arrays.stream(files).map(java.io.File::getName).collect(java.util.stream.Collectors.toSet()));
         for (java.io.File file : files) {
             String lang = file.getName().replace(".json", "");
             String json = java.nio.file.Files.readString(file.toPath());

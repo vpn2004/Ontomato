@@ -364,6 +364,10 @@
     "value": "No model is configured for role \"{0}\". Choose one in Model Configuration."
   },
   {
+    "key": "AgentRole.qualityCheck",
+    "value": "Query Quality Check"
+  },
+  {
     "key": "AgentRole.query",
     "value": "Query"
   },

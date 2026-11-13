@@ -364,6 +364,10 @@
     "value": "角色“{0}”未配置模型，请在模型配置中选择模型。"
   },
   {
+    "key": "AgentRole.qualityCheck",
+    "value": "问数质检"
+  },
+  {
     "key": "AgentRole.query",
     "value": "查询"
   },

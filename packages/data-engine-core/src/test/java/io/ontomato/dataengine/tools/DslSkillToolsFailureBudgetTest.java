@@ -100,7 +100,7 @@ class DslSkillToolsFailureBudgetTest {
             assertTrue(tool.executeDslFile("query.json").contains("conditions.properties"));
         }
         Files.writeString(file, valid().toJSONString());
-        assertTrue(tool.executeDslFile("query.json").contains("budget is exhausted"));
+        assertTrue(tool.executeDslFile("query.json").contains("Query result:"));
         var executions = ArgumentCaptor.forClass(AgentWorkspaceService.FileExecution.class);
         verify(workspace, times(5)).clearExecution("budget-test", file.toString());
         verify(workspace, times(5)).saveExecution(eq("budget-test"), eq(file.toString()), executions.capture());
@@ -108,14 +108,14 @@ class DslSkillToolsFailureBudgetTest {
         for (int i = 0; i < 4; i++) {
             assertTrue(saved.get(i).error().contains("conditions.properties"));
         }
-        assertTrue(saved.get(4).error().contains("budget is exhausted"));
+        assertNull(saved.get(4).error());
         assertEquals(Files.readString(file), saved.get(4).content());
         assertEquals(0, AgentCallContext.current().getPendingDslTrials());
-        assertEquals(0, startedEvents());
-        verify(adapter, never()).executeDsl(anyString(), anyString(), any(), any());
+        assertEquals(1, startedEvents());
+        verify(adapter).executeDsl(anyString(), anyString(), any(), any());
     }
 
-    @Test void invalidPredicatesNeverDispatchAndFifthTrialIsBlockedEvenWhenValid() throws Exception {
+    @Test void repeatedInvalidPredicatesAreBlockedButACorrectedPlanCanContinue() throws Exception {
         for (int i = 1; i <= 4; i++) {
             var result = tool.executeDslQuery(invalid());
             assertFalse(result.ok());
@@ -124,12 +124,14 @@ class DslSkillToolsFailureBudgetTest {
             assertEquals(0, AgentCallContext.current().getPendingDslTrials());
             assertEquals(i == 4, result.feedback().contains("STOP:"));
         }
-        var fifth = tool.executeDslQuery(valid());
+        var fifth = tool.executeDslQuery(invalid());
         assertFalse(fifth.ok());
         assertTrue(fifth.error().contains("budget is exhausted"));
         assertEquals(4, AgentCallContext.current().getConsecutiveDslFailures());
         assertEquals(0, startedEvents());
         verify(adapter, never()).executeDsl(anyString(), anyString(), any(), any());
+        assertTrue(tool.executeDslQuery(valid()).ok());
+        verify(adapter).executeDsl(anyString(), anyString(), any(), any());
     }
 
     @Test void successResetsFailuresAndANewAgentCallHasAnIndependentBudget() throws Exception {
@@ -138,12 +140,30 @@ class DslSkillToolsFailureBudgetTest {
         assertTrue(success.ok(), success.feedback());
         assertEquals(0, AgentCallContext.current().getConsecutiveDslFailures());
         for (int i = 0; i < 4; i++) assertFalse(tool.executeDslQuery(invalid()).ok());
-        assertFalse(tool.executeDslQuery(valid()).ok());
+        assertFalse(tool.executeDslQuery(invalid()).ok());
         AgentCallContext.end();
         AgentCallContext.begin("next-session", "ABCProgrammer", "test-domain");
         assertTrue(tool.executeDslQuery(valid()).ok());
         verify(adapter, times(2)).executeDsl(anyString(), anyString(), any(), any());
         assertEquals(2, startedEvents());
+    }
+
+    @Test void manyProductiveStepsAndDistinctRepairsAreNotAQuestionRoundLimit() throws Exception {
+        for (int i = 0; i < 25; i++) {
+            var correction = invalid();
+            correction.getJSONObject("answer").getJSONArray("steps").getJSONObject(0)
+                .getJSONObject("graph").getJSONArray("patterns").getJSONObject(0)
+                .getJSONArray("objects").getJSONObject(0).put("class", "/Repair" + i);
+            assertFalse(tool.executeDslQuery(correction).feedback().contains("budget is exhausted"));
+        }
+        for (int i = 0; i < 25; i++) assertTrue(tool.executeDslQuery(valid()).ok());
+        verify(adapter, times(25)).executeDsl(anyString(), anyString(), any(), any());
+    }
+
+    @Test void changingOnlyQuestionTextDoesNotEvadeTheRepeatedFailureGuard() {
+        for (int i = 0; i < 4; i++) assertFalse(tool.executeDslQuery(invalid()).ok());
+        var samePlan = invalid(); samePlan.put("problem", "Cosmetically renamed question");
+        assertTrue(tool.executeDslQuery(samePlan).feedback().contains("budget is exhausted"));
     }
 
     @Test void adapterFailureDoesNotReleaseTheConsumedBudget() throws Exception {

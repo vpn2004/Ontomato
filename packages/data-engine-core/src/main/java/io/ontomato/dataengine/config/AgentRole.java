@@ -12,6 +12,10 @@ public final class AgentRole {
     public static final String GENERAL = "general";
     public static final String DIAGNOSIS = "diagnosis";
     public static final String KNOWLEDGE_GOVERNANCE = "knowledgeGovernance";
+    public static final String QUALITY_CHECK = "qualityCheck";
+
+    /** Optional bindings inherit an existing role only when unset. */
+    public static final Set<String> OPTIONAL = Set.of(QUALITY_CHECK);
 
     public static final Set<String> ALL = Set.of(
             QUERY,

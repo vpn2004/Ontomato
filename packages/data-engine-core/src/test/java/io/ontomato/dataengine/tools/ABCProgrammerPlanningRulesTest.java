@@ -14,6 +14,43 @@ import io.ontomato.dataengine.logging.AgentCallContext;
 import io.ontomato.dataengine.service.BusinessConfigService;
 
 class ABCProgrammerPlanningRulesTest {
+    @Test void preparationUsesOneDomainSnapshotAndIncludesOnlyRequestedClassesAndDirectEdges() {
+        var tools = new ABCProgrammerSkillTools();
+        var dao = mock(JSONRuleDao.class);
+        var registry = mock(DataAdapterRegistry.class);
+        var configs = mock(BusinessConfigService.class);
+        var adapter = mock(DataAdapter.class);
+        JSONObject ontology = JSONObject.parseObject("""
+            {"datasetdesc":"Sample","classDef":[
+              {"className":"/Order","attrs":[{"name":"customer","type":"varchar","attrDesc":"Customer code"}]},
+              {"className":"/Customer","attrs":[]},
+              {"className":"/PrivateOtherDomain","attrs":[]}],
+              "relationship_rule":{"/placed_by":{"fromclass":"/Order","toclass":"/Customer","desc":"Placed by"}}}
+            """);
+        when(dao.query("domain")).thenReturn(ontology);
+        when(registry.create(null, ontology)).thenReturn(adapter);
+        when(adapter.queryPlanningRules()).thenReturn("SOURCE-RULES");
+        when(adapter.queryPlanningExample(any())).thenReturn("SOURCE-EXAMPLE");
+        ReflectionTestUtils.setField(tools, "jsonRuleDao", dao);
+        ReflectionTestUtils.setField(tools, "businessConfigService", configs);
+        ReflectionTestUtils.setField(tools, "dataAdapterRegistry", registry);
+        AgentCallContext.begin("context-test", "ABC_PROGRAMMER", "domain");
+        try {
+            String context = ReflectionTestUtils.invokeMethod(tools, "getQueryContext", List.of("/Order"));
+            assertTrue(context.contains("Customer code"));
+            assertTrue(context.contains("/placed_by"));
+            assertTrue(context.contains("/Customer"), "Include adjacent definitions for further exploration");
+            assertTrue(context.contains("SOURCE-EXAMPLE"));
+            assertEquals(1, context.split("SOURCE-RULES", -1).length - 1);
+            assertFalse(context.contains("/PrivateOtherDomain"));
+            verify(dao).query("domain");
+            verify(registry).create(null, ontology);
+            String empty = ReflectionTestUtils.invokeMethod(tools, "getQueryContext", List.of());
+            assertTrue(empty.startsWith("Failed"));
+            assertFalse(empty.contains("PrivateOtherDomain"));
+        } finally { AgentCallContext.end(); }
+    }
+
     @Test void syntaxAndExampleUseTheCurrentDomainAdapterWithoutLeakingRulesToOtherSources() throws Exception {
         var tools = new ABCProgrammerSkillTools();
         var dao = mock(JSONRuleDao.class);

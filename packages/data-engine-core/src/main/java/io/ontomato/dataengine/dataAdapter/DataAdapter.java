@@ -23,7 +23,7 @@ public interface DataAdapter {
         return "";
     }
 
-    /** Maximum consecutive failed trial DSL executions in one Agent call; zero leaves legacy sources unchanged. */
+    /** Maximum failed trials of an unchanged plan since the last success; revised plans may continue. Zero disables the guard. */
     default int consecutiveDslFailureLimit() {
         return 0;
     }

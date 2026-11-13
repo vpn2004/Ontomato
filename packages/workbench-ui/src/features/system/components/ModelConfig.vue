@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ZodError } from "zod";
-import { MODEL_ROLES, type ModelSettingsData } from "@ontomato/contracts/model-settings";
+import { CONFIGURABLE_MODEL_ROLES as MODEL_ROLES, type ModelSettingsData } from "@ontomato/contracts/model-settings";
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { useI18n } from "vue-i18n";
@@ -43,7 +43,7 @@ function applySaved(data: ModelSettingsData) {
   savedModels.value = data.models;
   // Unconfigured roles may omit the model field in the response; normalize them to null.
   savedRoles.value = Object.fromEntries(
-    MODEL_ROLES.map((role) => [role, data.agents[role].model ?? null])
+    MODEL_ROLES.map((role) => [role, data.agents[role]?.model ?? null])
   ) as RoleModels;
 }
 

@@ -2,7 +2,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ElementPlus, { ElMessage, ElMessageBox } from "element-plus";
 import { reactive } from "vue";
-import { MODEL_ROLES } from "@ontomato/contracts/model-settings";
+import { MODEL_ROLES, CONFIGURABLE_MODEL_ROLES } from "@ontomato/contracts/model-settings";
 import ModelListCard from "../business-config/ModelListCard.vue";
 import RoleModelsCard from "../business-config/RoleModelsCard.vue";
 import EmbeddingModelConfigCard from "../business-config/EmbeddingModelConfigCard.vue";
@@ -75,6 +75,7 @@ const fixtures = vi.hoisted(() => ({
     general: "qwen-lite",
     diagnosis: "qwen-main",
     knowledgeGovernance: null,
+    qualityCheck: null,
   },
   embedding: {
     baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -399,7 +400,7 @@ describe("role models card", () => {
     return { roles, wrapper };
   }
 
-  it("lists the five roles in the query engine and agent groups", () => {
+  it("lists the required roles and optional quality check binding", () => {
     const { wrapper } = mountRoles();
     const groups = wrapper.findAll(".role-group");
     expect(groups.map((group) => group.find("h4").text())).toEqual([
@@ -407,7 +408,7 @@ describe("role models card", () => {
       t("admin.modelRoleGroups.agents"),
     ]);
     expect(groups.map((group) => group.findAll(".role-name").map((name) => name.text()))).toEqual([
-      [t("admin.modelRoleNames.query"), t("admin.modelRoleNames.coding")],
+      [t("admin.modelRoleNames.query"), t("admin.modelRoleNames.coding"), t("admin.modelRoleNames.qualityCheck")],
       [
         t("admin.modelRoleNames.general"),
         t("admin.modelRoleNames.diagnosis"),
@@ -419,14 +420,14 @@ describe("role models card", () => {
   it("each role name carries a focusable description", () => {
     const { wrapper } = mountRoles();
     expect(wrapper.findAll("button.role-info").map((info) => info.attributes("aria-label"))).toEqual(
-      MODEL_ROLES.map((role) => t(`admin.modelRoleDescriptions.${role}`))
+      ["query", "coding", "qualityCheck", "general", "diagnosis", "knowledgeGovernance"].map((role) => t(`admin.modelRoleDescriptions.${role}`))
     );
   });
 
   it("offers the given models by config ID and clears a role to not configured", async () => {
     const { roles, wrapper } = mountRoles();
     const selects = wrapper.findAllComponents({ name: "ElSelect" });
-    expect(selects).toHaveLength(5);
+    expect(selects).toHaveLength(6);
     const options = selects[0]!.findAllComponents({ name: "ElOption" });
     expect(options.map((option) => [option.props("value"), option.props("label")])).toEqual([
       ["qwen-main", "Qwen (qwen-main)"],
@@ -763,7 +764,7 @@ describe("model config page", () => {
           customRequestParameters: {},
         },
       ],
-      agents: Object.fromEntries(MODEL_ROLES.map((role) => [role, null])),
+      agents: Object.fromEntries(CONFIGURABLE_MODEL_ROLES.map((role) => [role, null])),
     });
     // On success the dialog closes, the response (including Java's defaults) becomes the saved list, and the
     // five assigned roles show at once with no false unsaved marker.
@@ -815,12 +816,26 @@ describe("model config page", () => {
     expect(unsavedTag(page).exists()).toBe(true);
   });
 
-  it("the role save submits exactly the saved model list and the five role keys in one request", async () => {
+  it("keeps an optional quality check binding independent and allows query inheritance", async () => {
+    const page = await mountModelPage();
+    const select = roleSelect(page, "qualityCheck");
+    expect(select.props("modelValue")).toBeNull();
+    select.vm.$emit("update:modelValue", "qwen-lite");
+    await flushPromises();
+    await saveRoles(page);
+    expect(sent.settings).toMatchObject({ agents: { qualityCheck: "qwen-lite", query: "qwen-main", coding: "qwen-main" } });
+    select.vm.$emit("update:modelValue", null);
+    await flushPromises();
+    await saveRoles(page);
+    expect(sent.settings).toMatchObject({ agents: { qualityCheck: null, query: "qwen-main" } });
+  });
+
+  it("the role save submits exactly the saved model list and configurable role keys in one request", async () => {
     const page = await mountModelPage();
     await saveRoles(page);
     const payload = sent.settings as { models: unknown[]; agents: Record<string, unknown> };
     expect(new Set(Object.keys(payload))).toEqual(new Set(["models", "agents"]));
-    expect(new Set(Object.keys(payload.agents))).toEqual(new Set(MODEL_ROLES));
+    expect(new Set(Object.keys(payload.agents))).toEqual(new Set(CONFIGURABLE_MODEL_ROLES));
     // Roles carry only config IDs; the skill directory is not submitted with the model save.
     expect(payload.agents).toEqual(fixtures.agents);
     expect(payload.models).toEqual(fixtures.models);

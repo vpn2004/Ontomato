@@ -264,6 +264,7 @@ export default {
       "agents": "Agents"
     },
     "modelRoleNames": {
+      "qualityCheck": "Query Quality Check",
       "query": "Query",
       "coding": "Coding and Computing",
       "general": "General",
@@ -271,6 +272,7 @@ export default {
       "knowledgeGovernance": "Knowledge Governance Agent"
     },
     "modelRoleDescriptions": {
+      "qualityCheck": "Explains query programs and reviews business semantics. Unset inherits Query; a separate binding does not affect planning or coding.",
       "query": "Understands the question, generates and validates queries, and retrieves business knowledge",
       "coding": "Generates and runs calculation code, for Python calculation, post-calculation, functions, metric views and data retrieval programs",
       "general": "Used by every model call in the workbench without a dedicated role, including chat replies, business agents, and report and chart generation",
@@ -279,6 +281,7 @@ export default {
     },
     "deleteModelConfirm": "Delete model \"{name}\"?",
     "deleteModelInUseConfirm": "Model \"{name}\" is used by these roles: {roles}. After deletion they become not configured. Delete it?",
+    "qualityCheckInheritsQuery": "Use Query model",
     "roleNotConfigured": "Not configured",
     "defaultWhenEmpty": "Leave empty to use the default",
     "modelListEmpty": "No models yet. Add the first config.",

@@ -42,6 +42,7 @@ export const diagnosticConfigSchema = z.object({
         general: role,
         diagnosis: role,
         knowledgeGovernance: role,
+        qualityCheck: role.optional(),
       }),
       /** Absent when no Embedding model is configured. */
       "embedding-model": z

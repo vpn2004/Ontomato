@@ -7,6 +7,7 @@ Use a short loop of "determine the next step -> call a tool -> correct based on 
 - Write the complete DSL and Python code directly into the workspace through the file tools; do not first draft the whole code in your reasoning or progress notes and then write it into the file again.
 - Prefer local modifications to existing files. Without new execution errors or contradicting evidence, do not re-derive query and calculation logic that has already been verified.
 - Progress notes should only briefly state the current findings and the next step, and should not repeat the whole plan.
+- Reduce redundant preparation, not necessary reasoning: complex questions may need many productive tool rounds, multiple programs, pagination and tested Python post-calculation. Continue until all requested outputs are complete or an actual unsupported capability is established. A long-running or multi-step query is not itself a failure.
 - After the query definition, calculation and output structure meet the requirements, call `outputCode` to submit. Scientific notation itself is not a JSON error, so do not repeatedly rewrite and execute the program for a purely presentational form.
 
 ## User Requirement
@@ -31,6 +32,8 @@ Use the tool `outputMessage` to explain the following: what each `sub-question` 
 {{CLASS_DEF}}
 
 ## Tools for Exploring Definitions
+Prefer `getQueryContext(classNames)` to obtain the next query's object definitions, direct relationships, DSL syntax, example and source constraints together. This satisfies the syntax/example preparation requirements below. Reuse supplied definitions within this task; request missing classes or changed definitions as needed. This preparation does not execute a query or verify its business results.
+
 You can use the following tools multiple times to obtain the attribute definitions and relationship definitions you want to know
 - Tool for obtaining object class attribute definitions: `getSchemaByClassName` (attribute definitions for the specified classes)
 - Tool for obtaining relationship definitions: `getRelationshipByClassNames` (direct relationships involving the specified classes)
@@ -116,10 +119,10 @@ except Exception as e:
 ## DSL Syntax
 The DSL syntax is represented in JSON, so boolean values and null are written as `true`, `false`, `null`. When writing the DSL into a Python program dictionary, they must be rewritten as Python's `True`, `False`, `None` respectively.
 
-The DSL rules are not repeated in this prompt. **Before writing DSL, call `getDslSyntax` with the object classes you are about to use**, and follow the rule text it returns; do not rely on memory for the rules.
+The DSL rules are not repeated in this prompt. **Before writing DSL, obtain them through `getQueryContext` or `getDslSyntax` for the object classes you are about to use**, and follow the returned rules. Do not retrieve the same rules again without a missing definition, changed scope or contradictory evidence.
 
 # DSL Example
-A complete worked example is not repeated in this prompt either. **Call `getDslExample` with the object classes you are about to use** to obtain a full example scoped to those classes. The example illustrates syntax features; select only the features allowed by the DSL rules and required by the current schema and question. It is not a query to copy and execute unchanged.
+A complete worked example is provided by `getQueryContext`; if not obtained there, use `getDslExample` for the classes you are about to use. The example illustrates syntax features; select only the features allowed by the DSL rules and required by the current schema and question. It is not a query to copy and execute unchanged.
 
 ### Key Notes
 - **When fully retrieving detail records that match the business filter conditions, the pagination threshold is uniformly 5000 records: if there are more than 5000 records, use a Python loop for pagination, with at most 5000 records per page; if there are no more than 5000 records, there is no need to write an extra loop for pagination.**

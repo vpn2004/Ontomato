@@ -149,7 +149,7 @@ public class BusinessConfigServiceImpl implements BusinessConfigService {
 		}).toList();
 		openAi.put("models", models);
 		JSONObject agents = new JSONObject();
-		for (String role : AgentRole.ALL) {
+		for (String role : businessConfig.getAgents().keySet()) {
 			AgentConfig agent = businessConfig.getAgents().get(role);
 			JSONObject item = JSONObject.of("model", agent.getModel());
 			if (AgentRole.CODING.equals(role)) {

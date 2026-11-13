@@ -1,6 +1,8 @@
 package io.ontomato.dataengine.logging;
 
 import java.util.UUID;
+import java.util.HashMap;
+import java.util.Map;
 
 public class AgentCallContext {
 
@@ -13,6 +15,8 @@ public class AgentCallContext {
     private int round;
     private int consecutiveDslFailures;
     private int pendingDslTrials;
+    private final Map<String, Integer> failedPlans = new HashMap<>();
+    private final Map<String, Integer> pendingPlans = new HashMap<>();
 
     private AgentCallContext(String sessionId, String agentName, String domainId) {
         this.agentRunId = UUID.randomUUID().toString();
@@ -38,15 +42,29 @@ public class AgentCallContext {
     }
 
     public synchronized boolean reserveDslTrial(int limit) {
-        if (limit <= 0 || consecutiveDslFailures + pendingDslTrials >= limit) return false;
+        return reserveDslTrial(limit, "");
+    }
+
+    public synchronized boolean reserveDslTrial(int limit, String plan) {
+        if (limit <= 0 || failedPlans.getOrDefault(plan, 0) + pendingPlans.getOrDefault(plan, 0) >= limit) return false;
+        pendingPlans.merge(plan, 1, Integer::sum);
         pendingDslTrials++;
         return true;
     }
 
     public synchronized int finishDslTrial(boolean success) {
+        return finishDslTrial(success, "");
+    }
+
+    public synchronized int finishDslTrial(boolean success, String plan) {
         if (pendingDslTrials > 0) pendingDslTrials--;
-        if (success) consecutiveDslFailures = 0;
-        else consecutiveDslFailures++;
+        pendingPlans.computeIfPresent(plan, (key, count) -> count <= 1 ? null : count - 1);
+        if (success) {
+            failedPlans.clear();
+            consecutiveDslFailures = 0;
+        } else {
+            consecutiveDslFailures = failedPlans.merge(plan, 1, Integer::sum);
+        }
         return consecutiveDslFailures;
     }
 

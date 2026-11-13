@@ -19,7 +19,7 @@ import { updateQueryRunQualityCheck } from "./query-run-store";
 
 const logger = createLogger("data-query:late-fact");
 
-/** Bounded time limit of a late fact: it decides only "when to consider it dead", never "how long to wait before the result counts". */
+/** Maximum time without new review evidence; productive multi-program reviews may take longer overall. */
 export const LATE_FACT_SETTLE_TIMEOUT_MS = 60_000;
 
 /**
@@ -67,18 +67,20 @@ export function startQualityCheckSettlement(input: QualityCheckSettlementInput):
   let state: QcState = { status: "running", steps: [] };
   const publish = () => onState?.(state, buildQcMarkdown(state));
 
-  // This bound also protects callers against stalled or older backend readers. On expiry, abort
-  // the read and persist the not-ready state; it is not a deadline for declaring an answer valid.
+  // Expire stalled readers, not productive multi-program reviews. Only a new explanation renews
+  // this idle deadline; transport heartbeats and repeated evidence cannot keep a stuck review alive.
   const bound = new AbortController();
   const abortOnCaller = () => bound.abort();
   // Cancellation on entry and cancellation received while running reuse the same finalization; attaching only a listener is not enough.
   if (signal?.aborted) bound.abort();
   else signal?.addEventListener("abort", abortOnCaller);
   let timedOut = false;
-  const timer = setTimeout(() => {
+  const expire = () => {
     timedOut = true;
     bound.abort();
-  }, LATE_FACT_SETTLE_TIMEOUT_MS);
+  };
+  let timer = setTimeout(expire, LATE_FACT_SETTLE_TIMEOUT_MS);
+  const explanations = new Set<string>();
 
   publish();
 
@@ -93,6 +95,13 @@ export function startQualityCheckSettlement(input: QualityCheckSettlementInput):
         locale: input.locale,
         signal: bound.signal,
         onStep: (step) => {
+          if (bound.signal.aborted) return;
+          const key = JSON.stringify([step.summary?.trim() ?? "", step.meaning?.trim() ?? ""]);
+          if (!explanations.has(key) && (step.summary?.trim() || step.meaning?.trim())) {
+            explanations.add(key);
+            clearTimeout(timer);
+            timer = setTimeout(expire, LATE_FACT_SETTLE_TIMEOUT_MS);
+          }
           state = {
             ...state,
             steps: [

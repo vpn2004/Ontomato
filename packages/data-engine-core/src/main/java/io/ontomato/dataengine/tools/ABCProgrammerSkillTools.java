@@ -283,7 +283,47 @@ public class ABCProgrammerSkillTools {
 				+ " must be a boolean (true/false), but was \"" + s + "\"");
 	}
 
-	private static JSONObject dslScope(List<String> classNames) {
+    @Tool("Prepare a query in one call: get the requested classes' attributes, their direct relationships, "
+            + "the DSL syntax, a worked example and current source constraints from one domain snapshot. "
+            + "Prefer this to separate schema, relationship, syntax and example calls. "
+            + "Request only the classes needed now; use the existing exploration tools for missing definitions later.")
+    public String getQueryContext(@P("non-empty array of object class names needed for the next query") List<String> classNames) {
+        try {
+            if (classNames == null || classNames.isEmpty()) throw new IllegalArgumentException("Specify the classes needed for the next query");
+            var context = AgentCallContext.current();
+            Map<String, Object> jsonRule = jsonRuleDao.query(context.getDomainId());
+            List<Map<String, Object>> defs = (List<Map<String, Object>>) jsonRule.get("classDef");
+            List<String> names = classNames.stream().map(name -> {
+                if (name == null || name.isBlank()) throw new IllegalArgumentException("Class names must not be blank");
+                String normalized = DBSchemaUtil.normalizeClassName(name.trim(), defs);
+                if (defs.stream().noneMatch(def -> normalized.equals(def.get("className")))) {
+                    throw new IllegalArgumentException("Unknown object class: " + name);
+                }
+                return normalized;
+            }).distinct().toList();
+            Map<String, Object> selected = new java.util.LinkedHashMap<>(jsonRule);
+            selected.put("classDef", defs.stream().filter(def -> names.contains(def.get("className"))).toList());
+            Map<String, Object> direct = new java.util.LinkedHashMap<>();
+            ((Map<String, Map<String, Object>>) jsonRule.get("relationship_rule")).forEach((key, rel) -> {
+                if (names.contains(rel.get("fromclass")) || names.contains(rel.get("toclass"))) direct.put(key, rel);
+            });
+            selected.put("relationship_rule", direct);
+            var schema = DBSchemaUtil.getDBSchema(selected, null, false);
+            var adapter = dataAdapterRegistry.create(businessConfigService.get(context.getDomainId()), jsonRule);
+            String example = adapter.queryPlanningExample(names);
+            if (example == null || example.isBlank()) example = DslRuleUtil.generateDslExample(dslScope(names), jsonRule);
+            return "# Requested object definitions\n" + schema.get(DBSchemaUtil.KEY_CLASS_DEF)
+                    + "\n# Direct relationships (fetch missing endpoint attributes when needed)\n" + schema.get(DBSchemaUtil.KEY_RELATIONSHIP_DEF)
+                    + "\n# DSL syntax\n" + DslRuleUtil.generateDslRule(dslScope(names), jsonRule)
+                    + "\n# Worked example (not a query result)\n" + example
+                    + "\n# Current source constraints\n" + adapter.queryPlanningRules();
+        } catch (Exception e) {
+            log.error("Failed to prepare query context", e);
+            return "Failed to prepare query context: " + e.getMessage() + ". The separate exploration tools remain available.";
+        }
+    }
+
+    private static JSONObject dslScope(List<String> classNames) {
 		JSONObject subQuery = new JSONObject();
 		JSONArray classes = new JSONArray();
 		if (classNames != null) {

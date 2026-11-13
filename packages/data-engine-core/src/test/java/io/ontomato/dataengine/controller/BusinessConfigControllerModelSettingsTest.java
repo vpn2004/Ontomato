@@ -34,6 +34,26 @@ import io.ontomato.dataengine.service.IdentityService;
 import io.ontomato.dataengine.util.SpringBeanUtil;
 
 class BusinessConfigControllerModelSettingsTest {
+    @Test void optionalReviewModelCanBeSavedAndAnOldClientCannotEraseIt() {
+        var review = new AgentConfig(); review.setModel("default");
+        stored.getAgents().put("qualityCheck", review);
+        var input = new JSONObject();
+        input.put("models", JSONArray.from(stored.getModels()));
+        var refs = new JSONObject();
+        for (String role : AgentRole.ALL) refs.put(role, "default");
+        input.put("agents", refs);
+        var oldSave = controller.saveModelSettings(input);
+        assertTrue(oldSave.getBooleanValue("success"), oldSave.toString());
+        assertEquals("default", oldSave.getJSONObject("data").getJSONObject("agents")
+            .getJSONObject("qualityCheck").getString("model"));
+        refs.put("qualityCheck", null);
+        var clearSave = controller.saveModelSettings(input);
+        assertTrue(clearSave.getBooleanValue("success"), clearSave.toString());
+        assertNull(clearSave.getJSONObject("data").getJSONObject("agents").getJSONObject("qualityCheck").getString("model"));
+        refs.put("qualityCheck", "missing");
+        assertFalse(controller.saveModelSettings(input).getBooleanValue("success"));
+    }
+
 
     private final BusinessConfigService businessConfigService = mock(BusinessConfigService.class);
     private final BusinessConfigController controller = new BusinessConfigController();

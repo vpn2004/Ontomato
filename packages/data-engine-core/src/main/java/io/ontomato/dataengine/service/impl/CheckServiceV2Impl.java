@@ -215,7 +215,7 @@ public class CheckServiceV2Impl implements CheckServiceV2 {
 				originalQuestion,
 				BackendSessionEntrance.derive(sessionId, "program-describer-" + index),
 				userMessage,
-				ModelResolver.resolve(businessConfig, AgentRole.QUERY, langService),
+                ModelResolver.resolve(businessConfig, AgentRole.QUALITY_CHECK, langService),
 				domainId);
 		return parseDescription(program.getCode(), str);
 	}
@@ -260,7 +260,7 @@ public class CheckServiceV2Impl implements CheckServiceV2 {
 				originalQuestion,
 				BackendSessionEntrance.derive(check.getSessionId(), "question-checker"),
 				userMessage,
-				ModelResolver.resolve(businessConfig, AgentRole.QUERY, langService),
+                ModelResolver.resolve(businessConfig, AgentRole.QUALITY_CHECK, langService),
 				domainId);
 		applyAssessment(check, str);
 	}

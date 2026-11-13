@@ -143,9 +143,10 @@ public class BusinessConfigController {
 			if (!(rawAgents instanceof Map<?, ?> agentsMap)) {
 				throw new IllegalArgumentException("agents must be an object");
 			}
-			if (!agentsMap.keySet().equals(AgentRole.ALL)) {
+            if (!agentsMap.keySet().containsAll(AgentRole.ALL)
+                    || agentsMap.keySet().stream().anyMatch(role -> !AgentRole.ALL.contains(role) && !AgentRole.OPTIONAL.contains(role))) {
 				throw new IllegalArgumentException(
-						"agents must contain all five roles and no unknown roles: " + agentsMap.keySet());
+						"agents must contain the five required roles, optionally qualityCheck, and no unknown roles: " + agentsMap.keySet());
 			}
 
 			BusinessConfig stored = businessConfigService.get(user.getDomainId());
@@ -182,6 +183,21 @@ public class BusinessConfigController {
 				newAgents.put(role, agent);
 			}
 			candidate.setAgents(newAgents);
+
+            // Old clients omit optional bindings; preserve them rather than clearing a saved review model.
+            for (String role : AgentRole.OPTIONAL) {
+                if (!agentsMap.containsKey(role)) {
+                    if (stored.getAgents().containsKey(role)) newAgents.put(role, stored.getAgents().get(role));
+                    continue;
+                }
+                Object raw = agentsMap.get(role);
+                if (raw != null && !(raw instanceof String)) {
+                    throw new IllegalArgumentException("The model reference of role " + role + " must be a string or null");
+                }
+                AgentConfig agent = new AgentConfig();
+                agent.setModel(raw == null || ((String) raw).isBlank() ? null : ((String) raw).trim());
+                newAgents.put(role, agent);
+            }
 
 			ModelResolver.validateForSave(candidate);
 			businessConfigService.set(candidate, user.getDomainId());

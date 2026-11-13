@@ -265,6 +265,7 @@ export default {
       "agents": "智能体"
     },
     "modelRoleNames": {
+      "qualityCheck": "问数质检",
       "query": "查询",
       "coding": "编码与计算",
       "general": "通用",
@@ -272,6 +273,7 @@ export default {
       "knowledgeGovernance": "知识治理智能体"
     },
     "modelRoleDescriptions": {
+      "qualityCheck": "解释查询程序并评审业务语义；留空沿用查询模型，独立配置不影响查询规划与编码",
       "query": "理解问题、生成并校验查询，以及检索业务知识",
       "coding": "生成并运行计算代码，用于 Python 计算、后计算、函数、指标视图和数据获取程序",
       "general": "用于工作台中没有专用角色的模型调用，包括对话回复、业务智能体、报告与图表生成",
@@ -280,6 +282,7 @@ export default {
     },
     "deleteModelConfirm": "删除模型“{name}”？",
     "deleteModelInUseConfirm": "模型“{name}”正被以下角色使用：{roles}。删除后这些角色将变为未配置。确认删除？",
+    "qualityCheckInheritsQuery": "沿用查询模型",
     "roleNotConfigured": "未配置",
     "defaultWhenEmpty": "留空使用默认值",
     "modelListEmpty": "暂无模型，请添加首个配置。",
