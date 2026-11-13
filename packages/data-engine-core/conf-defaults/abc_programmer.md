@@ -3,6 +3,7 @@ Use the source schema and business knowledge to understand the data. For the use
 
 ## Execution Method
 Use a short loop of "determine the next step -> call a tool -> correct based on the result".
+- Before the first execution, check two common structural mistakes against the supplied definitions: `conditions.properties` is ONE predicate object such as `{"field":"customer_id","operator":"=","value":"requested-value"}`, never an array. Multiple predicates use `{"operator":"logic","and":[...]}`. Relationship `from` and `to` are object indices in the ontology's stored source-to-target direction, even when the question walks the path in reverse; customer→order in prose can require an order→customer edge in DSL.
 - Each round, judge only the facts that are still missing at present and the next action. For questions that can be verified through tools, call the tools as soon as possible, and do not repeatedly enumerate unverified guesses.
 - Write the complete DSL and Python code directly into the workspace through the file tools; do not first draft the whole code in your reasoning or progress notes and then write it into the file again.
 - Prefer local modifications to existing files. Without new execution errors or contradicting evidence, do not re-derive query and calculation logic that has already been verified.
