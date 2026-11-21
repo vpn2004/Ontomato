@@ -1,0 +1,1593 @@
+package io.ontomato.dataengine.dataAdapter.test;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+import java.sql.Connection;
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
+import java.sql.Statement;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
+
+import org.junit.jupiter.api.Test;
+
+import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONArray;
+import com.alibaba.fastjson2.JSONObject;
+
+import io.ontomato.dataengine.dataAdapter.DataAdapter;
+import io.ontomato.dataengine.dataAdapter.DslContractViolationException;
+
+/**
+ * The shared contract suite every data adapter test extends.
+ *
+ * <p>Each concrete test supplies a fresh adapter, the capabilities that adapter actually
+ * supports, and a unique namespace (table prefix / sandbox id) so the tables it creates
+ * never collide with leftovers. Every test method is gated on a capability: a read-only
+ * SQL adapter silently skips the write-path tests, a full object-graph adapter runs them all.</p>
+ *
+ * <p>The suite is environment-agnostic on purpose: {@link #newAdapter()} decides where the
+ * database comes from (a Testcontainers container, an external URL from an env var, or an
+ * embedded file), and the base class never asks.</p>
+ */
+public abstract class AbstractDataAdapterTest {
+
+	// ----------------------------------------------------------------------------------
+	// Abstract contract (each concrete adapter test implements)
+	// ----------------------------------------------------------------------------------
+
+	/** A fresh adapter wired to this test's database and the given jsonRule (may be null). */
+	protected abstract DataAdapter newAdapter(JSONObject jsonRule);
+
+	/** A fresh adapter with no jsonRule, for write-only tests. */
+	protected DataAdapter newAdapter() {
+		return newAdapter(null);
+	}
+
+	/** The operations this adapter implements; everything else is skipped. */
+	protected abstract Set<DataAdapterCapability> capabilities();
+
+	/** A unique namespace/table-prefix for this test run (never collides with leftovers). */
+	protected abstract String namespace();
+
+	/**
+	 * The class definition used by the write-path tests. It must carry one primary-key
+	 * attribute and at least one attribute of every supported scalar type so the
+	 * type/condition tests have real columns to exercise.
+	 */
+	protected abstract JSONObject classDef();
+
+	/** The objects inserted by the object-CRUD tests. */
+	protected abstract JSONArray testObjects();
+
+	/** The primary-key attribute name of {@link #classDef()}. */
+	protected String primaryKey() {
+		return "id";
+	}
+
+	/**
+	 * Whether the data source itself renders a {@code timeseries} condition. The DSL comes from M3, so M3
+	 * answers yes; a SQL renderer does not implement the construct and keeps the default. A yes-source has
+	 * nothing to reject in {@link #timeseriesConditionIsRejectedNotSilentlyDropped()}: the construct is
+	 * supported, its bucket precondition stays the grammar gate's call, and the grammar itself is covered by
+	 * the adapter's own test (bucket data is out of this suite's scope).
+	 */
+	protected boolean sourceRendersTimeseries() {
+		return false;
+	}
+
+	// ----------------------------------------------------------------------------------
+	// Graph fixtures (3 classes + 2 edges) for the read-path and edge tests.
+	// ----------------------------------------------------------------------------------
+
+	/** The plain class definitions of the three graph classes, in order: source, middle, target. */
+	protected abstract java.util.List<JSONObject> graphClassDefs();
+
+	/** The relationship rule map: relation name -> {fromclass, toclass}. A key-field adapter's entries
+	 *  also carry {fromField, toField}; a relationship-edge adapter's do not (its edges are
+	 *  relationships, not stored fields). */
+	protected abstract JSONObject relationshipRule();
+
+	/** Seed objects per plain class name, with the join fields already populated. */
+	protected abstract java.util.Map<String, JSONArray> graphSeed();
+
+	/** One seed edge: a relation between two graph-class indices and the two object ids it connects. */
+	public record SeedEdge(String relation, int sourceGraphIdx, String sourceId, int targetGraphIdx, String targetId) {
+	}
+
+	/**
+	 * The edges {@link #seedGraph()} materializes through {@code createEdge()} for relationship-edge
+	 * adapters. Key-field adapters leave it empty: their seed objects already carry the key field.
+	 */
+	protected List<SeedEdge> seedEdges() {
+		return List.of();
+	}
+
+	/**
+	 * The date attribute every graph fixture's class 0 carries. It is added centrally (class def +
+	 * seed) so every adapter's read path is exercised against a real time column without each
+	 * concrete test having to restate it.
+	 */
+	protected static final String GRAPH_DATE_FIELD = "signup_date";
+	/** The timestamp attribute every graph fixture's class 0 carries. */
+	protected static final String GRAPH_TIMESTAMP_FIELD = "signup_at";
+
+	/** The date value of graph class 0's seed row {@code i}. */
+	protected static String graphDate(int i) {
+		return new String[] {"1990-01-01", "1991-02-02", "1992-03-03", "1993-04-04"}[i % 4];
+	}
+
+	/** The timestamp value of graph class 0's seed row {@code i}. */
+	protected static String graphTimestamp(int i) {
+		return new String[] {"2020-01-01 10:00:00", "2020-02-02 11:00:00", "2020-03-03 12:00:00",
+				"2020-04-04 13:00:00"}[i % 4];
+	}
+
+	/** {@link #graphClassDefs()} with the two shared time attributes on class 0 (added once). */
+	protected List<JSONObject> graphClassDefsWithTime() {
+		List<JSONObject> classDefs = graphClassDefs();
+		JSONArray attrs = classDefs.get(0).getJSONArray("attrs");
+		if (!hasAttr(attrs, GRAPH_DATE_FIELD)) {
+			attrs.add(timeAttr(GRAPH_DATE_FIELD, "date"));
+			attrs.add(timeAttr(GRAPH_TIMESTAMP_FIELD, "timestamp"));
+		}
+		return classDefs;
+	}
+
+	private static boolean hasAttr(JSONArray attrs, String name) {
+		for (int i = 0; i < attrs.size(); i++) {
+			if (name.equals(attrs.getJSONObject(i).getString("name"))) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static JSONObject timeAttr(String name, String type) {
+		JSONObject attr = new JSONObject();
+		attr.put("name", name);
+		attr.put("type", type);
+		attr.put("enable", true);
+		return attr;
+	}
+
+	/** The plain class name at index {@code i} of {@link #graphClassDefs()}. */
+	protected String graphClass(int i) {
+		return graphClassDefs().get(i).getString("className");
+	}
+
+	/** The first relation name in {@link #relationshipRule()}. */
+	protected String firstRelation() {
+		return relationshipRule().keySet().iterator().next();
+	}
+
+	/** The second relation name in {@link #relationshipRule()}. */
+	protected String secondRelation() {
+		java.util.Iterator<String> it = relationshipRule().keySet().iterator();
+		it.next();
+		return it.next();
+	}
+
+	/** A jsonRule with plain class names (what createEdge/deleteEdge look up by). */
+	protected JSONObject graphRule() {
+		JSONObject rule = new JSONObject();
+		rule.put("classDef", new JSONArray(graphClassDefsWithTime()));
+		rule.put("relationship_rule", relationshipRule());
+		return rule;
+	}
+
+	/** A jsonRule whose classDef class names carry the namespace prefix (what the read path resolves). */
+	protected JSONObject prefixedGraphRule() {
+		JSONArray classDefs = new JSONArray();
+		for (JSONObject classDef : graphClassDefsWithTime()) {
+			JSONObject copy = new JSONObject();
+			for (String key : classDef.keySet()) {
+				if ("className".equals(key)) {
+					copy.put(key, namespace() + classDef.getString(key));
+				} else {
+					copy.put(key, classDef.get(key));
+				}
+			}
+			classDefs.add(copy);
+		}
+		JSONObject rule = new JSONObject();
+		rule.put("classDef", classDefs);
+		rule.put("relationship_rule", relationshipRule());
+		return rule;
+	}
+
+	/** Seed every graph class (namespace-prefixed tables), returning the adapter used. */
+	protected DataAdapter seedGraph() throws Exception {
+		DataAdapter adapter = newAdapter(graphRule());
+		String ns = namespace();
+		String timeClass = graphClass(0);
+		for (JSONObject classDef : graphClassDefsWithTime()) {
+			String className = classDef.getString("className");
+			adapter.createClass(ns, classDef);
+			JSONArray objs = graphSeed().get(className);
+			if (objs != null && !objs.isEmpty()) {
+				if (className.equals(timeClass)) {
+					// The shared time columns are filled centrally so every adapter's fixture has them.
+					for (int i = 0; i < objs.size(); i++) {
+						JSONObject row = objs.getJSONObject(i);
+						row.put(GRAPH_DATE_FIELD, graphDate(i));
+						row.put(GRAPH_TIMESTAMP_FIELD, graphTimestamp(i));
+					}
+				}
+				adapter.insertObjects(ns, classDef, objs);
+			}
+		}
+		// A relationship-edge adapter has no key field in its seed to imply edges; materialize them.
+		for (SeedEdge edge : seedEdges()) {
+			adapter.createEdge(ns, edge.relation(), graphClass(edge.sourceGraphIdx()), edge.sourceId(),
+					graphClass(edge.targetGraphIdx()), edge.targetId());
+		}
+		return adapter;
+	}
+
+	/** Drop every graph class table. */
+	protected void dropGraph() {
+		newAdapter(graphRule()).dropNamespace(namespace());
+	}
+
+	protected void assume(DataAdapterCapability capability) {
+		assumeTrue(capabilities().contains(capability),
+				() -> "adapter does not support " + capability);
+	}
+
+	// ----------------------------------------------------------------------------------
+	// JDBC read-back helpers (work for every JDBC adapter; M3 overrides where needed)
+	// ----------------------------------------------------------------------------------
+
+	/** The physical table name the adapter creates for a class under this namespace. */
+	protected String fullTable(String className) {
+		return namespace() + className;
+	}
+
+	/** Read every row of a class back through a raw JDBC connection. */
+	protected List<JSONObject> selectAll(String className) throws Exception {
+		List<JSONObject> rows = new ArrayList<>();
+		try (Connection c = newAdapter().openConnection();
+				Statement st = c.createStatement();
+				ResultSet rs = st.executeQuery("select * from " + fullTable(className))) {
+			ResultSetMetaData md = rs.getMetaData();
+			int n = md.getColumnCount();
+			while (rs.next()) {
+				JSONObject row = new JSONObject();
+				for (int i = 1; i <= n; i++) {
+					row.put(md.getColumnName(i), rs.getObject(i));
+				}
+				rows.add(row);
+			}
+		}
+		return rows;
+	}
+
+	/** Count the rows of a class. */
+	protected long countRows(String className) throws Exception {
+		try (Connection c = newAdapter().openConnection();
+				Statement st = c.createStatement();
+				ResultSet rs = st.executeQuery("select count(*) from " + fullTable(className))) {
+			rs.next();
+			return rs.getLong(1);
+		}
+	}
+
+	/** Normalize a JDBC value to a comparable string (dates/timestamps to their literal form). */
+	protected static String str(Object value) {
+		if (value == null) {
+			return null;
+		}
+		if (value instanceof LocalDateTime ldt) {
+			return ldt.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+		}
+		if (value instanceof LocalDate ld) {
+			return ld.format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
+		}
+		if (value instanceof java.sql.Timestamp ts) {
+			return ts.toLocalDateTime().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+		}
+		if (value instanceof java.sql.Date sd) {
+			return sd.toLocalDate().format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
+		}
+		return value.toString();
+	}
+
+	/** Count rows whose field equals the given value (string-normalized comparison). */
+	protected long countMatching(String className, String field, Object value) throws Exception {
+		return selectAll(className).stream()
+				.filter(row -> java.util.Objects.equals(str(row.get(field)), str(value)))
+				.count();
+	}
+
+	// ----------------------------------------------------------------------------------
+	// Connection
+	// ----------------------------------------------------------------------------------
+
+	@Test
+	void connectionProbeReportsDatabase() throws Exception {
+		assume(DataAdapterCapability.JDBC_CONNECTION);
+		newAdapter().testConnection();
+	}
+
+	// ----------------------------------------------------------------------------------
+	// Namespace lifecycle
+	// ----------------------------------------------------------------------------------
+
+	@Test
+	void namespaceLifecycle() throws Exception {
+		assume(DataAdapterCapability.NAMESPACE_LIFECYCLE);
+		DataAdapter adapter = newAdapter();
+		String ns = namespace();
+		adapter.createNamespace(ns);
+		adapter.createClass(ns, classDef());
+		adapter.insertObjects(ns, classDef(), testObjects());
+		assertEquals(testObjects().size(), countRows(classNameOf(classDef())));
+		adapter.truncateNamespace(ns);
+		assertEquals(0, countRows(classNameOf(classDef())));
+		adapter.dropNamespace(ns);
+	}
+
+	private String classNameOf(JSONObject classDef) {
+		return (String) classDef.get("className");
+	}
+
+	// ----------------------------------------------------------------------------------
+	// INSERT — value types, nulls, quoting, batches, primary-key validation
+	// ----------------------------------------------------------------------------------
+
+	@Test
+	void insertAllScalarTypesRoundTrip() throws Exception {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		DataAdapter adapter = newAdapter();
+		String ns = namespace();
+		adapter.createClass(ns, classDef());
+		JSONArray objs = allTypeObjects();
+		adapter.insertObjects(ns, classDef(), objs);
+		assertEquals(objs.size(), countRows(classNameOf(classDef())));
+		List<JSONObject> rows = selectAll(classNameOf(classDef()));
+		for (int i = 0; i < objs.size(); i++) {
+			JSONObject obj = objs.getJSONObject(i);
+			JSONObject actual = rows.stream()
+					.filter(r -> str(obj.get(primaryKey())).equals(str(r.get(primaryKey()))))
+					.findFirst()
+					.orElseThrow(() -> new AssertionError("no row for pk " + obj.get(primaryKey())));
+			assertRoundTrip(obj, actual);
+		}
+		adapter.dropNamespace(ns);
+	}
+
+	@Test
+	void insertNullFieldsStayNull() throws Exception {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		DataAdapter adapter = newAdapter();
+		String ns = namespace();
+		adapter.createClass(ns, classDef());
+		adapter.insertObjects(ns, classDef(), nullFieldsObject());
+		JSONObject row = selectAll(classNameOf(classDef())).get(0);
+		assertEquals(null, row.get(nullFieldName()));
+		adapter.dropNamespace(ns);
+	}
+
+	@Test
+	void insertEscapesSingleQuotes() throws Exception {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		DataAdapter adapter = newAdapter();
+		String ns = namespace();
+		adapter.createClass(ns, classDef());
+		adapter.insertObjects(ns, classDef(), quoteObject());
+		assertEquals(1, countMatching(classNameOf(classDef()), quotedFieldName(), quotedValue()));
+		adapter.dropNamespace(ns);
+	}
+
+	@Test
+	void insertWithoutPrimaryKeyThrows() {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		DataAdapter adapter = newAdapter();
+		String ns = namespace();
+		adapter.createClass(ns, classDef());
+		JSONObject missingPk = new JSONObject();
+		missingPk.put("name", "NoKey");
+		JSONArray objs = new JSONArray();
+		objs.add(missingPk);
+		assertThrows(Exception.class, () -> adapter.insertObjects(ns, classDef(), objs));
+		adapter.dropNamespace(ns);
+	}
+
+	// ----------------------------------------------------------------------------------
+	// UPDATE — every where operator
+	// ----------------------------------------------------------------------------------
+
+	@Test
+	void updateWhereEquals() throws Exception {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		assertUpdateAffects(cond("name", "=", "Alice"), 1);
+	}
+
+	@Test
+	void updateWhereNotEquals() throws Exception {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		assertUpdateAffects(cond("name", "!=", "Alice"), testObjects().size() - 1);
+	}
+
+	@Test
+	void updateWhereGreaterThan() throws Exception {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		assertUpdateAffects(cond("age", ">", 30), countOf("age", ">", 30));
+	}
+
+	@Test
+	void updateWhereGreaterOrEqual() throws Exception {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		assertUpdateAffects(cond("age", ">=", 30), countOf("age", ">=", 30));
+	}
+
+	@Test
+	void updateWhereLessThan() throws Exception {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		assertUpdateAffects(cond("age", "<", 30), countOf("age", "<", 30));
+	}
+
+	@Test
+	void updateWhereLessOrEqual() throws Exception {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		assertUpdateAffects(cond("age", "<=", 30), countOf("age", "<=", 30));
+	}
+
+	@Test
+	void updateWhereBetween() throws Exception {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		JSONObject where = new JSONObject();
+		where.put("operator", "between");
+		where.put("field", "age");
+		where.put("value", JSONArray.of(25, 40));
+		assertUpdateAffects(where, countOf("age", "between", 25, 40));
+	}
+
+	@Test
+	void updateWhereIn() throws Exception {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		JSONObject where = new JSONObject();
+		where.put("operator", "in");
+		where.put("field", "name");
+		where.put("value", JSONArray.of("Alice", "Bob"));
+		assertUpdateAffects(where, 2);
+	}
+
+	@Test
+	void updateWhereLike() throws Exception {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		assertUpdateAffects(cond("name", "like", "A%"), 1);
+	}
+
+	@Test
+	void updateWhereIsNull() throws Exception {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		JSONObject where = new JSONObject();
+		where.put("operator", "is");
+		where.put("field", nullFieldName());
+		assertUpdateAffects(where, countOfNull(nullFieldName()));
+	}
+
+	@Test
+	void updateWhereIsNotNull() throws Exception {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		JSONObject where = new JSONObject();
+		where.put("operator", "is not");
+		where.put("field", nullFieldName());
+		assertUpdateAffects(where, testObjects().size() - countOfNull(nullFieldName()));
+	}
+
+	// ----------------------------------------------------------------------------------
+	// UPDATE — and/or nesting
+	// ----------------------------------------------------------------------------------
+
+	@Test
+	void updateWhereAndNesting() throws Exception {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		JSONObject where = new JSONObject();
+		where.put("and", JSONArray.of(cond("age", ">", 20), cond("age", "<", 40)));
+		assertUpdateAffects(where, countOf("age", ">", 20) - countOf("age", ">=", 40));
+	}
+
+	@Test
+	void updateWhereOrNesting() throws Exception {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		JSONObject where = new JSONObject();
+		where.put("or", JSONArray.of(cond("name", "=", "Alice"), cond("name", "=", "Bob")));
+		assertUpdateAffects(where, 2);
+	}
+
+	@Test
+	void updateWhereMixedNesting() throws Exception {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		// (age > 30 OR name = 'Bob') AND height >= 1.5
+		JSONObject orBranch = new JSONObject();
+		orBranch.put("or", JSONArray.of(cond("age", ">", 30), cond("name", "=", "Bob")));
+		JSONObject where = new JSONObject();
+		where.put("and", JSONArray.of(orBranch, cond("height", ">=", 1.5)));
+		int expected = (int) (countOf("age", ">", 30) + 1); // age>30 rows plus Bob (Bob age 30 not >30)
+		assertUpdateAffects(where, expected);
+	}
+
+	// ----------------------------------------------------------------------------------
+	// UPDATE — set value types, primary-key guard, unknown field guard
+	// ----------------------------------------------------------------------------------
+
+	@Test
+	void updateSetsEveryScalarType() throws Exception {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		DataAdapter adapter = newAdapter();
+		String ns = namespace();
+		adapter.createClass(ns, classDef());
+		adapter.insertObjects(ns, classDef(), testObjects());
+
+		JSONObject set = updatedValues();
+		adapter.updateObjects(ns, classDef(), set, cond(primaryKey(), "=", firstPk()));
+
+		JSONObject row = rowByPk(firstPk());
+		for (String key : set.keySet()) {
+			assertEquals(str(set.get(key)), str(row.get(key)), "field " + key);
+		}
+		adapter.dropNamespace(ns);
+	}
+
+	@Test
+	void updatePrimaryKeyIsRejected() throws Exception {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		DataAdapter adapter = newAdapter();
+		String ns = namespace();
+		adapter.createClass(ns, classDef());
+		adapter.insertObjects(ns, classDef(), testObjects());
+		JSONObject set = new JSONObject();
+		set.put(primaryKey(), "changed");
+		assertThrows(Exception.class,
+				() -> adapter.updateObjects(ns, classDef(), set, cond(primaryKey(), "=", firstPk())));
+		adapter.dropNamespace(ns);
+	}
+
+	@Test
+	void updateUnknownFieldIsRejected() throws Exception {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		DataAdapter adapter = newAdapter();
+		String ns = namespace();
+		adapter.createClass(ns, classDef());
+		adapter.insertObjects(ns, classDef(), testObjects());
+		JSONObject set = new JSONObject();
+		set.put("no_such_field", "x");
+		assertThrows(Exception.class,
+				() -> adapter.updateObjects(ns, classDef(), set, cond(primaryKey(), "=", firstPk())));
+		adapter.dropNamespace(ns);
+	}
+
+	// ----------------------------------------------------------------------------------
+	// DELETE — every where operator, nesting, delete-all
+	// ----------------------------------------------------------------------------------
+
+	@Test
+	void deleteWhereEquals() throws Exception {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		assertDeleteAffects(cond("name", "=", "Alice"), 1);
+	}
+
+	@Test
+	void deleteWhereGreaterThan() throws Exception {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		assertDeleteAffects(cond("age", ">", 30), countOf("age", ">", 30));
+	}
+
+	@Test
+	void deleteWhereBetween() throws Exception {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		JSONObject where = new JSONObject();
+		where.put("operator", "between");
+		where.put("field", "age");
+		where.put("value", JSONArray.of(25, 40));
+		assertDeleteAffects(where, countOf("age", "between", 25, 40));
+	}
+
+	@Test
+	void deleteWhereIn() throws Exception {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		JSONObject where = new JSONObject();
+		where.put("operator", "in");
+		where.put("field", "name");
+		where.put("value", JSONArray.of("Alice", "Bob"));
+		assertDeleteAffects(where, 2);
+	}
+
+	@Test
+	void deleteWhereLike() throws Exception {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		assertDeleteAffects(cond("name", "like", "A%"), 1);
+	}
+
+	@Test
+	void deleteWhereAndNesting() throws Exception {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		JSONObject where = new JSONObject();
+		where.put("and", JSONArray.of(cond("age", ">", 20), cond("age", "<", 40)));
+		assertDeleteAffects(where, countOf("age", ">", 20) - countOf("age", ">=", 40));
+	}
+
+	@Test
+	void deleteWhereOrNesting() throws Exception {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		JSONObject where = new JSONObject();
+		where.put("or", JSONArray.of(cond("name", "=", "Alice"), cond("name", "=", "Bob")));
+		assertDeleteAffects(where, 2);
+	}
+
+	@Test
+	void deleteWithoutWhereRemovesAll() throws Exception {
+		assume(DataAdapterCapability.OBJECT_CRUD);
+		DataAdapter adapter = newAdapter();
+		String ns = namespace();
+		adapter.createClass(ns, classDef());
+		adapter.insertObjects(ns, classDef(), testObjects());
+		adapter.deleteObjects(ns, classDef(), null);
+		assertEquals(0, countRows(classNameOf(classDef())));
+		adapter.dropNamespace(ns);
+	}
+
+	// ----------------------------------------------------------------------------------
+	// READ — DSL conditions, join, group by, order by, limit
+	// ----------------------------------------------------------------------------------
+
+	@Test
+	void readSimpleSelect() throws Exception {
+		assume(DataAdapterCapability.READ_QUERY);
+		seedGraph();
+		JSONArray rows = queryPersons(null);
+		assertEquals(totalPersonCount(), rows.size());
+		dropGraph();
+	}
+
+	@Test
+	void readWhereEqualsString() throws Exception {
+		assume(DataAdapterCapability.READ_QUERY);
+		seedGraph();
+		JSONArray rows = queryPersons(readCond("name", "=", "Alice"));
+		assertEquals(1, rows.size());
+		assertEquals("Alice", rows.getJSONObject(0).getString("person_name"));
+		dropGraph();
+	}
+
+	@Test
+	void readWhereNumericComparison() throws Exception {
+		assume(DataAdapterCapability.READ_QUERY);
+		seedGraph();
+		assertEquals(2, queryPersons(readCond("age", ">", 30)).size());
+		assertEquals(1, queryPersons(readCond("age", "<", 30)).size());
+		assertEquals(3, queryPersons(readCond("age", ">=", 30)).size());
+		assertEquals(2, queryPersons(readCond("age", "<=", 30)).size());
+		dropGraph();
+	}
+
+	@Test
+	void readWhereBetween() throws Exception {
+		assume(DataAdapterCapability.READ_QUERY);
+		seedGraph();
+		JSONArray rows = queryPersons(readCond("age", "between", JSONArray.of(25, 40)));
+		assertEquals(4, rows.size());
+		dropGraph();
+	}
+
+	@Test
+	void readWhereIn() throws Exception {
+		assume(DataAdapterCapability.READ_QUERY);
+		seedGraph();
+		JSONArray rows = queryPersons(readCond("name", "in", JSONArray.of("Alice", "Bob")));
+		assertEquals(2, rows.size());
+		dropGraph();
+	}
+
+	@Test
+	void readWhereLike() throws Exception {
+		assume(DataAdapterCapability.READ_QUERY);
+		seedGraph();
+		JSONArray rows = queryPersons(readCond("name", "like", "ob"));
+		assertEquals(1, rows.size());
+		assertEquals("Bob", rows.getJSONObject(0).getString("person_name"));
+		dropGraph();
+	}
+
+	@Test
+	void readWhereAndNesting() throws Exception {
+		assume(DataAdapterCapability.READ_QUERY);
+		seedGraph();
+		JSONObject and = readAnd(readCond("age", ">", 20), readCond("age", "<", 40));
+		JSONArray rows = queryPersons(and);
+		assertEquals(3, rows.size());
+		dropGraph();
+	}
+
+	@Test
+	void readWhereOrNesting() throws Exception {
+		assume(DataAdapterCapability.READ_QUERY);
+		seedGraph();
+		JSONObject or = readOr(readCond("name", "=", "Alice"), readCond("name", "=", "Bob"));
+		JSONArray rows = queryPersons(or);
+		assertEquals(2, rows.size());
+		dropGraph();
+	}
+
+	@Test
+	void readWhereNot() throws Exception {
+		assume(DataAdapterCapability.READ_QUERY);
+		seedGraph();
+		assertEquals(totalPersonCount() - 1, queryPersons(readNot(readCond("name", "=", "Alice"))).size());
+		// not (Alice or older than 30) leaves only Bob (30)
+		JSONArray rows = queryPersons(readNot(readOr(readCond("name", "=", "Alice"), readCond("age", ">", 30))));
+		assertEquals(1, rows.size());
+		assertEquals("Bob", rows.getJSONObject(0).getString("person_name"));
+		// a negation nested in an and
+		assertEquals(2, queryPersons(readAnd(readCond("age", ">=", 30), readNot(readCond("name", "=", "Dave")))).size());
+		dropGraph();
+	}
+
+	@Test
+	void readGroupByCountsOnlyTheRowsTheConditionKeeps() throws Exception {
+		assume(DataAdapterCapability.READ_QUERY);
+		seedGraph();
+		JSONArray objects = new JSONArray();
+		JSONObject p = readObject(0, "p", 0);
+		JSONObject conditions = new JSONObject();
+		conditions.put("properties", readNot(readCond("name", "=", "Alice")));
+		p.put("conditions", conditions);
+		objects.add(p);
+		JSONArray fields = new JSONArray();
+		fields.add(readAggField("p", "id", "count", "cnt"));
+		fields.add(readField("p", "org_id", "org_id"));
+		JSONObject groupBy = new JSONObject();
+		groupBy.put("fields", JSONArray.of(readGroupByField("p", "org_id")));
+		JSONArray rows = readQuery(singleStepDsl(objects, null, fields, groupBy, null, null));
+		java.util.Map<String, Integer> counts = new java.util.HashMap<>();
+		for (int i = 0; i < rows.size(); i++) {
+			counts.put(str(rows.getJSONObject(i).get("org_id")), ((Number) rows.getJSONObject(i).get("cnt")).intValue());
+		}
+		// Alice (o1) is filtered out before counting
+		assertEquals(java.util.Map.of("o1", 1, "o2", 2), counts);
+		dropGraph();
+	}
+
+	/** A name holding every pattern character of the SQL, Elasticsearch and SQL Server syntaxes. */
+	private static final String PATTERN_CHARACTERS_NAME = "50%_off\\_[x]*?!'";
+
+	@Test
+	void readLikeWithEscapeMatchesEscapedCharactersLiterally() throws Exception {
+		assume(DataAdapterCapability.READ_QUERY);
+		DataAdapter adapter = seedGraph();
+		JSONObject extra = new JSONObject();
+		extra.put(primaryKey(), "p9");
+		extra.put("name", PATTERN_CHARACTERS_NAME);
+		extra.put("age", 50);
+		extra.put("org_id", "o2");
+		adapter.insertObjects(namespace(), graphClassDefsWithTime().get(0), JSONArray.of(extra));
+
+		// Without escape the pattern's % and _ are wildcards, as before.
+		assertEquals(totalPersonCount() + 1, queryPersons(readCond("name", "like", "%")).size());
+		assertTrue(personNames(queryPersons(readCond("name", "like", "_ob"))).contains("Bob"));
+		// Escaped, each one is that character only.
+		assertEquals(Set.of(PATTERN_CHARACTERS_NAME), personNames(queryPersons(readLikeEscaped("\\%"))));
+		assertEquals(Set.of(), personNames(queryPersons(readLikeEscaped("\\_ob"))));
+		assertEquals(Set.of(), personNames(queryPersons(readLikeEscaped("A\\%"))));
+		assertEquals(Set.of(PATTERN_CHARACTERS_NAME), personNames(queryPersons(readLikeEscaped("f\\\\\\_[x]*?!'"))));
+		assertEquals(Set.of(), personNames(queryPersons(readLikeEscaped("[x]*?x"))));
+		// Unescaped wildcards around escaped text still match, anchored where written.
+		assertEquals(Set.of(PATTERN_CHARACTERS_NAME), personNames(queryPersons(readLikeEscaped("50\\%%"))));
+		assertEquals(Set.of("Alice"), personNames(queryPersons(readLikeEscaped("A_ice"))));
+		// Negated, exactly the other rows remain: a wrong match would show here as a wider result.
+		Set<String> others = new java.util.TreeSet<>();
+		for (Object person : graphSeed().get(graphClass(0))) others.add(((JSONObject) person).getString("name"));
+		assertEquals(others, personNames(queryPersons(readNot(readLikeEscaped("f\\\\\\_[x]*?!'")))));
+		assertEquals(others, personNames(queryPersons(readNot(readLikeEscaped("\\%")))));
+		Set<String> all = new java.util.TreeSet<>(others);
+		all.add(PATTERN_CHARACTERS_NAME);
+		assertEquals(all, personNames(queryPersons(readNot(readLikeEscaped("\\_ob")))));
+		dropGraph();
+	}
+
+	@Test
+	void likeEscapeOtherThanOneCharacterIsRejected() {
+		assume(DataAdapterCapability.READ_QUERY);
+		for (Object escape : new Object[] { "", "!!", 1 }) {
+			JSONObject condition = readCond("name", "like", "A%");
+			condition.put("escape", escape);
+			assertThrows(DslContractViolationException.class, () -> queryPersons(condition), String.valueOf(escape));
+		}
+	}
+
+	private static Set<String> personNames(JSONArray rows) {
+		Set<String> names = new java.util.TreeSet<>();
+		for (int i = 0; i < rows.size(); i++) {
+			names.add(rows.getJSONObject(i).getString("person_name"));
+		}
+		return names;
+	}
+
+	protected JSONObject readLikeEscaped(String pattern) {
+		JSONObject condition = readCond("name", "like", pattern);
+		condition.put("escape", "\\");
+		return condition;
+	}
+
+	@Test
+	void notWithSeveralConditionsIsRejectedNotGuessed() {
+		assume(DataAdapterCapability.READ_QUERY);
+		JSONObject not = new JSONObject();
+		not.put("not", JSONArray.of(readCond("name", "=", "Alice"), readCond("name", "=", "Bob")));
+
+		DslContractViolationException e = assertThrows(DslContractViolationException.class, () -> queryPersons(not));
+		assertTrue(e.getViolations().stream().anyMatch(
+				v -> v.getCode() == DslContractViolationException.Code.INVALID_GRAMMAR), e.getMessage());
+	}
+
+	@Test
+	void readJoinTwoClasses() throws Exception {
+		assume(DataAdapterCapability.READ_QUERY);
+		seedGraph();
+		JSONArray objects = new JSONArray();
+		objects.add(readObject(0, "p", 0));
+		objects.add(readObject(1, "o", 1));
+		JSONArray rels = new JSONArray();
+		rels.add(readRelation(0, 1, firstRelation()));
+		JSONArray fields = new JSONArray();
+		fields.add(readField("p", "name", "person_name"));
+		fields.add(readField("o", "title", "org_title"));
+		JSONArray rows = readQuery(singleStepDsl(objects, rels, fields, null, null, null));
+		assertEquals(totalPersonCount(), rows.size());
+		dropGraph();
+	}
+
+	@Test
+	void readJoinThreeClasses() throws Exception {
+		assume(DataAdapterCapability.READ_QUERY);
+		seedGraph();
+		JSONArray objects = new JSONArray();
+		objects.add(readObject(0, "p", 0));
+		objects.add(readObject(1, "o", 1));
+		objects.add(readObject(2, "pr", 2));
+		JSONArray rels = new JSONArray();
+		rels.add(readRelation(0, 1, firstRelation()));
+		rels.add(readRelation(1, 2, secondRelation()));
+		JSONArray fields = new JSONArray();
+		fields.add(readField("p", "name", "person_name"));
+		fields.add(readField("o", "title", "org_title"));
+		fields.add(readField("pr", "name", "project_name"));
+		JSONArray rows = readQuery(singleStepDsl(objects, rels, fields, null, null, null));
+		assertEquals(totalPersonCount(), rows.size());
+		dropGraph();
+	}
+
+	@Test
+	void readGroupBy() throws Exception {
+		assume(DataAdapterCapability.READ_QUERY);
+		seedGraph();
+		JSONArray objects = new JSONArray();
+		objects.add(readObject(0, "p", 0));
+		JSONArray fields = new JSONArray();
+		fields.add(readAggField("p", "id", "count", "cnt"));
+		fields.add(readField("p", "org_id", "org_id"));
+		JSONObject groupBy = new JSONObject();
+		groupBy.put("fields", JSONArray.of(readGroupByField("p", "org_id")));
+		JSONArray rows = readQuery(singleStepDsl(objects, null, fields, groupBy, null, null));
+		assertEquals(2, rows.size());
+		dropGraph();
+	}
+
+	@Test
+	void readDistinct() throws Exception {
+		assume(DataAdapterCapability.READ_QUERY);
+		seedGraph();
+		JSONArray objects = new JSONArray();
+		objects.add(readObject(0, "p", 0));
+		JSONArray fields = new JSONArray();
+		fields.add(readDistinctField("p", "org_id", "org_id"));
+		JSONArray rows = readQuery(singleStepDsl(objects, null, fields, null, null, null));
+		assertEquals(2, rows.size());
+		dropGraph();
+	}
+
+	@Test
+	void readHaving() throws Exception {
+		assume(DataAdapterCapability.READ_QUERY);
+		seedGraph();
+		JSONArray objects = new JSONArray();
+		objects.add(readObject(0, "p", 0));
+		JSONArray fields = new JSONArray();
+		fields.add(readAggField("p", "id", "count", "cnt"));
+		fields.add(readField("p", "org_id", "org_id"));
+		JSONObject groupBy = new JSONObject();
+		groupBy.put("fields", JSONArray.of(readGroupByField("p", "org_id")));
+		groupBy.put("having", JSONArray.of(readHavingCond("p", "id", "count", ">", 1)));
+		JSONArray rows = readQuery(singleStepDsl(objects, null, fields, groupBy, null, null));
+		assertEquals(2, rows.size());
+		// a stronger filter returns no group (both orgs hold exactly two members)
+		groupBy.put("having", JSONArray.of(readHavingCond("p", "id", "count", ">", 2)));
+		JSONArray filtered = readQuery(singleStepDsl(objects, null, fields, groupBy, null, null));
+		assertEquals(0, filtered.size());
+		dropGraph();
+	}
+
+	@Test
+	void readOrderBy() throws Exception {
+		assume(DataAdapterCapability.READ_QUERY);
+		seedGraph();
+		JSONArray objects = new JSONArray();
+		objects.add(readObject(0, "p", 0));
+		JSONArray fields = new JSONArray();
+		fields.add(readField("p", "age", "age"));
+		JSONObject sort = new JSONObject();
+		sort.put("fields", JSONArray.of(readSortField("age", "desc")));
+		JSONArray rows = readQuery(singleStepDsl(objects, null, fields, null, sort, null));
+		assertEquals(totalPersonCount(), rows.size());
+		assertEquals(40, ((Number) rows.getJSONObject(0).get("age")).intValue());
+		assertEquals(25, ((Number) rows.getJSONObject(rows.size() - 1).get("age")).intValue());
+		dropGraph();
+	}
+
+	@Test
+	void readLimit() throws Exception {
+		assume(DataAdapterCapability.READ_QUERY);
+		seedGraph();
+		JSONArray objects = new JSONArray();
+		objects.add(readObject(0, "p", 0));
+		JSONArray fields = new JSONArray();
+		fields.add(readField("p", "name", "person_name"));
+		JSONObject limit = new JSONObject();
+		limit.put("count", 2);
+		limit.put("offset", 0);
+		JSONArray rows = readQuery(singleStepDsl(objects, null, fields, null, null, limit));
+		assertEquals(2, rows.size());
+		dropGraph();
+	}
+
+	@Test
+	void omittedLimitIsCappedAndReportedAsTruncated() throws Exception {
+		assume(DataAdapterCapability.READ_QUERY);
+		seedGraph();
+		// An omitted output.limit means "apply the engine default", never an unbounded read. Shrink
+		// the default below the fixture size so the cap is actually hit, then assert the result is
+		// both capped and marked, instead of silently returning a partial relation.
+		int cap = totalPersonCount() - 1;
+		withDefaultRowLimit(cap, () -> {
+			JSONArray objects = new JSONArray();
+			objects.add(readObject(0, "p", 0));
+			JSONArray fields = new JSONArray();
+			fields.add(readField("p", "name", "person_name"));
+			JSONObject answer = readAnswer(singleStepDsl(objects, null, fields, null, null, null));
+			assertEquals(Boolean.TRUE, answer.getBoolean("truncated"));
+			assertEquals(cap, answer.getInteger("rowLimit").intValue());
+			assertEquals(cap, answer.getJSONArray("answer").size());
+		});
+		dropGraph();
+	}
+
+	@Test
+	void omittedLimitUnderTheCapIsNotReportedAsTruncated() throws Exception {
+		assume(DataAdapterCapability.READ_QUERY);
+		seedGraph();
+		JSONArray objects = new JSONArray();
+		objects.add(readObject(0, "p", 0));
+		JSONArray fields = new JSONArray();
+		fields.add(readField("p", "name", "person_name"));
+		JSONObject answer = readAnswer(singleStepDsl(objects, null, fields, null, null, null));
+		assertNull(answer.getBoolean("truncated"));
+		assertEquals(totalPersonCount(), answer.getJSONArray("answer").size());
+		dropGraph();
+	}
+
+	/** Run {@code body} with the engine's default row cap temporarily set to {@code cap}. */
+	protected void withDefaultRowLimit(int cap, ThrowingRunnable body) throws Exception {
+		String previous = System.getProperty("ontomato.dsl.defaultRowLimit");
+		System.setProperty("ontomato.dsl.defaultRowLimit", String.valueOf(cap));
+		try {
+			body.run();
+		} finally {
+			if (previous == null) {
+				System.clearProperty("ontomato.dsl.defaultRowLimit");
+			} else {
+				System.setProperty("ontomato.dsl.defaultRowLimit", previous);
+			}
+		}
+	}
+
+	/** A body that may throw, for {@link #withDefaultRowLimit(int, ThrowingRunnable)}. */
+	protected interface ThrowingRunnable {
+		void run() throws Exception;
+	}
+
+	// ----------------------------------------------------------------------------------
+	// EDGE — createEdge / deleteEdge
+	// ----------------------------------------------------------------------------------
+
+	@Test
+	void createEdgeConnectsTheObjects() throws Exception {
+		assume(DataAdapterCapability.EDGE_CRUD);
+		DataAdapter adapter = seedGraph();
+		adapter.createEdge(namespace(), firstRelation(), graphClass(0), "p1", graphClass(1), "o2");
+		assertEdge(true, "p1", "o2");
+		dropGraph();
+	}
+
+	@Test
+	void deleteEdgeDisconnectsTheObjects() throws Exception {
+		assume(DataAdapterCapability.EDGE_CRUD);
+		DataAdapter adapter = seedGraph();
+		adapter.createEdge(namespace(), firstRelation(), graphClass(0), "p1", graphClass(1), "o2");
+		adapter.deleteEdge(namespace(), firstRelation(), graphClass(0), "p1", graphClass(1), "o2");
+		assertEdge(false, "p1", "o2");
+		dropGraph();
+	}
+
+	/**
+	 * Assert the first relation between the source class's {@code sourceId} object and the target class's
+	 * {@code targetId} object after a createEdge/deleteEdge. A relationship-edge adapter reads the connection
+	 * back through the read path; a key-field adapter reads the foreign-key field its source class stores.
+	 */
+	private void assertEdge(boolean connected, String sourceId, String targetId) throws Exception {
+		if (capabilities().contains(DataAdapterCapability.RELATIONSHIP_EDGES)) {
+			assertEquals(connected, edgeExists(sourceId, targetId, firstRelation()));
+		} else {
+			assertEquals(connected ? targetId : null, str(graphRow(graphClass(0), sourceId).get(joinField(0))));
+		}
+	}
+
+	@Test
+	void createEdgeUnknownRelationThrows() throws Exception {
+		assume(DataAdapterCapability.EDGE_CRUD);
+		DataAdapter adapter = seedGraph();
+		assertThrows(Exception.class, () -> adapter.createEdge(namespace(), "no_such_rel", graphClass(0), "p1", graphClass(1), "o1"));
+		dropGraph();
+	}
+
+	// ----------------------------------------------------------------------------------
+	// Read-path DSL builders
+	// ----------------------------------------------------------------------------------
+
+	protected JSONArray readQuery(String dslJson) throws Exception {
+		return readAnswer(dslJson).getJSONArray("answer");
+	}
+
+	/** The full answer object of one DSL execution, including any truncation marker the adapter set. */
+	protected JSONObject readAnswer(String dslJson) throws Exception {
+		DataAdapter adapter = newAdapter(prefixedGraphRule());
+		java.util.List<String> mqls = new java.util.ArrayList<>();
+		String result = adapter.executeDsl(dslJson, "test-session", null, mqls);
+		return JSON.parseArray(result).getJSONObject(0);
+	}
+
+	/** Whether the read path joins the source-class {@code sourceId} object to the target-class {@code targetId}. */
+	protected boolean edgeExists(String sourceId, String targetId, String relation) throws Exception {
+		JSONArray objects = new JSONArray();
+		JSONObject source = readObject(0, "s", 0);
+		JSONObject sourceConditions = new JSONObject();
+		sourceConditions.put("properties", readCond(primaryKey(), "=", sourceId));
+		source.put("conditions", sourceConditions);
+		objects.add(source);
+		JSONObject target = readObject(1, "t", 1);
+		JSONObject targetConditions = new JSONObject();
+		targetConditions.put("properties", readCond(primaryKey(), "=", targetId));
+		target.put("conditions", targetConditions);
+		objects.add(target);
+		JSONArray relationships = new JSONArray();
+		relationships.add(readRelation(0, 1, relation));
+		JSONArray fields = new JSONArray();
+		fields.add(readField("s", primaryKey(), "source_id"));
+		return !readQuery(singleStepDsl(objects, relationships, fields, null, null, null)).isEmpty();
+	}
+
+	protected JSONArray queryPersons(JSONObject condition) throws Exception {
+		JSONArray objects = new JSONArray();
+		JSONObject p = readObject(0, "p", 0);
+		if (condition != null) {
+			JSONObject conditions = new JSONObject();
+			conditions.put("properties", condition);
+			p.put("conditions", conditions);
+		}
+		objects.add(p);
+		JSONArray fields = new JSONArray();
+		fields.add(readField("p", "name", "person_name"));
+		return readQuery(singleStepDsl(objects, null, fields, null, null, null));
+	}
+
+	/** A person object carrying a raw {@code conditions} object (for a non-properties block). */
+	protected JSONArray queryPersonWithConditions(JSONObject conditions) throws Exception {
+		JSONArray objects = new JSONArray();
+		JSONObject p = readObject(0, "p", 0);
+		p.put("conditions", conditions);
+		objects.add(p);
+		JSONArray fields = new JSONArray();
+		fields.add(readField("p", "name", "person_name"));
+		return readQuery(singleStepDsl(objects, null, fields, null, null, null));
+	}
+
+	// ----------------------------------------------------------------------------------
+	// READ — time conditions and returned time values (date / timestamp)
+	//
+	// A time condition is passed through verbatim and compared against the column natively, and a
+	// returned time value is the source's own text. Both are independent of the process time zone,
+	// and a value read back is usable as a condition unchanged (the loop is closed).
+	// ----------------------------------------------------------------------------------
+
+	@Test
+	void readWhereDateEqualsAndSingleDayBetween() throws Exception {
+		assume(DataAdapterCapability.READ_QUERY);
+		seedGraph();
+		assertEquals(1, queryPersons(readCond(GRAPH_DATE_FIELD, "=", graphDate(2))).size());
+		assertEquals(1, queryPersons(readCond(GRAPH_DATE_FIELD, "between",
+				JSONArray.of(graphDate(2), graphDate(2)))).size());
+		assertEquals(3, queryPersons(readCond(GRAPH_DATE_FIELD, "!=", graphDate(2))).size());
+		dropGraph();
+	}
+
+	@Test
+	void readWhereDateOrderAndIn() throws Exception {
+		assume(DataAdapterCapability.READ_QUERY);
+		seedGraph();
+		assertEquals(2, queryPersons(readCond(GRAPH_DATE_FIELD, ">", graphDate(1))).size());
+		assertEquals(3, queryPersons(readCond(GRAPH_DATE_FIELD, ">=", graphDate(1))).size());
+		assertEquals(2, queryPersons(readCond(GRAPH_DATE_FIELD, "<", graphDate(2))).size());
+		assertEquals(2, queryPersons(readCond(GRAPH_DATE_FIELD, "<=", graphDate(1))).size());
+		assertEquals(2, queryPersons(readCond(GRAPH_DATE_FIELD, "in",
+				JSONArray.of(graphDate(0), graphDate(3)))).size());
+		dropGraph();
+	}
+
+	@Test
+	void readWhereTimestampEqualsOrderAndBetween() throws Exception {
+		assume(DataAdapterCapability.READ_QUERY);
+		seedGraph();
+		assertEquals(1, queryPersons(readCond(GRAPH_TIMESTAMP_FIELD, "=", graphTimestamp(2))).size());
+		assertEquals(2, queryPersons(readCond(GRAPH_TIMESTAMP_FIELD, ">", graphTimestamp(1))).size());
+		assertEquals(3, queryPersons(readCond(GRAPH_TIMESTAMP_FIELD, "<=", graphTimestamp(2))).size());
+		assertEquals(2, queryPersons(readCond(GRAPH_TIMESTAMP_FIELD, "between",
+				JSONArray.of(graphTimestamp(0), graphTimestamp(1)))).size());
+		dropGraph();
+	}
+
+	@Test
+	void readReturnsTimeValuesAsSourceText() throws Exception {
+		assume(DataAdapterCapability.READ_QUERY);
+		seedGraph();
+		JSONObject row = rowByPrimaryKey(queryPersonTimes(), "p1");
+		assertNotNull(row, "seed row p1 is missing");
+		// The value read back is the source's own text - no process-zone re-rendering.
+		assertEquals(graphDate(0), row.getString("signup_date_out"));
+		assertEquals(graphTimestamp(0), row.getString("signup_at_out"));
+		dropGraph();
+	}
+
+	@Test
+	void readTimeValueFeedsBackAsCondition() throws Exception {
+		assume(DataAdapterCapability.READ_QUERY);
+		seedGraph();
+		JSONObject row = rowByPrimaryKey(queryPersonTimes(), "p2");
+		assertNotNull(row, "seed row p2 is missing");
+		String date = row.getString("signup_date_out");
+		String timestamp = row.getString("signup_at_out");
+		assertEquals(graphDate(1), date);
+		assertEquals(graphTimestamp(1), timestamp);
+		// The closed loop: the value read from the source matches again as a condition, unchanged.
+		assertEquals(1, queryPersons(readCond(GRAPH_DATE_FIELD, "=", date)).size());
+		assertEquals(1, queryPersons(readCond(GRAPH_TIMESTAMP_FIELD, "=", timestamp)).size());
+		dropGraph();
+	}
+
+	/** Read graph class 0's primary key plus both shared time fields. */
+	protected JSONArray queryPersonTimes() throws Exception {
+		JSONArray objects = new JSONArray();
+		objects.add(readObject(0, "p", 0));
+		JSONArray fields = new JSONArray();
+		fields.add(readField("p", primaryKey(), "id"));
+		fields.add(readField("p", GRAPH_DATE_FIELD, "signup_date_out"));
+		fields.add(readField("p", GRAPH_TIMESTAMP_FIELD, "signup_at_out"));
+		return readQuery(singleStepDsl(objects, null, fields, null, null, null));
+	}
+
+	/** The row whose primary key equals {@code id}, or null. */
+	protected JSONObject rowByPrimaryKey(JSONArray rows, String id) {
+		for (int i = 0; i < rows.size(); i++) {
+			if (id.equals(str(rows.getJSONObject(i).get("id")))) {
+				return rows.getJSONObject(i);
+			}
+		}
+		return null;
+	}
+
+	// ----------------------------------------------------------------------------------
+	// CONTRACT — an unrenderable construct is rejected, never silently dropped
+	//
+	// The report's problem-8/9 shapes: a condition a deployment cannot render must fail
+	// loudly with a located violation, instead of being dropped from the query and
+	// returning a confident wrong answer. The probes are fixture-independent.
+	// ----------------------------------------------------------------------------------
+
+	@Test
+	void timeseriesConditionIsRejectedNotSilentlyDropped() {
+		assume(DataAdapterCapability.READ_QUERY);
+		// A source that renders timeseries itself has nothing to reject here.
+		assumeFalse(sourceRendersTimeseries(), "this source renders timeseries conditions itself");
+		JSONObject properties = new JSONObject();
+		properties.put("operator", "logic");
+		JSONArray and = new JSONArray();
+		JSONObject block = new JSONObject();
+		block.put("field", "name");
+		JSONObject timeRange = new JSONObject();
+		timeRange.put("start", "2024-01-01 00:00:00");
+		timeRange.put("end", "2025-01-01 00:00:00");
+		block.put("time_range", timeRange);
+		and.add(block);
+		properties.put("and", and);
+		JSONObject timeseries = new JSONObject();
+		timeseries.put("properties", properties);
+		JSONObject conditions = new JSONObject();
+		conditions.put("timeseries", timeseries);
+
+		DslContractViolationException e = assertThrows(DslContractViolationException.class,
+				() -> queryPersonWithConditions(conditions));
+		assertTrue(e.getViolations().stream().anyMatch(
+				v -> v.getCode() == DslContractViolationException.Code.UNSUPPORTED_CONSTRUCT), e.getMessage());
+		assertTrue(e.getViolations().get(0).getDslPath() != null
+				&& !e.getViolations().get(0).getDslPath().isBlank(), e.getMessage());
+	}
+
+	@Test
+	void unrenderableOperatorIsRejectedNotSilentlyDropped() {
+		assume(DataAdapterCapability.READ_QUERY);
+		JSONObject properties = new JSONObject();
+		properties.put("operator", "and");
+		JSONArray and = new JSONArray();
+		and.add(readCond("name", "regexp", ".*"));
+		properties.put("and", and);
+
+		DslContractViolationException e = assertThrows(DslContractViolationException.class,
+				() -> queryPersons(properties));
+		assertTrue(e.getViolations().stream().anyMatch(
+				v -> v.getCode() == DslContractViolationException.Code.UNSUPPORTED_OPERATOR_FOR_TYPE),
+				e.getMessage());
+		assertTrue(e.getMessage().contains("regexp"), e.getMessage());
+	}
+
+	@Test
+	void conditionKeyedByFieldNameIsRejectedNotSilentlyDropped() {
+		assume(DataAdapterCapability.READ_QUERY);
+		JSONObject inner = new JSONObject();
+		inner.put("operator", "between");
+		inner.put("value", JSONArray.of("1996-01-01", "1997-01-01"));
+		JSONObject properties = new JSONObject();
+		properties.put("name", inner);
+
+		assertThrows(DslContractViolationException.class, () -> queryPersons(properties));
+	}
+
+	protected JSONObject readObject(int graphIdx, String variable, int idx) {
+		JSONObject o = new JSONObject();
+		o.put("class", namespace() + graphClass(graphIdx));
+		o.put("variable", variable);
+		o.put("idx", idx);
+		return o;
+	}
+
+	protected JSONObject readCond(String field, String operator, Object value) {
+		JSONObject c = new JSONObject();
+		c.put("field", field);
+		c.put("operator", operator);
+		c.put("value", value);
+		return c;
+	}
+
+	protected JSONObject readAnd(JSONObject... conds) {
+		JSONObject a = new JSONObject();
+		JSONArray arr = new JSONArray();
+		for (JSONObject c : conds) {
+			arr.add(c);
+		}
+		a.put("and", arr);
+		return a;
+	}
+
+	protected JSONObject readOr(JSONObject... conds) {
+		JSONObject o = new JSONObject();
+		JSONArray arr = new JSONArray();
+		for (JSONObject c : conds) {
+			arr.add(c);
+		}
+		o.put("or", arr);
+		return o;
+	}
+
+	protected JSONObject readNot(JSONObject cond) {
+		JSONObject n = new JSONObject();
+		n.put("not", JSONArray.of(cond));
+		return n;
+	}
+
+	protected JSONObject readField(String variable, String field, String as) {
+		JSONObject f = new JSONObject();
+		f.put("variable", variable);
+		f.put("field", field);
+		f.put("as", as);
+		return f;
+	}
+
+	protected JSONObject readAggField(String variable, String field, String function, String as) {
+		JSONObject f = readField(variable, field, as);
+		f.put("function", function);
+		return f;
+	}
+
+	protected JSONObject readGroupByField(String variable, String field) {
+		JSONObject f = new JSONObject();
+		f.put("variable", variable);
+		f.put("field", field);
+		return f;
+	}
+
+	protected JSONObject readDistinctField(String variable, String field, String as) {
+		JSONObject f = readField(variable, field, as);
+		f.put("distinct", true);
+		return f;
+	}
+
+	protected JSONObject readHavingCond(String variable, String field, String function, String operator, Object value) {
+		JSONObject c = new JSONObject();
+		c.put("variable", variable);
+		c.put("field", field);
+		c.put("function", function);
+		c.put("operator", operator);
+		c.put("value", value);
+		return c;
+	}
+
+	protected JSONObject readSortField(String field, String order) {
+		JSONObject f = new JSONObject();
+		f.put("field", field);
+		f.put("order", order);
+		return f;
+	}
+
+	protected JSONObject readRelation(int from, int to, String type) {
+		JSONObject r = new JSONObject();
+		r.put("from", from);
+		r.put("to", to);
+		JSONArray types = new JSONArray();
+		types.add(type);
+		r.put("type", types);
+		return r;
+	}
+
+	protected String singleStepDsl(JSONArray objects, JSONArray relationships, JSONArray outputFields,
+			JSONObject groupBy, JSONObject sort, JSONObject limit) {
+		JSONObject pattern = new JSONObject();
+		pattern.put("objects", objects);
+		if (relationships != null && !relationships.isEmpty()) {
+			pattern.put("relationship", relationships);
+		}
+		JSONArray patterns = new JSONArray();
+		patterns.add(pattern);
+		JSONObject graph = new JSONObject();
+		graph.put("patterns", patterns);
+		JSONObject step = new JSONObject();
+		step.put("graph", graph);
+		JSONObject output = new JSONObject();
+		output.put("fields", outputFields);
+		if (groupBy != null) {
+			output.put("group_by", groupBy);
+		}
+		if (sort != null) {
+			output.put("sort", sort);
+		}
+		if (limit != null) {
+			output.put("limit", limit);
+		}
+		step.put("output", output);
+		JSONArray steps = new JSONArray();
+		steps.add(step);
+		JSONObject answer = new JSONObject();
+		answer.put("steps", steps);
+		JSONObject dsl = new JSONObject();
+		dsl.put("answer", answer);
+		JSONArray arr = new JSONArray();
+		arr.add(dsl);
+		return arr.toJSONString();
+	}
+
+	protected JSONObject graphRow(String className, String id) throws Exception {
+		for (JSONObject row : selectAll(className)) {
+			if (id.equals(str(row.get("id")))) {
+				return row;
+			}
+		}
+		throw new AssertionError("no row " + className + " with id " + id);
+	}
+
+	/** Total number of source-class objects in the graph seed. */
+	protected int totalPersonCount() {
+		return graphSeed().get(graphClass(0)).size();
+	}
+
+	/**
+	 * The foreign-key field the edge at index {@code i} maintains on its source class. Only a
+	 * key-field adapter implements it; a relationship-edge adapter leaves the default, which throws.
+	 */
+	protected String joinField(int i) {
+		throw new UnsupportedOperationException("a relationship-edge adapter stores no foreign-key field");
+	}
+
+	// ----------------------------------------------------------------------------------
+	// Sample data
+	// ----------------------------------------------------------------------------------
+
+	@Test
+	void sampleDataFileName() {
+		assume(DataAdapterCapability.SAMPLE_DATA);
+		newAdapter().getSampleDataFileName("demo", "person");
+	}
+
+	// ----------------------------------------------------------------------------------
+	// Shared scenario helpers
+	// ----------------------------------------------------------------------------------
+
+	private static JSONObject cond(String field, String operator, Object value) {
+		JSONObject c = new JSONObject();
+		c.put("field", field);
+		c.put("operator", operator);
+		c.put("value", value);
+		return c;
+	}
+
+	/** Run update with the given where, then assert exactly {@code expected} rows were changed. */
+	private void assertUpdateAffects(JSONObject where, int expected) throws Exception {
+		DataAdapter adapter = newAdapter();
+		String ns = namespace();
+		adapter.createClass(ns, classDef());
+		adapter.insertObjects(ns, classDef(), testObjects());
+
+		JSONObject set = new JSONObject();
+		set.put(updateMarkerField(), updateMarkerValue());
+		adapter.updateObjects(ns, classDef(), set, where);
+
+		assertEquals(expected, countMatching(classNameOf(classDef()), updateMarkerField(), updateMarkerValue()));
+		adapter.dropNamespace(ns);
+	}
+
+	/** Run delete with the given where, then assert exactly {@code expected} rows were removed. */
+	private void assertDeleteAffects(JSONObject where, int expected) throws Exception {
+		DataAdapter adapter = newAdapter();
+		String ns = namespace();
+		adapter.createClass(ns, classDef());
+		adapter.insertObjects(ns, classDef(), testObjects());
+		int before = testObjects().size();
+
+		adapter.deleteObjects(ns, classDef(), where);
+
+		assertEquals(before - expected, countRows(classNameOf(classDef())));
+		adapter.dropNamespace(ns);
+	}
+
+	private JSONObject rowByPk(String pkValue) throws Exception {
+		for (JSONObject row : selectAll(classNameOf(classDef()))) {
+			if (pkValue.equals(str(row.get(primaryKey())))) {
+				return row;
+			}
+		}
+		throw new AssertionError("no row with " + primaryKey() + " = " + pkValue);
+	}
+
+	private String firstPk() {
+		return testObjects().getJSONObject(0).getString(primaryKey());
+	}
+
+	private int countOf(String field, String operator, Object value) {
+		return (int) testObjects().stream().filter(o -> compare((JSONObject) o, field, operator, value)).count();
+	}
+
+	private int countOf(String field, String operator, Object low, Object high) {
+		return (int) testObjects().stream().filter(o -> {
+			double v = ((JSONObject) o).getDoubleValue(field);
+			return v >= ((Number) low).doubleValue() && v <= ((Number) high).doubleValue();
+		}).count();
+	}
+
+	private int countOfNull(String field) {
+		return (int) testObjects().stream().filter(o -> ((JSONObject) o).get(field) == null).count();
+	}
+
+	private boolean compare(JSONObject o, String field, String operator, Object value) {
+		Object v = o.get(field);
+		if (v == null) {
+			return false;
+		}
+		double nv = ((Number) v).doubleValue();
+		double nw = ((Number) value).doubleValue();
+		return switch (operator) {
+			case ">" -> nv > nw;
+			case ">=" -> nv >= nw;
+			case "<" -> nv < nw;
+			case "<=" -> nv <= nw;
+			default -> false;
+		};
+	}
+
+	// ----------------------------------------------------------------------------------
+	// Fixtures (subclasses override these to shape the concrete schema/seed)
+	// ----------------------------------------------------------------------------------
+
+	/** One object with every supported scalar type populated. */
+	protected JSONArray allTypeObjects() {
+		return testObjects();
+	}
+
+	/** A single object with a null in the nullable field. */
+	protected JSONArray nullFieldsObject() {
+		JSONObject o = new JSONObject();
+		o.put(primaryKey(), "null-key");
+		o.put("name", "HasNull");
+		o.put(nullFieldName(), null);
+		JSONArray arr = new JSONArray();
+		arr.add(o);
+		return arr;
+	}
+
+	/** A single object carrying a single quote in a string field. */
+	protected JSONArray quoteObject() {
+		JSONObject o = new JSONObject();
+		o.put(primaryKey(), "quote-key");
+		o.put("name", quotedValue());
+		JSONArray arr = new JSONArray();
+		arr.add(o);
+		return arr;
+	}
+
+	protected String nullFieldName() {
+		return "bio";
+	}
+
+	protected String quotedFieldName() {
+		return "name";
+	}
+
+	protected String quotedValue() {
+		return "O'Brien";
+	}
+
+	protected String updateMarkerField() {
+		return "score";
+	}
+
+	protected Object updateMarkerValue() {
+		return 999L;
+	}
+
+	/** The set values for {@link #updateSetsEveryScalarType()}. */
+	protected JSONObject updatedValues() {
+		JSONObject set = new JSONObject();
+		set.put("name", "Updated");
+		set.put("age", 77);
+		set.put("score", 777L);
+		set.put("height", 7.7);
+		set.put("birthday", "1999-09-09");
+		set.put("created_at", "2025-05-05 05:05:05");
+		set.put("bio", "new bio");
+		return set;
+	}
+
+	/** Assert the inserted row round-trips the scalar values of {@code obj}. */
+	protected void assertRoundTrip(JSONObject expected, JSONObject actual) {
+		for (String key : expected.keySet()) {
+			assertEquals(str(expected.get(key)), str(actual.get(key)), "field " + key);
+		}
+	}
+}

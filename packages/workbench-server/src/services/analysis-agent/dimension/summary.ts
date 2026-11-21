@@ -16,11 +16,12 @@ import type { AnalysisEvidence } from "../runtime/evidence-types";
 import type { DeepAnalysisArtifactStore } from "../task/artifacts";
 import type { DimensionRunContext, DimensionStageError } from "./context";
 import { tApp } from "../../../i18n";
+import { combineResultTruncation } from "../../data-query/protocol";
 
 
 const logger = createLogger("deep-analysis-summary");
 
-/** The summary's evidence takes every sub-question's raw-value dataset; empty datasets are excluded. */
+/** Keep partial evidence even without rows: it limits the conclusions of the summary. */
 function buildSummaryEvidence(plannedDimensions: any[]): AnalysisEvidence[] {
   return plannedDimensions
     .flatMap((dimension) => dimension.subQuestions || [])
@@ -46,9 +47,11 @@ function buildSummaryEvidence(plannedDimensions: any[]): AnalysisEvidence[] {
         markdownTable:
           entry.markdownTable || (datasetEntries.length === 1 ? question.markdownTable : undefined),
         abcSubQuestions: question.abcSubQuestions,
+        ...combineResultTruncation([entry]),
+        sourceWindows: entry.sourceWindows,
       }));
     })
-    .filter((item) => item.data.length > 0);
+    .filter((item) => item.data.length > 0 || item.truncated || item.sourceWindows?.length);
 }
 
 function buildSummarySkillInput(
@@ -83,6 +86,8 @@ function buildSummarySkillInput(
         dimensionId: question.dimensionId,
         dimensionName: question.dimensionName,
         subQuestion: question.subQuestion,
+        ...combineResultTruncation([entry]),
+        sourceWindows: entry.sourceWindows,
       }))
     ),
     dimensions: successfulReports.map((report) => ({
@@ -116,11 +121,11 @@ export async function runSummaryStage(
     logger.info(tApp("analysis.dimension.summary.194", { length: successfulReports.length }));
 
     const visualizationSkillIds = ctx.enabledVisualizationSkillIds || [];
+    const evidence = buildSummaryEvidence(plannedDimensions);
     let summaryCharts: any[] = [];
 
     const chartActivityId = store.start("chart");
     if (visualizationSkillIds.length > 0 && ctx.domainId) {
-      const evidence = buildSummaryEvidence(plannedDimensions);
       const summaryChartGeneration = await generateChartsFromCandidates({
         domainId: ctx.domainId,
         userQuestion: ctx.userQuestion,
@@ -129,9 +134,9 @@ export async function runSummaryStage(
           sourceSubQuestion: `${item.dimensionName}: ${item.questionText}`,
           sourceQuestionId: item.questionId,
           data: item.data,
+          truncation: item,
         })),
         maxCharts: Math.min(4, Math.max(2, evidence.length)),
-        failurePolicy: "diagnostic",
         signal: ctx.signal,
         enabledVisualizationSkillIds: visualizationSkillIds,
       });
@@ -203,6 +208,7 @@ export async function runSummaryStage(
       skillResults: summarySkillResults,
       charts: summaryCharts,
       signal: ctx.signal,
+      truncation: combineResultTruncation(evidence),
     })) {
       if (ctx.signal?.aborted) throw new Error(t("analysis.cancelled"));
       summary += chunk;

@@ -1,3 +1,5 @@
+import type { ResultTruncation } from "./query-execution";
+
 export interface AnalysisChartPlan {
   chartId: string;
   title: string;
@@ -15,7 +17,8 @@ export interface AnalysisChartPlan {
   config?: Record<string, unknown>;
 }
 
-export interface AnalysisChartResult extends AnalysisChartPlan {
+/** A chart drawn from a partial result carries that result's truncation marker. */
+export interface AnalysisChartResult extends AnalysisChartPlan, Partial<ResultTruncation> {
   scopeId: string;
   html: string;
   skillId: string;

@@ -1,3 +1,4 @@
+import path from "node:path";
 import express from "express";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -28,7 +29,7 @@ import { installWorkbenchProduct } from "../../../product/installed";
 import { configureI18n } from "../../../i18n";
 import { appTextEn } from "../../../i18n/app-text-en";
 import { en, enLocaleMeta } from "../../../i18n/locales/en";
-import { SessionResponseStream } from "../../../platform/diagnosis/observe/agent/session-stream";
+import { SessionResponseStream } from "../../../utils/response-stream";
 import { createOpsAgentMcpRouter, getOpsAgentMcpToolCatalog } from "../ops-agent-mcp";
 import os from "node:os";
 import { installContentLayout } from "../../../content/layout";
@@ -46,7 +47,7 @@ configureI18n({
 installContentLayout({
   runtimeRoot: os.tmpdir(),
   prompts: [],
-  skillTemplate: [],
+  publicSkillsRoot: path.join(os.tmpdir(), "no-public-skills"),
   runtimeResources: [],
 });
 

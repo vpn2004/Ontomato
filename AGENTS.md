@@ -17,6 +17,15 @@ from the host; business permissions are decided by the server. Data browsing and
 modeling belong to the Manager, and the main workbench keeps no second implementation of
 them.
 
+## Language
+
+Write all new commit messages, including subjects and bodies, in English. Use
+`type: description` for subjects. This applies to every branch, including `develop`,
+feature branches, fix branches and `main`, and overrides the outer workspace's
+Chinese commit-message convention for this repository.
+
+Write new or changed source-code comments in English.
+
 ## Changes and verification
 
 Check the actual modules and the existing build entry points first, then run the
@@ -31,10 +40,13 @@ results and protect other tasks' changes.
 ## Collaboration and working directories
 
 Use an ordinary outer directory for an isolated pair of checkouts; do not add a third
-repository, lock file or build configuration there. Internal development uses `develop`, and each repository
+repository, lock file or build configuration there. Public development uses `develop`, and each repository
 branches, commits and merges on its own; a branch of the same name is not bound
 automatically. Normal work starts from each repository's own `develop` as
-`feature/<topic>` or `fix/<topic>` and merges back into `develop` when done. The main
+`feature/<topic>` or `fix/<topic>` and merges back into `develop` when done. `stable` is
+the maintenance line of released versions: fixes for a released version start from
+`stable`, merge back into `stable`, and `stable` is then merged into `develop`; a new
+version is prepared by merging `develop` into `stable` and is released from `stable`. The main
 directory checks out `develop` + `develop` by default, and `main` is kept. Builds do not
 implicitly fetch, pull or switch branches. Do not introduce a workspace manager.
 
@@ -59,19 +71,12 @@ this way.
 
 ## Public history and branches
 
-`main` is this repository's public line: it carries only clean public snapshot history. The
-internal remote's `main` and GitHub's `main` hold the same content, and one push to `main`
-updates both. The internal development line, `develop`, keeps the original development
-history and is never pushed to GitHub. A release publishes to `main` by creating a new
-commit whose tree is the reviewed file tree: do not merge `develop` into `main`, and do not
-publish the internal history branches or the old tags.
-
-The public GitHub repository has `main` only, so public contributors start from `main`;
-`develop` is an internal line that does not exist there. An accepted pull request is not
-merged on GitHub: its own commits (those after the snapshot it started from) are
-cherry-picked onto `develop`, keeping their authors, because `main` and `develop` share no
-history and a plain merge would bring the snapshot commits along. The next snapshot
-carries a `Co-authored-by:` trailer for each contributor, and the pull request is closed
-with a link to it. Commit subjects on `main` are
-English and follow the `type: description` format; commits on the internal `develop` line
-follow the outer workspace convention.
+`ontomato-ai/Ontomato` on GitHub is this repository's canonical development and
+CI repository. Both `main` and `develop` live there: `develop` is the daily
+development line, `main` is the release line. A release merges the reviewed and
+tested `develop` into `main`, preserving ancestry, and tags the resulting
+`main` commit as `v<version>`. Normal work starts from `develop` as `feature/<topic>` or
+`fix/<topic>`. Maintainers validate their changes locally, merge them into
+`develop`, check the combined result and push `develop` directly. A pull request
+is not required for the team's normal workflow. External contributions follow
+[CONTRIBUTING.md](CONTRIBUTING.md).

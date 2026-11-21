@@ -4,6 +4,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
+import java.util.HexFormat;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -20,7 +24,9 @@ import com.fasterxml.jackson.databind.ObjectReader;
 import io.ontomato.dataengine.bean.DslExecutionResult;
 import io.ontomato.dataengine.config.BusinessConfig;
 import io.ontomato.dataengine.config.DataRagConfig;
+import io.ontomato.dataengine.dataAdapter.DataAdapter;
 import io.ontomato.dataengine.dataAdapter.DataAdapterRegistry;
+import io.ontomato.dataengine.dataAdapter.DslGrammarValidator;
 import io.ontomato.dataengine.dao.JSONRuleDao;
 import io.ontomato.dataengine.dao.VectorResourceDao;
 import io.ontomato.dataengine.logging.AgentCallContext;
@@ -30,6 +36,7 @@ import io.ontomato.dataengine.service.BusinessConfigService;
 import io.ontomato.dataengine.service.ai.MultiThreadAIChatService;
 import io.ontomato.dataengine.service.sys.bean.permission.UserDataPermission;
 import io.ontomato.dataengine.util.DslUtil;
+import io.ontomato.dataengine.dataAdapter.DslExecutionMode;
 import io.ontomato.dataengine.util.HttpRequestUtil;
 
 import dev.langchain4j.agent.tool.P;
@@ -91,6 +98,9 @@ public class DslSkillTools {
 		String ret = null;
 		String dslStr = null;
 		String error = null;
+		DataAdapter timeConditionAdapter = null;
+		boolean dslTrialReserved = false;
+        String trialPlan = null;
 		// ABC path m3.query event: sessionId takes the base sessionId of the outer AgentCallContext of the tool loop (no sub-query layer)
 		AgentCallContext callContext = AgentCallContext.current();
 		String sessionId = callContext == null ? null : callContext.getSessionId();
@@ -103,14 +113,26 @@ public class DslSkillTools {
 			BusinessConfig businessConfig = businessConfigService.get(callContext.getDomainId());
 			Map<String, Object> jsonRule = jsonRuleDao.query(callContext.getDomainId());
 			dslStr = DslUtil.normalizeClassNames(dslStr, (List<Map<String, Object>>)jsonRule.get("classDef"));
-			dslStr = DslUtil.setConditionTimeColumnToCorrectFormat(dslStr, dataRagConfig.getDslMightTimeFormats(), (List<Map<String, Object>>)jsonRule.get("classDef"));
+			timeConditionAdapter = dataAdapterRegistry.create(businessConfig, jsonRule);
+			int failureLimit = timeConditionAdapter.consecutiveDslFailureLimit();
+            trialPlan = planFingerprint(JSON.parseArray(dslStr).getJSONObject(0));
+            if (failureLimit > 0 && !callContext.reserveDslTrial(failureLimit, trialPlan)) {
+				error = "The DSL trial budget is exhausted after " + failureLimit
+                        + " failures of the same query plan. Do not repeat this failed DSL. "
+                        + "A corrected or different plan may continue; use the reported errors and source rules.";
+				ret = "Query not executed:\n" + error;
+				return new DslOutcome(false, error, ret);
+			}
+			dslTrialReserved = failureLimit > 0;
+			dslStr = DslUtil.setConditionTimeColumnToCorrectFormat(dslStr, dataRagConfig.getDslMightTimeFormats(), (List<Map<String, Object>>)jsonRule.get("classDef"), timeConditionAdapter.timeConditionsAsEpochMillis(), timeConditionAdapter.timeConditionZone());
+			DslGrammarValidator.validate(JSON.parseArray(dslStr).getJSONObject(0), (List<Map<String, Object>>)jsonRule.get("classDef"));
 			JSONObject m3StartedPayload = new JSONObject();
 			m3StartedPayload.put("dsl", safeJson(dslStr));
 			m3StartedPayload.put("m3Mode", "V1");
 			DiagnosticEventLogger.emit("m3.query.started", sessionId, m3StartedPayload);
 			m3Start = System.currentTimeMillis();
 			m3Started = true;
-			DslExecutionResult queryResult = HttpRequestUtil.getM3Data(dataRagConfig, dataAdapterRegistry.create(businessConfig, jsonRule), dslStr, sessionId, false, jsonRule, vectorResourceDao, new UserDataPermission(), HttpRequestUtil.M3Mode.V1, callContext.getDomainId())[0];
+			DslExecutionResult queryResult = HttpRequestUtil.executeDsl(dataRagConfig, timeConditionAdapter, dslStr, sessionId, false, jsonRule, vectorResourceDao, new UserDataPermission(), DslExecutionMode.OPTIMIZED, callContext.getDomainId())[0];
 			JSONObject dataMap = queryResult.data();
 			if (queryResult.failed()) {
 				String rawError = MultiThreadAIChatService.rawErrorText(queryResult.failure().cause());
@@ -132,9 +154,15 @@ public class DslSkillTools {
 				m3Started = false;
 				JSONArray data = dataMap.getJSONArray("data");
 				JSONArray answer = new JSONArray();
+				Boolean truncated = null;
+				Integer rowLimit = null;
+					String truncationHint = null;
 				if (data != null && data.size() > 0) {
 					JSONObject datum = data.getJSONObject(0);
 					answer = datum.getJSONArray("answer");
+					truncated = datum.getBoolean("truncated");
+					rowLimit = datum.getInteger("rowLimit");
+						truncationHint = datum.getString("truncationHint");
 				}
 				int total = answer.size();
 				while (answer.size() > maxRowSize) {
@@ -147,7 +175,14 @@ public class DslSkillTools {
 				ret = "Query result:\n```json\n";
 				ret += JSON.toJSONString(obj, JSONWriter.Feature.PrettyFormat, Feature.WriteMapNullValue) + "\n";
 				ret += "```\n";
-				if (maxRowSize < total) {
+				if (Boolean.TRUE.equals(truncated)) {
+						ret += "IMPORTANT: the result is INCOMPLETE"
+								+ (rowLimit == null ? ". " : " (processing or output cap: " + rowLimit + " rows). ")
+								+ (truncationHint == null ? "" : truncationHint + " ")
+								+ "You may deliver these partial results with their limitation. Statistics, rankings and empty"
+								+ " results apply only to the processed portion; do not treat this as an execution error or retry"
+								+ " merely to remove the notice.";
+				} else if (maxRowSize < total) {
 					ret += "This DSL query actually returned a total of " + total + " records (executing this DSL request in the Python program returns according to the actual situation). Because the data volume is too large, the `query result` here only shows the first " + maxRowSize + " records.";
 				}
 			}
@@ -166,8 +201,35 @@ public class DslSkillTools {
 				DiagnosticEventLogger.emit("m3.query.finished", sessionId, new JSONObject().fluentPut("status", "error").fluentPut("durationMs", System.currentTimeMillis() - m3Start));
 			}
 		}
+		if (dslTrialReserved && callContext != null) {
+			int failureLimit = timeConditionAdapter.consecutiveDslFailureLimit();
+            int failures = callContext.finishDslTrial(error == null, trialPlan);
+			if (error != null) {
+				log.warn("[{}] Adapter DSL plan failed ({}/{} repeats)", sessionId, failures, failureLimit);
+				if (failures >= failureLimit) {
+					ret += "\nSTOP: the adapter DSL trial budget is exhausted after " + failureLimit
+                            + " failures of this query plan. Do not repeat this failed DSL; correct it or try a different supported plan.";
+				}
+			}
+		}
 		return new DslOutcome(error == null, error, ret);
 	}
+
+    /** Key order and question wording cannot turn the same failed plan into a new trial. */
+    private static String planFingerprint(JSONObject dsl) throws Exception {
+        String canonical = JSON.toJSONString(ordered(dsl.get("answer")), Feature.WriteMapNullValue);
+        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(canonical.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private static Object ordered(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            Map<String, Object> sorted = new TreeMap<>();
+            map.forEach((key, item) -> sorted.put(key.toString(), ordered(item)));
+            return sorted;
+        }
+        if (value instanceof List<?> list) return list.stream().map(DslSkillTools::ordered).toList();
+        return value;
+    }
 
 	private Object safeJson(String s) {
 		if (s == null) {

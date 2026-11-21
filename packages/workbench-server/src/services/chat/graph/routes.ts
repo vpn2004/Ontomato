@@ -70,6 +70,7 @@ export function routeAfterTaskPlanner(state: GraphState): string {
 }
 
 export function routeAfterQuery(state: GraphState): string {
+  if (state.errors?.some((error) => error.node === "query")) return "response";
   const plan = state.plan;
 
   if (!plan || !plan.nodes) {

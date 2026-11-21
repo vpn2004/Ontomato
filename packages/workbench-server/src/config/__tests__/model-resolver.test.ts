@@ -2,18 +2,20 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ModelSettingsData } from "@ontomato/contracts/model-settings";
 import { parseIsoDurationSeconds } from "@ontomato/contracts/model-settings";
 import { runWithLogContext } from "../../logging/log-context";
+import { installWorkbenchIdentity } from "../../identity/installed";
+import type { WorkbenchIdentity } from "../../identity/types";
 import { configureI18n } from "../../i18n";
 import { appTextEn } from "../../i18n/app-text-en";
 import { en, enLocaleMeta } from "../../i18n/locales/en";
 import {
   ModelNotConfiguredError,
-  getRoleNotConfiguredMessage,
   resolveModelForRole,
 } from "../model-resolver";
 
 const mockBackendGet = vi.fn();
 
-vi.mock("../../utils/backend-client", () => ({
+vi.mock("../../utils/backend-client", async (importActual) => ({
+  ...(await importActual<typeof import("../../utils/backend-client")>()),
   backendGet: (...args: unknown[]) => mockBackendGet(...args),
 }));
 
@@ -27,6 +29,9 @@ describe("model-resolver", () => {
         en: { messages: { ...en, ...appTextEn }, ...enLocaleMeta },
       },
     });
+    installWorkbenchIdentity({
+      modelSettingsReadHeaders: { "X-Edition-Read": "synthetic" },
+    } as unknown as WorkbenchIdentity);
   });
 
   beforeEach(() => {
@@ -50,17 +55,6 @@ describe("model-resolver", () => {
       expect(() => parseIsoDurationSeconds("PT")).toThrow("Invalid ISO-8601 duration");
       expect(() => parseIsoDurationSeconds("invalid")).toThrow("Invalid ISO-8601 duration");
       expect(() => parseIsoDurationSeconds("PT5X")).toThrow("Invalid ISO-8601 duration");
-    });
-  });
-
-  describe("getRoleNotConfiguredMessage", () => {
-    it("returns formatted message via i18n", () => {
-      expect(getRoleNotConfiguredMessage("general")).toBe(
-        "No model configured for role 'General', please configure it in model settings"
-      );
-      expect(getRoleNotConfiguredMessage("query")).toBe(
-        "No model configured for role 'Query', please configure it in model settings"
-      );
     });
   });
 
@@ -111,12 +105,17 @@ describe("model-resolver", () => {
         () => resolveModelForRole("general")
       );
 
+      // The caller's credential plus the edition's model settings read headers.
       expect(mockBackendGet).toHaveBeenCalledWith(
         "/businessConfig/getModelSettings",
         "/businessConfig/getModelSettings",
         {
-          token: "jwt-token-123",
-          apiKey: undefined,
+          headers: {
+            "Content-Type": "application/json",
+            tk: "jwt-token-123",
+            "Accept-Language": "en",
+            "X-Edition-Read": "synthetic",
+          },
         }
       );
 

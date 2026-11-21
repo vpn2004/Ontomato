@@ -12,6 +12,7 @@ import com.alibaba.fastjson2.JSONWriter.Feature;
 import io.ontomato.dataengine.bean.DslExecutionResult;
 import io.ontomato.dataengine.config.BusinessConfig;
 import io.ontomato.dataengine.config.DataRagConfig;
+import io.ontomato.dataengine.dataAdapter.DataAdapter;
 import io.ontomato.dataengine.dataAdapter.DataAdapterRegistry;
 import io.ontomato.dataengine.core.bean.User;
 import io.ontomato.dataengine.dao.VectorResourceDao;
@@ -23,7 +24,7 @@ import io.ontomato.dataengine.service.DataPermissionLookup;
 import io.ontomato.dataengine.service.sys.bean.permission.UserDataPermission;
 import io.ontomato.dataengine.util.DslUtil;
 import io.ontomato.dataengine.util.HttpRequestUtil;
-import io.ontomato.dataengine.util.HttpRequestUtil.M3Mode;
+import io.ontomato.dataengine.dataAdapter.DslExecutionMode;
 
 @Service
 public class DslServiceImpl implements DslService {
@@ -49,15 +50,11 @@ public class DslServiceImpl implements DslService {
 	@Override
 	public Map<String, Object> executeV0(JSONObject dsl, UserDataPermission permission, User user) {
 		DslUtil.setRandomTempTableName(dsl);
-    	return getM3Data(dsl, permission, M3Mode.V0, user);
-	}
-	
-	private Map<String, Object> getM3Data(JSONObject dsl, UserDataPermission permission, M3Mode m3Mode, User user) {
 		BusinessConfig businessConfig = businessConfigService.get(user.getDomainId());
 		JSONArray dsls = new JSONArray();
     	dsls.add(dsl);
 		Map<String, Object> jsonRule = adminService.getJSONRule(user.getDomainId());
-		DslExecutionResult[] results = HttpRequestUtil.getM3Data(dataRagConfig, dataAdapterRegistry.create(businessConfig, jsonRule), JSONArray.toJSONString(dsls, Feature.WriteMapNullValue), null, true, jsonRule, vectorResourceDao, permission, m3Mode, user.getDomainId());
+		DslExecutionResult[] results = HttpRequestUtil.executeDsl(dataRagConfig, dataAdapterRegistry.create(businessConfig, jsonRule), JSONArray.toJSONString(dsls, Feature.WriteMapNullValue), null, true, jsonRule, vectorResourceDao, permission, DslExecutionMode.RAW, user.getDomainId());
 		return results[1].rawResponse();
 	}
 
@@ -95,9 +92,10 @@ public class DslServiceImpl implements DslService {
     	dsls.add(dsl);
 		List<Map<String, Object>> classDefs = (List<Map<String, Object>>)jsonRule.get("classDef");
 		String dslStr = DslUtil.normalizeClassNames(JSONArray.toJSONString(dsls, Feature.WriteMapNullValue), classDefs);
-		dslStr = DslUtil.setConditionTimeColumnToCorrectFormat(dslStr, dataRagConfig.getDslMightTimeFormats(), classDefs);
+		DataAdapter timeConditionAdapter = dataAdapterRegistry.create(businessConfig, jsonRule);
+		dslStr = DslUtil.setConditionTimeColumnToCorrectFormat(dslStr, dataRagConfig.getDslMightTimeFormats(), classDefs, timeConditionAdapter.timeConditionsAsEpochMillis(), timeConditionAdapter.timeConditionZone());
     	
-		DslExecutionResult result = HttpRequestUtil.getM3Data(dataRagConfig, dataAdapterRegistry.create(businessConfig, jsonRule), dslStr, null, true, jsonRule, vectorResourceDao, permission, HttpRequestUtil.M3Mode.V1, domainId)[1];
+		DslExecutionResult result = HttpRequestUtil.executeDsl(dataRagConfig, timeConditionAdapter, dslStr, null, true, jsonRule, vectorResourceDao, permission, DslExecutionMode.OPTIMIZED, domainId)[1];
 		JSONObject dataMap = new JSONObject();
 		dataMap.putAll(result.data());
 		if (result.failed()) {

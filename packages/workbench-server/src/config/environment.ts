@@ -9,11 +9,22 @@ export const environment = {
   node: () => read("NODE_ENV"),
   level: () => read("LOG_LEVEL"),
   logDir: () => read(workbenchProduct().logDirEnvName),
-  pgConnection: () => read("DATABASE_URL") || read("PG_CONNECTION_STRING") || runtimeDefaults().postgresFallback,
+  pgConnection: () => {
+    const explicit = read("DATABASE_URL") || read("PG_CONNECTION_STRING");
+    if (explicit) return explicit;
+    const url = new URL(runtimeDefaults().postgresFallback);
+    url.hostname = read("POSTGRES_HOST") ?? url.hostname;
+    url.port = read("POSTGRES_PORT") ?? url.port;
+    if (read("POSTGRES_USER") !== undefined) url.username = encodeURIComponent(read("POSTGRES_USER")!);
+    if (read("POSTGRES_PASSWORD") !== undefined) url.password = encodeURIComponent(read("POSTGRES_PASSWORD")!);
+    return url.toString();
+  },
   pgSchema: () => read("PG_SCHEMA") || "public",
   queryBase: () => read("DATA_QUERY_BASE_URL"),
   queryTimeout: () => parseInt(read("DATA_QUERY_TIMEOUT") || "30000", 10),
   queryKey: () => read("DATA_QUERY_API_KEY"),
+  /** Seals the scheduled-task credentials kept in Postgres; only an edition that issues credentials needs it. */
+  scheduledCredentialSecret: () => read("ONTOMATO_MODEL_RUNTIME_TOKEN"),
   subQuestionInterval: (fallback: number | undefined) =>
     nonNegative(read("SUB_QUESTION_QUERY_INTERVAL_MS"), fallback),
   reportCooldown: (fallback: number | undefined) =>

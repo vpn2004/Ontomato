@@ -51,7 +51,7 @@ function product(t, { env = "FOO=bar\n", venv = true } = {}) {
   });
   chmodSync(join(root, "fake-mvnw"), 0o755);
   mkdirSync(appDir, { recursive: true });
-  if (env !== null) writeFileSync(join(appDir, ".env"), env);
+  if (env !== null) writeFileSync(join(root, ".env"), env);
   // The venv Python is the real interpreter, because dev-java runs the shared sync through it; its
   // recorded requirements hash matches, so no install runs.
   if (venv) {
@@ -72,12 +72,10 @@ function product(t, { env = "FOO=bar\n", venv = true } = {}) {
 }
 const finish = (child) => new Promise((resolve) => child.once("close", (code, signal) => resolve({ code, signal })));
 
-test(".env is read literally, split at the first =, blank keys and # lines skipped", () => {
-  assert.deepEqual(readDotEnv("# note\n\nA=1\nB=a b=c\n=skip\nBARE\n#C=3\n"), { A: "1", B: "a b=c", BARE: "" });
-});
-
-test("CRLF only loses the line terminator: value spaces and further = survive", () => {
-  assert.deepEqual(readDotEnv("# site\r\nA=1\r\nB=a b=c\r\nC= \r\nBARE\r\n"), { A: "1", B: "a b=c", C: " ", BARE: "" });
+test("the shared .env supports quotes and keeps LDAP username placeholders literal", () => {
+  assert.deepEqual(readDotEnv("# note\r\nLDAP_USER_DN='uid=${username},dc=example'\r\nTOKEN=abc=def\nEMPTY=\n"), {
+    LDAP_USER_DN: "uid=${username},dc=example", TOKEN: "abc=def", EMPTY: "",
+  });
 });
 
 test("the venv Python and the Maven wrapper follow the platform layout", () => {
@@ -89,18 +87,18 @@ test("the venv Python and the Maven wrapper follow the platform layout", () => {
   assert.equal(mavenWrapper(appDir, "win32"), join(appDir, "mvnw.cmd"));
 });
 
-test("Windows merges case-insensitive names once, the file value winning, and keeps one PATH", () => {
+test("Windows merges case-insensitive names once, the process value winning, and keeps one PATH", () => {
   const merged = mergeEnvironment({ Path: "C:\\inherited", TEMP: "t" }, { PATH: "C:\\file", TEMP: "file" }, "win32");
-  assert.deepEqual(merged, { PATH: "C:\\file", TEMP: "file" });
+  assert.deepEqual(merged, { Path: "C:\\inherited", TEMP: "t" });
   prependPythonPath(merged, "C:\\venv\\Scripts", "win32");
-  assert.deepEqual(merged, { PATH: ["C:\\venv\\Scripts", "C:\\file"].join(delimiter), TEMP: "file" });
+  assert.deepEqual(merged, { Path: ["C:\\venv\\Scripts", "C:\\inherited"].join(delimiter), TEMP: "t" });
 });
 
 test("POSIX keeps PATH case-sensitive and a custom Path does not touch it", () => {
   const merged = mergeEnvironment({ PATH: "/usr/bin", Path: "/custom" }, { Path: "/file" }, "linux");
-  assert.deepEqual(merged, { PATH: "/usr/bin", Path: "/file" });
+  assert.deepEqual(merged, { PATH: "/usr/bin", Path: "/custom" });
   prependPythonPath(merged, "/repo/.venv/bin", "linux");
-  assert.deepEqual(merged, { PATH: ["/repo/.venv/bin", "/usr/bin"].join(delimiter), Path: "/file" });
+  assert.deepEqual(merged, { PATH: ["/repo/.venv/bin", "/usr/bin"].join(delimiter), Path: "/custom" });
 });
 
 test("a Windows .cmd wrapper receives arguments, cwd and exit code through cmd.exe", windowsOnly, async (t) => {
@@ -173,7 +171,7 @@ test("without a host python3 the venv setup stops with the Python requirement", 
   assert.equal(existsSync(join(fx.appDir, ".venv/requirements.sha256")), false);
 });
 
-test("the wrapper gets the reactor argv, profile, user args, .env over inherited env, venv PATH and its exit code comes back", posixOnly, async (t) => {
+test("the wrapper gets the reactor argv, profile, user args, process env over .env, venv PATH and its exit code comes back", posixOnly, async (t) => {
   const fx = product(t, { env: "# site\nSPACED=a b=c\nSHARED=file\nBARE\n" });
   const child = startDevJava({ ...fx.options, profiles: ["dev-override"] }, ["-o", "-Dx=y"],
     { ...fx.inherited, SHARED: "inherited", KEEP: "k", FAKE_EXIT: "3" });
@@ -181,7 +179,7 @@ test("the wrapper gets the reactor argv, profile, user args, .env over inherited
   assert.equal(read(fx.record), [
     `cwd=${fx.root}`,
     ...["-B", "-ntp", "-DskipTests", "-pl", "apps/data-engine", "-am", "-Pdev-override", "spring-boot:run", "-o", "-Dx=y"].map((a) => `arg=${a}`),
-    "SPACED=a b=c", "SHARED=file", "KEEP=k", "BARE=", `PATH0=${join(fx.appDir, ".venv/bin")}`, "",
+    "SPACED=a b=c", "SHARED=inherited", "KEEP=k", "BARE=", `PATH0=${join(fx.appDir, ".venv/bin")}`, "",
   ].join("\n"));
 });
 

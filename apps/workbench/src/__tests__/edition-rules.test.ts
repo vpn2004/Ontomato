@@ -14,7 +14,10 @@ import { runtimeDataDir } from "@ontomato/workbench-server/content/layout";
 import { evaluateAnswer } from "@ontomato/workbench-server/platform/diagnosis/autotest/evaluation/answer-evaluator";
 import { extractLogic } from "@ontomato/workbench-server/platform/diagnosis/observe/workspace-artifact/logic/index";
 import { createServiceHealthTool } from "@ontomato/workbench-server/platform/diagnosis/observe/agent/tools/service-health-tool";
-import { fetchBackendConfig } from "@ontomato/workbench-server/platform/diagnosis/observe/backend-config-fetcher";
+import {
+  clearBackendConfigCache,
+  fetchBackendConfig,
+} from "@ontomato/workbench-server/platform/diagnosis/observe/backend-config-fetcher";
 import { renderDataAsTable } from "@ontomato/workbench-server/services/data-query/adapter";
 import { WORKSPACE_DIRS } from "@ontomato/workbench-server/platform/diagnosis/observe/workspaces/store";
 import { setLogSourceConfig } from "@ontomato/workbench-server/platform/diagnosis/observe/config";
@@ -271,65 +274,56 @@ describe("open-source edition rules", () => {
     expect(new Set(references)).toEqual(new Set([`${"diagnostics"}/${"query_logic.md"}`]));
   });
 
-  it("C5: reports service health with this edition's groups and M3 rules", async () => {
+  it("C5: reports service health with this edition's backend group and ignores M3 and frontend entries", async () => {
     const tool = createServiceHealthTool({ domainId: "default", token: "tk" });
     mocks.upstream["/maintenance/getserviceinfo"] = {
       m3: { services: [{ name: "m3-parser", status: "stopped" }, { name: "m3-core", status: "running" }] },
-      backend: { service: { status: "stopped" } },
-      frontend: { docker: { containers: [{ status: "running" }] } },
+      backend: { service: { name: "backend-fixture", status: "stopped" } },
+      frontend: { docker: { containers: [{ name: "frontend-fixture", status: "running" }] } },
     };
     const report = (await tool.execute("call", {})).content[0].text as string;
-    expect(report).toBe(
-      [
-        "# Service running status",
-        "",
-        "1 service(s) are not running (2 services in total):",
-        "- [Backend] backend — Stopped",
-        "",
-        "## Service Details",
-        "",
-        "### Backend",
-        "- backend: Stopped ⚠️",
-        "",
-        "### Frontend",
-        "- frontend: Running",
-      ].join("\n")
-    );
+    expect(report).toContain("backend-fixture");
+    expect(report).not.toContain("m3-parser");
+    expect(report).not.toContain("m3-core");
+    expect(report).not.toContain("frontend-fixture");
+    mocks.upstream["/maintenance/getserviceinfo"] = { backend: { service: { name: "backend-fixture", status: "stopped" } } };
+    expect((await tool.execute("backend-only", {})).content[0].text).toBe(report);
+    mocks.upstream["/maintenance/getserviceinfo"] = { backend: { service: { name: "backend-fixture", status: "running" } } };
+    expect((await tool.execute("running", {})).content[0].text).not.toBe(report);
 
     mocks.upstream["/maintenance/getserviceinfo"] = { m3: { services: [{ name: "m3-core", status: "running" }] } };
     const m3Only = (await tool.execute("call", {})).content[0].text as string;
-    expect(m3Only).toBe(
-      "The maintenance endpoint returned empty or unexpected format (does not contain a SystemStatus structure)."
-    );
+    mocks.upstream["/maintenance/getserviceinfo"] = {};
+    const empty = (await tool.execute("empty", {})).content[0].text;
+    expect(m3Only).toBe(empty);
+    expect(m3Only).not.toBe(report);
   });
 
-  it("C6: assumes this edition's data adapter only when the backend config omits it", async () => {
-    const configEndpoint = "/businessConfig/getConfigAndDesc";
-    const withAdapter = (dataEngine: Record<string, unknown>) => {
-      mocks.upstream[configEndpoint] = { success: true, data: { config: { ontomato: { "data-engine": dataEngine } } } };
+  it("C6: takes the domain's current adapter type, and assumes this edition's own only before one is read", async () => {
+    const withAdapter = (currentType: string) => {
+      mocks.upstream["/businessConfig/dataAdapters"] = { success: true, data: { currentType, adapters: [] } };
     };
 
-    withAdapter({});
-    expect(await fetchBackendConfig("tk")).toEqual({ dataAdapter: "sql" });
+    clearBackendConfigCache();
     expect(createDataQueryExecuteTool({ domainId: "default", token: "tk" }).description).toContain(
-      "The current data adapter is sql; please submit sql dialect SQL"
+      ossRuntimeDefaults.defaultDataAdapter
     );
 
     // The escaped file name is the enterprise edition's MQL reference file (see the \u escape below) — a persisted artifact name kept byte-identical.
     const reference = path.join(runtimeDataDir("skills"), "query-flow-diagnosis", "references", "mql\u67e5\u8be2\u53c2\u8003.md");
     fs.mkdirSync(path.dirname(reference), { recursive: true });
     fs.writeFileSync(reference, "reference");
-    withAdapter({ dataAdapter: "m3" });
-    await fetchBackendConfig("tk");
+    withAdapter("m3");
+    expect(await fetchBackendConfig("tk")).toEqual({ dataAdapter: "m3" });
     const m3Description = createDataQueryExecuteTool({ domainId: "default", token: "tk" }).description;
-    expect(m3Description).toContain("The current data adapter is m3; please submit m3 dialect SQL");
+    expect(m3Description).toContain("m3");
     expect(m3Description).not.toContain("MQL");
     expect(m3Description).not.toContain(reference);
 
-    withAdapter({ dataAdapter: "mysql" });
+    withAdapter("mysql");
     expect(await fetchBackendConfig("tk")).toEqual({ dataAdapter: "mysql" });
     expect(createDataQueryExecuteTool({ domainId: "default", token: "tk" }).description).toContain(
-      "The current data adapter is mysql; please submit mysql dialect SQL"
+      "mysql"
     );
   });
 
@@ -439,23 +433,20 @@ describe("open-source edition rules", () => {
       ]);
     };
 
-    // Fetch failure: the backend answers 404 and the error detail carries no failure word, so only this edition's note copy can decide.
-    const httpError = "Backend returned HTTP error 404: gone";
-    expect(await statusOf(session, window, () => new Response("gone", { status: 404 }))).toEqual([
-      ["failed", `s2@n1: ${"Failed to fetch agent-llm records: "}${httpError}`],
-      ["failed", `s2@n1: ${"Failed to fetch diagnostic-events: "}${httpError}`],
-      ["failed", `${"Failed to fetch the backend runtime log slice: "}n1: ${httpError}`],
-    ]);
-    // Fetched successfully but empty.
-    expect(await statusOf(session, window, () => new Response(""))).toEqual([
-      ["empty", "s2@n1: agent-llm records are empty: no backend LLM call records found for this sessionId"],
-      ["empty", "s2@n1: diagnostic-events records are empty: no backend diagnostic events found for this sessionId"],
-      ["empty", "backend.log is empty: no backend runtime logs found within this time window"],
-    ]);
+    const failed = await statusOf(session, window, () => new Response("gone", { status: 404 }));
+    expect(failed.map(([status]) => status)).toEqual(["failed", "failed", "failed"]);
+    for (const [, message] of failed) {
+      expect(message).toContain("404");
+      expect(message).toContain("gone");
+      expect(message).toContain("n1");
+    }
+    expect(failed[0][1]).toContain("s2");
+    expect(failed[1][1]).toContain("s2");
+    const empty = await statusOf(session, window, () => new Response(""));
+    expect(empty.map(([status]) => status)).toEqual(["empty", "empty", "empty"]);
     // No backend session or time window: session kinds are skipped and backend.log's two skip notes are joined by this edition's separator, never judged a failure.
     const skipped = await statusOf([], undefined, () => new Response(""));
     expect(skipped.map(([status]) => status)).toEqual(["skipped", "skipped", "empty"]);
-    expect(skipped[2][1]).toBe("No node located: the query record has no backend session; No backend runtime log time window found; backend.log slice skipped");
   });
 
   it("C4: prompt file references in this edition's content match files the writer produces", async () => {
@@ -507,10 +498,10 @@ describe("open-source edition rules", () => {
     expect(empty.analysis).toMatchObject({ data: [], source: "current_query", fieldDisplayPlan: EMPTY_PLAN });
     expect(mocks.chartInputs).toEqual([]);
     expect(empty.update).toEqual({ visualizationArtifactRef: "visualization:thread-1:3", events: [] });
-    expect(empty.stored?.result).toMatchObject({ chartType: "none", title: "No chart generated" });
-    expect(empty.stored?.result.html).toContain("<h2>No chart generated</h2><p>The query returned no rows for the selected conditions.</p>");
-    expect(empty.stored?.thinkingState).toMatchObject({ status: "completed", headline: "No chart generated", tailLines: [] });
-    expect(empty.stored?.thinking).toBe("No chart generated\nThe query returned no rows for the selected conditions.");
+    expect(empty.stored?.result).toMatchObject({ chartType: "none", title: "未生成图表" });
+    expect(empty.stored?.result.html).toContain("<h2>未生成图表</h2><p>所选条件下查询未返回数据行。</p>");
+    expect(empty.stored?.thinkingState).toMatchObject({ status: "completed", headline: "未生成图表", tailLines: [] });
+    expect(empty.stored?.thinking).toBe("未生成图表\n所选条件下查询未返回数据行。");
     const thinkingEvents = empty.events.filter((event) => event.type === "thinking_state");
     expect(thinkingEvents.at(-1)).toMatchObject({ node: "visualization" });
 

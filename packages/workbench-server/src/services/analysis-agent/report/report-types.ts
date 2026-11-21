@@ -4,6 +4,7 @@ import type { AnalysisChartResult, ProvenanceInfo } from "@ontomato/contracts/an
  */
 
 import type { AnalysisEvidence } from "../runtime/evidence-types";
+import type { ResultTruncation } from "@ontomato/contracts/query-execution";
 
 /**
  * Dimension report generation result (with source tracing)
@@ -56,6 +57,8 @@ export interface DimensionReportParams {
  * Multi-dimension summary parameters
  */
 export interface MultiDimensionSummaryParams {
+  /** Inherited from the evidence used by the dimension reports, including empty partial datasets. */
+  truncation?: ResultTruncation;
   /** All dimension reports */
   dimensionReports: Array<{
     dimensionName: string;

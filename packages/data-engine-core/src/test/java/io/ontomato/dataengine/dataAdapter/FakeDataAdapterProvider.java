@@ -40,8 +40,8 @@ public class FakeDataAdapterProvider implements DataAdapterProvider {
 	}
 
 	@Override
-	public boolean sql() {
-		return !fields.isEmpty();
+	public boolean requiresJoinFields() {
+		return !"m3".equals(type) && !"neo4j".equals(type);
 	}
 
 	@Override

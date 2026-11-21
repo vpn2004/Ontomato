@@ -27,7 +27,7 @@ import { createLogger } from "../../../../logging/logger";
 import { diagnosisManager } from "./pi-agent";
 
 import { SESSION_CONTEXT_PAGES, normalizeSessionContext } from "./session-types";
-import { subscribeResponseStream, writeUnavailableStream } from "./sse-bridge";
+import { subscribeResponseStream, writeUnavailableStream } from "../../../../utils/sse";
 import knowledgeRouter from "./knowledge-routes";
 
 const router: ReturnType<typeof Router> = Router();

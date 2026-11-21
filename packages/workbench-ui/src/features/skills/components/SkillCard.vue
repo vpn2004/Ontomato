@@ -47,6 +47,7 @@ function formatNumber(num?: number): string {
       <div class="skill-title-row">
         <div class="skill-title-info">
           <span class="skill-title">{{ skill.title || skill.id }}</span>
+          <el-tag v-if="skill.isPublic" size="small" type="info">{{ t("admin.publicSkill") }}</el-tag>
           <el-tag
             :type="skill.type === 'executable' ? 'primary' : 'warning'"
             size="small"
@@ -79,12 +80,12 @@ function formatNumber(num?: number): string {
                   {{ t("common.debug") }}
                 </el-dropdown-item>
                 <el-dropdown-item @click="emit('edit', skill.id)">
-                  {{ t("common.edit") }}
+                  {{ skill.isPublic ? t("common.view") : t("common.edit") }}
                 </el-dropdown-item>
                 <el-dropdown-item @click="emit('export', skill.id)">
                   {{ t("common.export") }}
                 </el-dropdown-item>
-                <el-dropdown-item divided @click="emit('delete', skill.id)">
+                <el-dropdown-item v-if="!skill.isPublic" divided @click="emit('delete', skill.id)">
                   {{ t("common.delete") }}
                 </el-dropdown-item>
               </el-dropdown-menu>

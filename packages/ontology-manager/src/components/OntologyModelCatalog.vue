@@ -1,14 +1,16 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import { ElButton, ElEmpty, ElInput, vLoading } from "element-plus";
-import { ChevronRight, Plus, Search } from "lucide-vue-next";
+import { ElButton, ElEmpty, ElInput, ElOption, ElSelect, vLoading } from "element-plus";
+import { ChevronDown, ChevronRight, ChevronUp, Plus, Search } from "lucide-vue-next";
 import type { OntologyAttribute, OntologyObject, OntologyRelation } from "../api";
 import OntologyAttributeCreateDialog from "./OntologyAttributeCreateDialog.vue";
+import OntologyAttributeEditor from "./OntologyAttributeEditor.vue";
 import OntologyRelationCreateDialog from "./OntologyRelationCreateDialog.vue";
 import type { ModelResource } from "../workspace";
-import { useManagerClient, useOntologyText } from "../context";
+import { useManagerAdapter, useManagerClient, useOntologyText } from "../context";
 
 const { ot } = useOntologyText();
+const { capabilities } = useManagerAdapter();
 const { loadOntology } = useManagerClient();
 
 const props = defineProps<{ resource: ModelResource }>();
@@ -16,11 +18,12 @@ const props = defineProps<{ resource: ModelResource }>();
 const emit = defineEmits<{
   createObject: [];
   editObject: [className: string];
-  editAttribute: [className: string, attributeName: string];
   editRelation: [relationship: string];
 }>();
 
 const query = ref("");
+const ownerFilter = ref("");
+const expandedAttributeKey = ref("");
 const loading = ref(false);
 const objects = ref<OntologyObject[]>([]);
 const relations = ref<OntologyRelation[]>([]);
@@ -69,6 +72,7 @@ const attributeRows = computed(() =>
   objects.value
     .flatMap((object) => object.attrs.map((attribute) => ({ object, attribute })))
     .filter(({ object, attribute }) => {
+      if (ownerFilter.value && object.className !== ownerFilter.value) return false;
       const text =
         `${attribute.showName} ${attribute.name} ${attribute.type} ${object.showName}`.toLowerCase();
       return !normalizedQuery.value || text.includes(normalizedQuery.value);
@@ -95,6 +99,19 @@ function attributeLabel(attribute: OntologyAttribute) {
   return attribute.showName || attribute.name;
 }
 
+function attributeKey(className: string, attributeName: string) {
+  return `${className}-${attributeName}`;
+}
+
+function isAttributeExpanded(row: { object: OntologyObject; attribute: OntologyAttribute }) {
+  return expandedAttributeKey.value === attributeKey(row.object.className, row.attribute.name);
+}
+
+function toggleAttribute(row: { object: OntologyObject; attribute: OntologyAttribute }) {
+  const key = attributeKey(row.object.className, row.attribute.name);
+  expandedAttributeKey.value = expandedAttributeKey.value === key ? "" : key;
+}
+
 async function loadCatalog() {
   loading.value = true;
   try {
@@ -111,7 +128,7 @@ async function loadCatalog() {
 
 async function handleAttributeCreated(className: string, attributeName: string) {
   await loadCatalog();
-  emit("editAttribute", className, attributeName);
+  expandedAttributeKey.value = attributeKey(className, attributeName);
 }
 
 async function handleRelationCreated(relationship: string) {
@@ -131,7 +148,7 @@ onMounted(() => {
         <h1>{{ meta.title }}</h1>
         <p>{{ meta.description }}</p>
       </div>
-      <div class="title-actions">
+      <div v-if="capabilities.schemaWrite" class="title-actions">
         <el-button
           v-if="resource === 'objects'"
           type="primary"
@@ -156,6 +173,20 @@ onMounted(() => {
 
     <div class="catalog-toolbar">
       <el-input v-model="query" :prefix-icon="Search" :placeholder="meta.search" clearable />
+      <el-select
+        v-if="resource === 'attributes'"
+        v-model="ownerFilter"
+        class="owner-filter"
+        :placeholder="ot('allObjectTypes')"
+        clearable
+      >
+        <el-option
+          v-for="object in objects"
+          :key="object.className"
+          :label="`${object.showName} (${object.className})`"
+          :value="object.className"
+        />
+      </el-select>
       <span class="resource-count">
         {{
           resource === "objects"
@@ -212,30 +243,44 @@ onMounted(() => {
         <div
           v-for="row in attributeRows"
           :key="`${row.object.className}-${row.attribute.name}`"
-          class="resource-table-row attribute-grid"
-          role="button"
-          tabindex="0"
-          @click="emit('editAttribute', row.object.className, row.attribute.name)"
-          @keydown.enter.prevent="emit('editAttribute', row.object.className, row.attribute.name)"
-          @keydown.space.prevent="emit('editAttribute', row.object.className, row.attribute.name)"
+          class="attribute-row-group"
+          :class="{ expanded: isAttributeExpanded(row) }"
         >
-          <span class="resource-name">
-            <span>
-              <strong>{{ attributeLabel(row.attribute) }}</strong>
-              <small>{{ row.attribute.name }}</small>
-            </span>
-          </span>
-          <button
-            class="inline-link"
-            @click.stop="emit('editObject', row.object.className)"
-            @keydown.stop
+          <div
+            class="resource-table-row attribute-grid"
+            role="button"
+            tabindex="0"
+            :aria-expanded="isAttributeExpanded(row)"
+            @click="toggleAttribute(row)"
+            @keydown.enter.prevent="toggleAttribute(row)"
+            @keydown.space.prevent="toggleAttribute(row)"
           >
-            {{ row.object.showName }}
-          </button>
-          <span>{{ row.attribute.type }}</span>
-          <span>{{ row.attribute.bizzkeyBool ? ot("yes") : "-" }}</span>
-          <span>{{ row.attribute.primaryKey ? ot("yes") : "-" }}</span>
-          <ChevronRight :size="16" class="row-chevron" />
+            <span class="resource-name">
+              <span>
+                <strong>{{ attributeLabel(row.attribute) }}</strong>
+                <small>{{ row.attribute.name }}</small>
+              </span>
+            </span>
+            <button
+              class="inline-link"
+              @click.stop="emit('editObject', row.object.className)"
+              @keydown.stop
+            >
+              {{ row.object.showName }}
+            </button>
+            <span>{{ row.attribute.type }}</span>
+            <span>{{ row.attribute.bizzkeyBool ? ot("yes") : "-" }}</span>
+            <span>{{ row.attribute.primaryKey ? ot("yes") : "-" }}</span>
+            <ChevronUp v-if="isAttributeExpanded(row)" :size="16" class="row-chevron" />
+            <ChevronDown v-else :size="16" class="row-chevron" />
+          </div>
+          <OntologyAttributeEditor
+            v-if="isAttributeExpanded(row)"
+            :class-name="row.object.className"
+            :attribute="row.attribute"
+            @saved="loadCatalog"
+            @deleted="loadCatalog"
+          />
         </div>
         <el-empty
           v-if="!loading && attributeRows.length === 0"
@@ -291,11 +336,13 @@ onMounted(() => {
 .model-catalog {
   /* The value is supplied by the host presentation (open source: auto). */
   min-height: var(--manager-model-catalog-min-height);
+  flex-shrink: 0;
   padding: var(--spacing-xl) var(--spacing-2xl);
   background: var(--el-bg-color);
 }
 .catalog-titlebar {
   display: flex;
+  flex-wrap: wrap;
   min-height: 76px;
   align-items: center;
   justify-content: space-between;
@@ -320,6 +367,7 @@ p {
 }
 .catalog-toolbar {
   display: flex;
+  flex-wrap: wrap;
   min-height: 54px;
   align-items: center;
   gap: var(--spacing-md);
@@ -331,6 +379,9 @@ p {
 }
 .catalog-toolbar :deep(.el-input) {
   width: 260px;
+}
+.catalog-toolbar .owner-filter {
+  width: 220px;
 }
 .resource-count {
   color: var(--el-text-color-secondary);
@@ -345,6 +396,7 @@ p {
 }
 .resource-table-head,
 .resource-table-row {
+  min-width: 0;
   display: grid;
   width: 100%;
   align-items: center;
@@ -377,6 +429,19 @@ p {
   border-bottom: 0;
 }
 .resource-table-row:hover {
+  background: var(--el-fill-color-light);
+}
+.resource-table-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attribute-row-group {
+  border-bottom: 1px solid var(--el-border-color-light);
+}
+.attribute-row-group:last-child {
+  border-bottom: 0;
+}
+.attribute-row-group .resource-table-row {
+  border-bottom: 0;
+}
+.attribute-row-group.expanded .resource-table-row {
   background: var(--el-fill-color-light);
 }
 .object-grid {
@@ -422,6 +487,9 @@ p {
   white-space: nowrap;
 }
 .inline-link {
+  justify-self: start;
+  align-self: center;
+  max-width: 100%;
   overflow: hidden;
   padding: 0;
   border: 0;
@@ -449,13 +517,13 @@ p {
     font-size: var(--text-xl);
   }
   .object-grid {
-    grid-template-columns: minmax(190px, 1fr) 64px 20px;
+    grid-template-columns: minmax(0, 1fr) 64px 20px;
   }
   .attribute-grid {
-    grid-template-columns: minmax(190px, 1fr) minmax(100px, 1fr) 20px;
+    grid-template-columns: minmax(0, 1fr) minmax(80px, 0.7fr) 20px;
   }
   .relation-grid {
-    grid-template-columns: minmax(190px, 1fr) minmax(100px, 1fr) 20px;
+    grid-template-columns: minmax(0, 1fr) minmax(80px, 0.7fr) 20px;
   }
   .resource-table-head span:nth-child(2),
   .resource-table-head span:nth-child(4),
@@ -463,6 +531,8 @@ p {
   .resource-table-row > span:nth-child(4) {
     display: none;
   }
+  .attribute-grid > span:nth-child(3), .attribute-grid > span:nth-child(5) { display: none; }
+  .attribute-grid.resource-table-head > span:nth-child(2) { display: block; }
 }
 @container ontology-manager (max-width: 560px) {
   .catalog-titlebar {
@@ -470,12 +540,14 @@ p {
     flex-direction: column;
   }
   .catalog-titlebar :deep(.el-button),
-  .catalog-toolbar :deep(.el-input) {
+  .catalog-toolbar :deep(.el-input),
+  .catalog-toolbar .owner-filter {
     width: 100%;
   }
   .catalog-toolbar {
     align-items: stretch;
     flex-direction: column;
   }
+  .title-actions { width: 100%; justify-content: flex-start; }
 }
 </style>

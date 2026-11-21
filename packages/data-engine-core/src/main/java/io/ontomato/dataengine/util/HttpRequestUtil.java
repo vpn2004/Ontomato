@@ -4,15 +4,18 @@ import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
 import com.alibaba.fastjson2.JSONWriter.Feature;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.ontomato.dataengine.bean.DslExecutionResult;
 import io.ontomato.dataengine.config.DataRagConfig;
 import io.ontomato.dataengine.dao.VectorResourceDao;
 import io.ontomato.dataengine.dataAdapter.DataAdapter;
+import io.ontomato.dataengine.dataAdapter.DataAdapterCapabilities;
+import io.ontomato.dataengine.dataAdapter.DslContractViolationException;
+import io.ontomato.dataengine.dataAdapter.DslExecutionMode;
+import io.ontomato.dataengine.dataAdapter.DslGrammarValidator;
 import io.ontomato.dataengine.service.sys.bean.permission.UserDataPermission;
 
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.core.io.ByteArrayResource;
 import org.springframework.http.*;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
@@ -24,6 +27,8 @@ import java.io.FileOutputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -31,25 +36,13 @@ import java.util.Set;
 @Slf4j
 public class HttpRequestUtil {
 
-	public enum M3Mode {
-		V0("V0"),// 0: raw mode
-		V1("V1"),// 1: data movement resolution mode
-		;
-		
-		private String type;
-		
-		M3Mode(String type) {
-			this.type = type;
-		}
-		
-		public String getType() {
-			return this.type;
-		}
-	}
+    /** Compatibility transport used only by the historical M3 schema hooks. */
+    public static JSONArray getExecMQL(DataRagConfig dataRagConfig, String mql) {
+        throw new UnsupportedOperationException("The v4.1 adapter contract no longer carries the legacy M3 schema transport");
+    }
 
-    
     // Returns [execution result without permission, row permission execution result]; each item contains the query data or failure fact and the original DSL
-    public static DslExecutionResult[] getM3Data(
+    public static DslExecutionResult[] executeDsl(
     		DataRagConfig dataRagConfig, 
     		DataAdapter adapter, 
     		String queryJson, 
@@ -58,7 +51,7 @@ public class HttpRequestUtil {
     		Map<String, Object> jsonRule,
     		VectorResourceDao vectorResourceDao, 
     		UserDataPermission permission,
-    		M3Mode m3Mode,
+    		DslExecutionMode mode,
     		String domainId) {
     	
     	List<Map<String, Object>> classDefs = (List<Map<String, Object>>)jsonRule.get("classDef");
@@ -66,9 +59,21 @@ public class HttpRequestUtil {
 		List<JSONObject> dsls = JSON.parseArray(queryJson, JSONObject.class);
 		JSONObject originDsl = dsls.get(0);
 
+		// Grammar gate: the DSL is validated once, before dispatch, so ABC, the legacy pipeline and MCP all
+		// pass the same door and an internally contradictory construct fails with a located violation
+		// instead of reaching an adapter.
+		try {
+			DslGrammarValidator.validate(originDsl, classDefs);
+		} catch (DslContractViolationException e) {
+			log.warn("[" + sessionId + "] " + e.getMessage());
+			DslExecutionResult failResult = failedDslExecution(e, new ArrayList<String>());
+			failResult.data().put("dsl", originDsl);
+			return new DslExecutionResult[] {failResult, failResult.copy()};
+		}
+
 		Object[] dsl_selectAsFilePathsMap_vectorResourceAsSet;
 		try {
-			dsl_selectAsFilePathsMap_vectorResourceAsSet = DslUtil.splitToVector(queryJson, classDefs, vectorResourceDao, domainId, adapter.useM3());
+			dsl_selectAsFilePathsMap_vectorResourceAsSet = DslUtil.splitToVector(queryJson, classDefs, vectorResourceDao, domainId);
 		} catch (Exception e) {
 			log.error("Failed to process vector: " + e.getMessage(), e);
 			DslExecutionResult failResult = DslExecutionResult.failure(new JSONObject(), e);
@@ -83,11 +88,11 @@ public class HttpRequestUtil {
 		JSONObject rowPermissionDsl = rowPermissionDslResult[0] == null ? null : (JSONObject)rowPermissionDslResult[0];
 		boolean addPermission = rowPermissionDslResult[1] == null ? false : (boolean)rowPermissionDslResult[1];
         
-        DslExecutionResult rowPermissionResult = getM3Data(dataRagConfig, adapter, rowPermissionDsl, sessionId, selectAsFilePathsMap, vectorResourceAsSet, m3Mode, jsonRule);
+        DslExecutionResult rowPermissionResult = executeOne(dataRagConfig, adapter, rowPermissionDsl, sessionId, selectAsFilePathsMap, vectorResourceAsSet, mode);
         DslExecutionResult result = DslExecutionResult.success(new JSONObject());
         if (!onlySearchPermissionData) { // when data without permission is needed
         	if (addPermission) { // the DSL after adding row permission differs from the DSL without permission
-				result = getM3Data(dataRagConfig, adapter, originDsl, sessionId, selectAsFilePathsMap, vectorResourceAsSet, m3Mode, jsonRule);
+				result = executeOne(dataRagConfig, adapter, originDsl, sessionId, selectAsFilePathsMap, vectorResourceAsSet, mode);
         	} else { // no difference
 				result = rowPermissionResult.copy();
         	}
@@ -110,7 +115,7 @@ public class HttpRequestUtil {
 
 		Object[] dsl_selectAsFilePathsMap_vectorResourceAsSet;
 		try {
-			dsl_selectAsFilePathsMap_vectorResourceAsSet = DslUtil.splitToVector(queryJson, classDefs, vectorResourceDao, domainId, adapter.useM3());
+			dsl_selectAsFilePathsMap_vectorResourceAsSet = DslUtil.splitToVector(queryJson, classDefs, vectorResourceDao, domainId);
 		} catch (RuntimeException e) {
 			throw e;
 		} catch (Exception e) {
@@ -122,22 +127,43 @@ public class HttpRequestUtil {
 		JSONObject rowPermissionDsl = rowPermissionDslResult[0] == null ? null : (JSONObject)rowPermissionDslResult[0];
     	
     	Set<String> nodeIds = new HashSet<String>();
-    	String nodeDslStr = DslUtil.fromQuestionDslToNodeDsl("[" + JSON.toJSONString(rowPermissionDsl, Feature.WriteMapNullValue) + "]");
+        String nodeDslStr = DslUtil.fromQuestionDslToNodeDsl(
+                "[" + JSON.toJSONString(rowPermissionDsl, Feature.WriteMapNullValue) + "]", classDefs, adapter);
+        Map<String, String> evidenceClasses = new HashMap<>();
+        JSONArray patterns = rowPermissionDsl.getJSONObject("answer").getJSONArray("steps").getJSONObject(0)
+                .getJSONObject("graph").getJSONArray("patterns");
+        for (int i = 0; i < patterns.size(); i++) {
+            JSONArray objects = patterns.getJSONObject(i).getJSONArray("objects");
+            if (objects == null) continue;
+            for (int j = 0; j < objects.size(); j++) {
+                JSONObject object = objects.getJSONObject(j);
+                evidenceClasses.put(object.getString("variable") + "_id", object.getString("class"));
+            }
+        }
         try {
-			String nodeResp = getData(adapter, nodeDslStr, null, M3Mode.V1, new ArrayList<String>());
+			String nodeResp = adapter.executeDsl(nodeDslStr, null, DslExecutionMode.OPTIMIZED, new ArrayList<String>());
         	for (Map map : JSON.parseArray(nodeResp, Map.class)) {
         		List answer = (List)map.get("answer");
-        		for (Object obj : answer) {
+				if (answer == null) continue;
+				for (Object obj : answer) {
         			Map m = (Map)obj;
         			for (Object k : m.keySet()) {
         				String key = (String)k;
         				if (key.endsWith("_id")) {
-        					nodeIds.add((String)m.get(k));
+							Object value = m.get(k);
+							if (value == null) continue;
+							String className = evidenceClasses.get(key);
+							if (className == null) {
+								throw new IllegalStateException("Backend evidence returned an unknown identity field: " + key);
+							}
+							nodeIds.add(adapter.encodeNodeReference(className, String.valueOf(value)));
         				}
         			}
         		}
         	}
-        } catch (Exception e) {}
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to query evidence: " + e.getMessage(), e);
+        }
         List<String> nodeList = new ArrayList<String>();
         if (nodeIds.size() > 100) {
         	for (String nodeId : nodeIds) {
@@ -152,24 +178,25 @@ public class HttpRequestUtil {
         return nodeList;
     }
     
-    private static DslExecutionResult getM3Data(
+    private static DslExecutionResult executeOne(
     		DataRagConfig dataRagConfig, 
     		DataAdapter adapter, 
     		JSONObject dsl, 
     		String sessionId, 
     		Map<String, List<String>> selectAsFilePathsMap, 
     		Set<String> vectorResourceAsSet,
-    		M3Mode m3Mode,
-    		Map<String, Object> jsonRule) {
+    		DslExecutionMode mode) {
     	
     	JSONObject dataMap = new JSONObject();
 		List<String> generatedMqls = new ArrayList<String>();
     	
 		try {
-			String JsonData = getData(adapter, "[" + JSON.toJSONString(dsl, Feature.WriteMapNullValue) + "]", sessionId, m3Mode, generatedMqls);
+			DataAdapterCapabilities capabilities = adapter.capabilities();
+			if (capabilities != null) capabilities.requireQuery();
+			String JsonData = adapter.executeDsl("[" + JSON.toJSONString(dsl, Feature.WriteMapNullValue) + "]", sessionId, mode, generatedMqls);
 			if (JsonData != null) {
-        	log.info("M3 returned data, sessionId-{}>>>:\n{}",sessionId,JsonData);
-            LogHelper.m3ReturnData(JsonData);
+        	log.info("Data source returned data, sessionId-{}>>>:\n{}",sessionId,JsonData);
+            LogHelper.dataSourceReturnData(JsonData);
             
             List<Map> listData = JSON.parseArray(JsonData, Map.class);
 
@@ -178,6 +205,8 @@ public class HttpRequestUtil {
                 for(Map mapData : listData){
                     List<Map> listAnswer = (List<Map>)mapData.get("answer");
                     if(listAnswer!=null && listAnswer.size()>0){
+                        // The nearest matched resource of each row, for ordering rows by similarity.
+                        Map<Map, Integer> rowRanks = new IdentityHashMap<Map, Integer>();
                         for(Map mapAnswer : listAnswer){
                         	// Remove the _.path field from the data returned by M3
                             if(mapAnswer.containsKey("_.path")){
@@ -189,15 +218,22 @@ public class HttpRequestUtil {
                             		List<String> paths = selectAsFilePathsMap.get(as);
                             		try {
                                         JSONArray array = DslUtil.parseVectorAttr(mapAnswer.get(as));
-                            			JSONArray newArray = new JSONArray();
+										List<JSONObject> matched = new ArrayList<JSONObject>();
                             			for (int i = 0; i < array.size(); i++) {
                                             JSONObject row = array.getJSONObject(i);
-                            				String path = row.getString("path");
-                            				if (paths.contains(path)) {
-                            					row.put("path", dataRagConfig.getCardBaseUrl() + "/vectorResource/resource/" + path);
-                            					newArray.add(row);
+											if (paths.contains(row.getString("path"))) {
+												matched.add(row);
                             				}
                             			}
+										// Nearest first, as the vector search ranked them.
+										matched.sort(Comparator.comparingInt(row -> paths.indexOf(row.getString("path"))));
+										JSONArray newArray = new JSONArray();
+										for (JSONObject row : matched) {
+											int rank = paths.indexOf(row.getString("path"));
+											rowRanks.merge(mapAnswer, rank, Math::min);
+											row.put("path", dataRagConfig.getCardBaseUrl() + "/vectorResource/resource/" + row.getString("path"));
+											newArray.add(row);
+										}
                             			mapAnswer.put(as, newArray);
                             		} catch (Exception e) {}
                             	} else {
@@ -214,6 +250,10 @@ public class HttpRequestUtil {
                             		} catch (Exception e) {}
                             	}
                             }
+                        }
+                        // A DSL with its own sort keeps the order it asked for.
+                        if (!rowRanks.isEmpty() && !hasOwnSort(dsl)) {
+							listAnswer.sort(Comparator.comparingInt(row -> rowRanks.getOrDefault(row, Integer.MAX_VALUE)));
                         }
                     }
                 }
@@ -257,6 +297,17 @@ public class HttpRequestUtil {
 		}
     }
 
+    /** Whether the step that produces the result names its own {@code sort}. */
+    static boolean hasOwnSort(JSONObject dsl) {
+		JSONArray steps = dsl == null || dsl.getJSONObject("answer") == null ? null : dsl.getJSONObject("answer").getJSONArray("steps");
+		if (steps == null || steps.isEmpty()) {
+			return false;
+		}
+		JSONObject output = steps.getJSONObject(steps.size() - 1).getJSONObject("output");
+		JSONArray sort = output == null ? null : output.getJSONArray("sort");
+		return sort != null && !sort.isEmpty();
+    }
+
     static DslExecutionResult failedDslExecution(Exception cause, List<String> generatedMqls) {
 		JSONObject dataMap = new JSONObject();
 		if (!generatedMqls.isEmpty()) {
@@ -269,11 +320,8 @@ public class HttpRequestUtil {
 		return DslExecutionResult.failure(dataMap, cause);
 	}
 
-    private static String getData(DataAdapter adapter, String queryJson, String sessionId, M3Mode m3Mode, List<String> generatedMqls) throws Exception {
-		return adapter.executeDsl(queryJson, sessionId, m3Mode, generatedMqls);
-    }
-    
     public static String getSampleDataByClassName(DataAdapter adapter, String className, List<String> attrs) {
+        adapter.capabilities().requireQuery();
     	String sampleDataDirName = "sampleData";
     	String sampleDataFileName = adapter.getSampleDataFileName(sampleDataDirName, className);
     	String sampleDataContent = getSampleDataByClassNameFromCache(sampleDataFileName);
@@ -325,69 +373,6 @@ public class HttpRequestUtil {
 		return null;
     }
 
-    public static JSONArray getExecMQL(DataRagConfig dataRagConfig, String mql) {
-        RestTemplate restTemplate = new RestTemplate();
-        MultiValueMap<String, String> formData = new LinkedMultiValueMap<>();
-        log.info(">>>m3 execution: " + mql);
-        formData.add("mql", mql);
-
-        HttpHeaders requestHeaders = new HttpHeaders();
-        requestHeaders.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
-        requestHeaders.add("Authorization",dataRagConfig.getM3auth());
-        HttpEntity<MultiValueMap<String, String>> requestEntity = new HttpEntity<>(formData, requestHeaders);
-
-        ResponseEntity<String> response = restTemplate.postForEntity(dataRagConfig.getM3SchemaUrl(), requestEntity, String.class);
-        String strResponseBody = response.getBody();
-        log.info("<<<<<m3 execution finished: " + mql);
-        JSONObject jsonResponse = JSON.parseObject(strResponseBody);
-        JSONArray data = jsonResponse.getJSONArray("message");
-        return data;
-    }
-    
-    public static JSONObject queryMql(DataRagConfig dataRagConfig, String mql) {
-    	RestTemplate restTemplate = new RestTemplate();
-    	MultiValueMap<String, String> formData = new LinkedMultiValueMap<>();
-    	log.info(">>>m3 execution: " + mql);
-        formData.add("mql", mql);
-        
-        HttpHeaders requestHeaders = new HttpHeaders();
-        requestHeaders.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
-        requestHeaders.add("Authorization",dataRagConfig.getM3auth());
-        HttpEntity<MultiValueMap<String, String>> requestEntity = new HttpEntity<>(formData, requestHeaders);
-        
-        ResponseEntity<String> response = restTemplate.postForEntity(dataRagConfig.getM3SchemaUrl(), requestEntity, String.class);
-        String strResponseBody = response.getBody();
-        log.info("<<<<<m3 execution finished: " + mql);
-        JSONObject jsonResponse = JSON.parseObject(strResponseBody);
-        return jsonResponse;
-    }
-
-    public static Map insertOrUpdateMQL(DataRagConfig dataRagConfig, String mql, List<List> listValues){
-        RestTemplate restTemplate = new RestTemplate();
-        log.info(">>>m3 execution: " + mql);
-
-        HttpHeaders requestHeaders = new HttpHeaders();
-        requestHeaders.add("Authorization",dataRagConfig.getM3auth());
-        requestHeaders.add("Content-Type", "application/json;charset=utf-8");
-
-        Map<String,Object> requestMap = new HashMap<>();
-        requestMap.put("mql",mql);
-        requestMap.put("values",listValues);
-        HttpEntity<Map<String,Object>> requestEntity = new HttpEntity<>(requestMap,requestHeaders);
-
-        ResponseEntity<String> responseEntity =  restTemplate.postForEntity(dataRagConfig.getM3SchemaUrl(), requestEntity,String.class);
-        String result = responseEntity.getBody();
-        ObjectMapper objectMapper = new ObjectMapper();
-        Map mapResult = null;
-        try {
-            mapResult = objectMapper.readValue(result, Map.class);
-        } catch (JsonProcessingException e) {
-            return null;
-        }
-
-        return mapResult;
-    }
-    
     public static String postProductionEnv(String url, Map<String, String> headers, Object param) throws Exception {
     	RestTemplate restTemplate = new RestTemplate();
 
@@ -404,6 +389,29 @@ public class HttpRequestUtil {
         return result;
     }
     
+    public static String postProductionEnvMultipart(String url, Map<String, String> headers, String fieldName, String filename, byte[] data) throws Exception {
+    	RestTemplate restTemplate = new RestTemplate();
+
+        HttpHeaders requestHeaders = new HttpHeaders();
+        requestHeaders.setContentType(MediaType.MULTIPART_FORM_DATA);
+        if (headers != null) {
+        	for (String key : headers.keySet()) {
+        		requestHeaders.add(key, headers.get(key));
+        	}
+        }
+        ByteArrayResource resource = new ByteArrayResource(data) {
+        	@Override
+        	public String getFilename() {
+        		return filename;
+        	}
+        };
+        MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
+        body.add(fieldName, resource);
+        HttpEntity<MultiValueMap<String, Object>> requestEntity = new HttpEntity<>(body, requestHeaders);
+        ResponseEntity<String> responseEntity = restTemplate.postForEntity(url, requestEntity, String.class);
+        return responseEntity.getBody();
+    }
+
     public static String getProductionEnv(String url, Map<String, String> headers) throws Exception {
     	RestTemplate restTemplate = new RestTemplate();
 

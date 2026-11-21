@@ -6,7 +6,19 @@ import { tApp } from "../../../i18n";
 interface SummaryInput {
   title: string;
   report: string;
+  userInstructions?: string;
+  cover?: { title: string; subtitle: string };
   sections: Array<{ id: string; heading: string; text: string; hasChart: boolean }>;
+}
+
+export function getPptDefaultInstructions(): string {
+  return tApp("analysis.delivery.ppt-summarizer.29").split("- sourceSectionIds")[0].trim();
+}
+
+export function buildPptSystemPrompt(instructions?: string): string {
+  const original = tApp("analysis.delivery.ppt-summarizer.29");
+  const contractStart = original.indexOf("- sourceSectionIds");
+  return `${instructions?.trim() || getPptDefaultInstructions()}\n\n${original.slice(contractStart)}`;
 }
 
 function extractJson(text: string): unknown {
@@ -58,7 +70,6 @@ function normalizeOutline(value: unknown, input: SummaryInput): PptSummaryOutlin
           };
         })
         .filter((slide): slide is PptSummarySlide => !!slide)
-        .slice(0, 10)
     : [];
   if (!slides.length) return null;
   return {
@@ -68,19 +79,55 @@ function normalizeOutline(value: unknown, input: SummaryInput): PptSummaryOutlin
   };
 }
 
-export async function summarizeReportForPpt(input: SummaryInput): Promise<PptSummaryOutline> {
+export async function summarizeReportForPpt(input: SummaryInput, signal?: AbortSignal): Promise<PptSummaryOutline> {
+  signal?.throwIfAborted();
+  // Reduce bounded batches across all source sections; never truncate old turns.
+  const pieces = input.sections.flatMap(section => {
+    const parts = [];
+    for (let offset = 0; offset < section.text.length || offset === 0; offset += 4000) {
+      parts.push({...section, text: section.text.slice(offset, offset + 4000)});
+    }
+    return parts;
+  });
+  if (JSON.stringify(pieces).length > 48000) {
+    const reduced: SummaryInput["sections"] = [];
+    let batch: SummaryInput["sections"] = [];
+    let size = 0;
+    const flush = async () => {
+      if (!batch.length) return;
+      const summary = await summarizeReportForPpt({...input, cover: undefined, report: "", sections: batch}, signal);
+      reduced.push(...summary.slides.map(slide => ({id: slide.sourceSectionIds[0] || batch[0].id,
+        heading: slide.title, text: [slide.takeaway, ...slide.bullets].join("\n"), hasChart: slide.visual === "chart"})));
+      batch = []; size = 0;
+    };
+    for (const piece of pieces) {
+      const length = JSON.stringify(piece).length;
+      if (size + length > 24000) await flush();
+      batch.push(piece); size += length;
+    }
+    await flush();
+    // A pathological model response must fail explicitly instead of recursing forever.
+    if (JSON.stringify(reduced).length >= JSON.stringify(pieces).length) throw new Error("PPT summary did not reduce the source content");
+    return summarizeReportForPpt({...input, report: "", sections: reduced}, signal);
+  }
+  input = {...input, report: "", sections: pieces};
   const model = await createModel({ temperature: 0.25, agentName: "PPT-ReportSummarizer" });
   const response = await model.invoke([
     {
       role: "system",
-      content: tApp("analysis.delivery.ppt-summarizer.29"),
+      content: buildPptSystemPrompt(input.userInstructions),
     },
     {
       role: "user",
       content: JSON.stringify(input),
     },
-  ]);
+  ], { signal });
+  signal?.throwIfAborted();
   const outline = normalizeOutline(extractJson(String(response.content || "")), input);
   if (!outline) throw new Error(tApp("analysis.delivery.ppt-summarizer.30"));
+  if (input.cover) {
+    if (input.cover.title.trim()) outline.title = input.cover.title.trim();
+    if (input.cover.subtitle.trim()) outline.subtitle = input.cover.subtitle.trim();
+  }
   return outline;
 }

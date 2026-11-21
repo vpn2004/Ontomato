@@ -2,6 +2,7 @@ package io.ontomato.dataengine.service.impl;
 
 import java.io.File;
 import java.io.FileOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -11,8 +12,10 @@ import java.util.UUID;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
+import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
+import com.alibaba.fastjson2.JSONWriter.Feature;
 import io.ontomato.dataengine.bean.OriginalQuestion;
 import io.ontomato.dataengine.bean.PythonExecuteResult;
 import io.ontomato.dataengine.bean.action.Action;
@@ -28,6 +31,8 @@ import io.ontomato.dataengine.core.bean.User;
 import io.ontomato.dataengine.dao.ActionDao;
 import io.ontomato.dataengine.dao.FunctionDao;
 import io.ontomato.dataengine.dao.KnowledgeDao;
+import io.ontomato.dataengine.dataAdapter.DataAdapter;
+import io.ontomato.dataengine.dataAdapter.DataAdapterRegistry;
 import io.ontomato.dataengine.service.ABCProgramService;
 import io.ontomato.dataengine.service.ActionService;
 import io.ontomato.dataengine.service.AdminService;
@@ -38,9 +43,12 @@ import io.ontomato.dataengine.service.SandboxService;
 import io.ontomato.dataengine.service.ai.MultiThreadAIChatService;
 import io.ontomato.dataengine.service.sys.bean.permission.UserDataPermission;
 import io.ontomato.dataengine.tools.ActionSubmitTools;
+import io.ontomato.dataengine.util.CodeHashUtil;
 import io.ontomato.dataengine.util.DBSchemaUtil;
 import io.ontomato.dataengine.util.ShortCodeGenerator;
+import io.ontomato.dataengine.util.SystemUtils;
 import io.ontomato.dataengine.util.UserMessageUtil;
+import io.ontomato.dataengine.util.ZipBundleUtil;
 
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
@@ -54,6 +62,9 @@ public class ActionServiceImpl implements ActionService {
 	
 	@Autowired
 	private BusinessConfigService businessConfigService;
+
+	@Autowired
+	private DataAdapterRegistry dataAdapterRegistry;
 	
 	@Autowired
 	private SandboxService sandboxService;
@@ -111,6 +122,9 @@ public class ActionServiceImpl implements ActionService {
 	
 	@Override
 	public Action generateFromNatureLanguage(String question, String lang, String domainId, boolean persistence) throws Exception {
+		DataAdapter adapter = dataAdapterRegistry.create(businessConfigService.get(domainId), null);
+		adapter.capabilities().requireObjectWrite();
+		adapter.capabilities().requireSandbox();
 		String sandboxId = "a" + ShortCodeGenerator.gerenate().toLowerCase();
 		
 		try {
@@ -223,66 +237,67 @@ public class ActionServiceImpl implements ActionService {
 	public Action save(Action action, String lang) throws Exception {
 		JSONArray storedCodeSegments = null;
 		BusinessMeaning storedBusinessMeaning = null;
+		String storedCodeHash = null;
+		Integer storedExplanationVersion = null;
 		if (action.getId() != null) {
 			Object[] exist = actionDao.queryById(action.getId());
 			if (exist == null) {
 				throw new Exception(langService.get(lang, "Action.notFound"));
-			} else {
-				Action existAction = (Action)exist[0];
-				if (Action.ORIGIN_SYSTEM.equals(existAction.getOrigin())) {
-					throw new Exception(langService.get(lang, "Action.cannotModifySystem"));
-				}
-				if (!action.getDomainId().equals(existAction.getDomainId())) {
-					throw new Exception(langService.get(lang, "Action.domainMismatch"));
-				}
-				storedCodeSegments = existAction.getCodeSegments();
-				storedBusinessMeaning = existAction.getBusinessMeaning();
 			}
+			Action existAction = (Action)exist[0];
+			if (Action.ORIGIN_SYSTEM.equals(existAction.getOrigin())) {
+				throw new Exception(langService.get(lang, "Action.cannotModifySystem"));
+			}
+			if (!action.getDomainId().equals(existAction.getDomainId())) {
+				throw new Exception(langService.get(lang, "Action.domainMismatch"));
+			}
+			storedCodeSegments = existAction.getCodeSegments();
+			storedBusinessMeaning = existAction.getBusinessMeaning();
+			storedCodeHash = existAction.getCodeHash();
+			storedExplanationVersion = existAction.getExplanationVersion();
 		}
-		// Code segments and business meaning are derived by the server from the saved code; values carried by the request are not trusted: invalidate them first,
-		// restore the values already stored in the database when the code has not changed; re-interpret when the code has changed or the function is new, and keep them empty if the interpretation fails, so that an old interpretation is not paired with new code
+		// Explanations are server-derived. A request cannot supply them; they are reused only when the
+		// stored explanation belongs to exactly this code and to the current explanation version.
 		action.setCodeSegments(null);
 		action.setBusinessMeaning(null);
-		if (action.getFunction() != null) {
-			Function function = action.getFunction();
-			if (function.getId() != null) {
-				Function existFunction = functionDao.queryById(function.getId());
-				if (existFunction != null) {
-					if (!Function.OPERATION_WRITE.equals(existFunction.getOperation())) {
-						throw new Exception(langService.get(lang, "Function.notWrite"));
-					}
-					if (!existFunction.getCode().equals(function.getCode())) {
-						try {
-							Object[] explain = explainCode(function.getParameters(), function.getCode(), action.getDomainId(), lang);
-							JSONArray codeSegments = (JSONArray)explain[0];
-							BusinessMeaning businessMeaning = (BusinessMeaning)explain[1];
-							action.setCodeSegments(codeSegments);
-							action.setBusinessMeaning(businessMeaning);
-						} catch (Exception e) {}
-					} else {
-						action.setCodeSegments(storedCodeSegments);
-						action.setBusinessMeaning(storedBusinessMeaning);
-					}
-				} else {
-					throw new Exception(langService.get(lang, "Function.notFound"));
-				}
-			} else {
-				if (!Function.OPERATION_WRITE.equals(function.getOperation())) {
-					throw new Exception(langService.get(lang, "Function.notWrite"));
-				}
-				try {
-					Object[] explain = explainCode(function.getParameters(), function.getCode(), action.getDomainId(), lang);
-					JSONArray codeSegments = (JSONArray)explain[0];
-					BusinessMeaning businessMeaning = (BusinessMeaning)explain[1];
-					action.setCodeSegments(codeSegments);
-					action.setBusinessMeaning(businessMeaning);
-				} catch (Exception e) {}
-			}
-			function = functionDao.save(function);
-			action.setFunction(function);
-		} else {
+		Function function = action.getFunction();
+		if (function == null) {
 			throw new Exception(langService.get(lang, "Function.cannotBeEmpty"));
 		}
+		boolean codeChanged = true;
+		if (function.getId() != null) {
+			Function existFunction = functionDao.queryById(function.getId());
+			if (existFunction == null) {
+				throw new Exception(langService.get(lang, "Function.notFound"));
+			}
+			if (!Function.OPERATION_WRITE.equals(existFunction.getOperation())) {
+				throw new Exception(langService.get(lang, "Function.notWrite"));
+			}
+			codeChanged = !existFunction.getCode().equals(function.getCode());
+		} else if (!Function.OPERATION_WRITE.equals(function.getOperation())) {
+			throw new Exception(langService.get(lang, "Function.notWrite"));
+		}
+		String codeHash = CodeHashUtil.sha256(function.getCode());
+		boolean reusable = !codeChanged
+				&& storedCodeSegments != null && !storedCodeSegments.isEmpty()
+				&& codeHash != null && codeHash.equals(storedCodeHash)
+				&& storedExplanationVersion != null && storedExplanationVersion == Action.EXPLANATION_VERSION;
+		if (reusable) {
+			action.setCodeSegments(storedCodeSegments);
+			action.setBusinessMeaning(storedBusinessMeaning);
+		} else {
+			Object[] explain = explainCode(function.getParameters(), function.getCode(), action.getDomainId(), lang);
+			JSONArray codeSegments = (JSONArray)explain[0];
+			if (codeSegments == null || codeSegments.isEmpty()) {
+				throw new Exception(langService.get(lang, "Action.parseCodeExplainFailed"));
+			}
+			action.setCodeSegments(codeSegments);
+			action.setBusinessMeaning((BusinessMeaning)explain[1]);
+		}
+		action.setCodeHash(codeHash);
+		action.setExplanationVersion(Action.EXPLANATION_VERSION);
+		function = functionDao.save(function);
+		action.setFunction(function);
 		return actionDao.save(action);
 	}
 
@@ -349,7 +364,137 @@ public class ActionServiceImpl implements ActionService {
 	}
 
 	@Override
+	public byte[] exportActions(String lang) throws Exception {
+		List<Action> actions = queryList(null, null, null, null);
+		String json = JSON.toJSONString(actions, Feature.WriteMapNullValue);
+		return ZipBundleUtil.zip("actions.json", json.getBytes(StandardCharsets.UTF_8));
+	}
+
+	@Override
+	public JSONObject importActions(byte[] zipData, String lang, boolean allowMissingExplanation) throws Exception {
+		byte[] jsonBytes = ZipBundleUtil.unzipFirstJson(zipData);
+		JSONArray array = JSON.parseArray(new String(jsonBytes, StandardCharsets.UTF_8));
+		User user = SystemUtils.getCurUser();
+		String domainId = user == null ? null : user.getDomainId();
+		int successCount = 0;
+		JSONArray failures = new JSONArray();
+		for (int i = 0; i < array.size(); i++) {
+			String actionId = null;
+			try {
+				JSONObject json = array.getJSONObject(i);
+				actionId = json.getString("id");
+				Action action = json.to(Action.class);
+				Function function = action.getFunction();
+				if (function == null || function.getId() == null) {
+					throw new Exception("Action " + actionId + " has no embedded function");
+				}
+				if (domainId != null) {
+					action.setDomainId(domainId);
+					function.setDomainId(domainId);
+				}
+				String codeHash = CodeHashUtil.sha256(function.getCode());
+				if (!allowMissingExplanation) {
+					if (action.getCodeSegments() == null || action.getCodeSegments().isEmpty()) {
+						throw new Exception("Action " + actionId + " has no code explanation; run action re-explain or import with allowMissingExplanation=true");
+					}
+					if (action.getCodeHash() != null && !action.getCodeHash().equals(codeHash)) {
+						throw new Exception("Action " + actionId + " explanation does not match its code; run action re-explain");
+					}
+				}
+				action.setCodeHash(codeHash);
+				action.setExplanationVersion(Action.EXPLANATION_VERSION);
+				functionDao.save(function);
+				actionDao.save(action);
+				successCount++;
+			} catch (Exception e) {
+				log.error("Failed to import action {}: {}", actionId, e.getMessage(), e);
+				JSONObject failure = new JSONObject();
+				failure.put("index", i);
+				failure.put("id", actionId);
+				failure.put("message", e.getMessage());
+				failures.add(failure);
+			}
+		}
+		JSONObject ret = new JSONObject();
+		ret.put("success", failures.isEmpty());
+		ret.put("successCount", successCount);
+		ret.put("failureCount", failures.size());
+		ret.put("failures", failures);
+		return ret;
+	}
+
+	@Override
+	public JSONObject reExplainActions(List<String> ids, boolean missingOnly, String lang) throws Exception {
+		User user = SystemUtils.getCurUser();
+		String domainId = user == null ? null : user.getDomainId();
+		List<Action> actions = new ArrayList<Action>();
+		JSONArray failures = new JSONArray();
+		if (ids == null || ids.isEmpty()) {
+			actions = queryList(null, null, null, domainId);
+		} else {
+			for (String id : ids) {
+				Action action = queryById(id);
+				if (action == null) {
+					JSONObject failure = new JSONObject();
+					failure.put("id", id);
+					failure.put("message", "Action not found");
+					failures.add(failure);
+				} else {
+					actions.add(action);
+				}
+			}
+		}
+		int successCount = 0;
+		int skippedCount = 0;
+		for (Action action : actions) {
+			String id = action.getId();
+			try {
+				if (domainId != null && !domainId.equals(action.getDomainId())) {
+					throw new Exception("Action belongs to another domain");
+				}
+				Function function = action.getFunction();
+				if (function == null) {
+					throw new Exception("Action has no embedded function");
+				}
+				String codeHash = CodeHashUtil.sha256(function.getCode());
+				boolean ready = action.getCodeSegments() != null && !action.getCodeSegments().isEmpty()
+						&& codeHash != null && codeHash.equals(action.getCodeHash())
+						&& Integer.valueOf(Action.EXPLANATION_VERSION).equals(action.getExplanationVersion());
+				if (missingOnly && ready) {
+					skippedCount++;
+					continue;
+				}
+				Object[] explain = explainCode(function.getParameters(), function.getCode(), action.getDomainId(), lang);
+				JSONArray codeSegments = (JSONArray)explain[0];
+				if (codeSegments == null || codeSegments.isEmpty()) {
+					throw new Exception("Empty explanation");
+				}
+				action.setCodeSegments(codeSegments);
+				action.setBusinessMeaning((BusinessMeaning)explain[1]);
+				action.setCodeHash(codeHash);
+				action.setExplanationVersion(Action.EXPLANATION_VERSION);
+				actionDao.save(action);
+				successCount++;
+			} catch (Exception e) {
+				log.error("Failed to re-explain action {}: {}", id, e.getMessage(), e);
+				JSONObject failure = new JSONObject();
+				failure.put("id", id);
+				failure.put("message", e.getMessage());
+				failures.add(failure);
+			}
+		}
+		JSONObject ret = new JSONObject();
+		ret.put("success", failures.isEmpty());
+		ret.put("successCount", successCount);
+		ret.put("skippedCount", skippedCount);
+		ret.put("failureCount", failures.size());
+		ret.put("failures", failures);
+		return ret;
+	}
+
+	@Override
 	public PythonExecuteResult execute(String id, JSONObject param, String lang, User user, UserDataPermission permission, int timeoutMinutes) throws Exception {
+		dataAdapterRegistry.create(businessConfigService.get(user.getDomainId()), null).capabilities().requireObjectWrite();
 		Action action = queryById(id);
 		if (action != null) {
 			if (Action.STATUS_PUBLISHED.equals(action.getStatus())) {

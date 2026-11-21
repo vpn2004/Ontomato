@@ -10,7 +10,8 @@ import {
   skillRuntime,
   type SkillMeta,
 } from "../../../core/skills";
-import { normalizeSkillPackagePath, parseSkillMarkdown } from "../../../core/skills/manifest";
+import { normalizeSkillPackagePath } from "../../../core/skills/manifest";
+import { loadSkillContent } from "../../../core/skills/discovery/loader";
 import type { QueryResultDatasetEntry } from "../runtime/query-result";
 import { tApp } from "../../../i18n";
 
@@ -24,6 +25,7 @@ export interface LoopSkillDeps {
   trajectory: Pick<DeepAnalysisArtifactStore, "start" | "settle">;
   domainId: string;
   selectedSkillIds: readonly string[];
+  generatePpt?: (signal?: AbortSignal) => Promise<{ url: string; fileName: string; warnings: string[] }>;
   resolveEvidence: (questionId: string) => LoopSkillEvidenceRecord | undefined;
 }
 
@@ -34,11 +36,11 @@ export async function assembleLoopSkillCapability(deps: LoopSkillDeps) {
     category: SkillCategory.ANALYSIS,
     selectedSkillIds: deps.selectedSkillIds,
   });
-  const tools = availableSkills.length > 0 ? createLoopSkillTools(deps) : [];
+  const enabled = availableSkills.length > 0;
   return {
     prompt: buildLoopSkillCapabilityPrompt(availableSkills),
-    supervisorTools: tools,
-    workerTools: tools,
+    supervisorTools: enabled ? createLoopSkillTools(deps, { supervisor: true }) : [],
+    workerTools: enabled ? createLoopSkillTools(deps) : [],
   };
 }
 
@@ -88,7 +90,12 @@ export function buildLoopSkillCapabilityPrompt(skills: SkillMeta[]): string {
   ].join("\n");
 }
 
-function createLoadSkillTool(deps: LoopSkillDeps): AgentTool {
+/** Worker calls belong to the worker trace; only supervisor calls carry their call identity. */
+function callIdentity(supervisor: boolean, toolCallId: string): { toolCallId?: string } {
+  return supervisor ? { toolCallId } : {};
+}
+
+function createLoadSkillTool(deps: LoopSkillDeps, supervisor: boolean): AgentTool {
   return {
     name: "load_skill",
     description:
@@ -100,12 +107,13 @@ function createLoadSkillTool(deps: LoopSkillDeps): AgentTool {
       },
       required: ["skill_id"],
     },
-    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+    async execute(toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
       const skillId = requiredString(params, "skill_id");
       if (!skillId) return textResult(tApp("analysis.loop.skills.357"));
 
       const activityId = deps.trajectory.start("skill", {
         skills: [{ skillId, action: "load", entry: "SKILL.md", status: "running" }],
+        ...callIdentity(supervisor, toolCallId),
       });
       const result = (text: string, success = false) => {
         const status = success ? "completed" : "failed";
@@ -129,10 +137,10 @@ function createLoadSkillTool(deps: LoopSkillDeps): AgentTool {
         if (!skill.skillMdPath) {
           return result(tApp("analysis.loop.skills.358", { skillId: skillId }));
         }
-        const parsed = parseSkillMarkdown(await fs.promises.readFile(skill.skillMdPath, "utf-8"));
+        const content = loadSkillContent(skill);
         signal?.throwIfAborted();
-        if (!parsed) return result(tApp("analysis.loop.skills.359", { skillId: skillId }));
-        return result(parsed.content.trim(), true);
+        if (content === null) return result(tApp("analysis.loop.skills.359", { skillId: skillId }));
+        return result(content.trim(), true);
       } catch (error: unknown) {
         return result(tApp("analysis.loop.skills.360", { errorMessage: errorMessage(error) }));
       }
@@ -222,11 +230,11 @@ function declaredSkillError(output: unknown): string | undefined {
   return undefined;
 }
 
-function createRunSkillTool(deps: LoopSkillDeps): AgentTool {
+function createRunSkillTool(deps: LoopSkillDeps, supervisor: boolean): AgentTool {
   return {
     name: "run_skill",
     description:
-      tApp("analysis.loop.skills.372"),
+      tApp("analysis.loop.skills.372") + " For generate-ppt, omit question_id: the host collects the whole conversation and returns a download link.",
     parameters: {
       type: "object",
       properties: {
@@ -239,22 +247,36 @@ function createRunSkillTool(deps: LoopSkillDeps): AgentTool {
           type: "string",
           description: tApp("analysis.loop.skills.375"),
         },
+        parameters: {
+          type: "object",
+          description: "Skill-specific JSON options documented by load_skill, such as field mappings, dates and locations. The host supplies data, query and title from question_id; do not include data or services here. Validate required options with one dataset before expanding the analysis.",
+          additionalProperties: true,
+        },
       },
-      required: ["skill_id", "question_id"],
+      required: ["skill_id"],
     },
-    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+    async execute(toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
       const skillId = requiredString(params, "skill_id");
       const questionId = requiredString(params, "question_id");
       const requestedEntry = requiredString(params, "entry");
       if (!skillId) return textResult(tApp("analysis.loop.skills.376"));
-      if (!questionId) return textResult(tApp("analysis.loop.skills.377"));
+      if (!questionId && skillId !== "generate-ppt") return textResult(tApp("analysis.loop.skills.377"));
       if (params.entry !== undefined && !requestedEntry) {
         return textResult(tApp("analysis.loop.skills.378"));
+      }
+      const options = params.parameters ?? {};
+      if (typeof options !== "object" || Array.isArray(options) || options === null) {
+        return textResult("run_skill parameters must be a JSON object.");
+      }
+      const reserved = ["data", "datasets", "query", "title", "services", "context", "queryResult", "mockData", "__proto__", "constructor", "prototype"];
+      if (Object.keys(options).some(key => reserved.includes(key))) {
+        return textResult("run_skill parameters cannot override host-owned data, query, title, services or context.");
       }
 
       let entry = requestedEntry || undefined;
       const activityId = deps.trajectory.start("skill", {
         skills: [{ skillId, action: "run", entry, status: "running" }],
+        ...callIdentity(supervisor, toolCallId),
       });
       const result = (text: string, success = false) => {
         const status = success ? "completed" : "failed";
@@ -277,7 +299,18 @@ function createRunSkillTool(deps: LoopSkillDeps): AgentTool {
           );
         }
 
-        const evidence = deps.resolveEvidence(questionId);
+        if (skillId === "generate-ppt") {
+          if (!deps.generatePpt) return result("Conversation PPT generation is unavailable in this context.");
+          const output = await skillRuntime.execute(deps.domainId, skillId,
+            { services: { generatePpt: () => deps.generatePpt!(signal) } },
+            { type: SkillType.EXECUTABLE, category: SkillCategory.ANALYSIS, selectedSkillIds: deps.selectedSkillIds },
+            { entry, maxRetries: 0, signal });
+          signal?.throwIfAborted();
+          const payload = unwrapSkillOutput(output);
+          const failure = declaredSkillError(payload);
+          return result(failure || JSON.stringify(payload), !failure);
+        }
+        const evidence = deps.resolveEvidence(questionId!);
         if (!evidence) {
           return result(
             tApp("analysis.loop.skills.381", { questionId: questionId })
@@ -302,7 +335,7 @@ function createRunSkillTool(deps: LoopSkillDeps): AgentTool {
             const output = await skillRuntime.execute(
               deps.domainId,
               skillId,
-              { query: evidence.question, title: dataset.title, data: dataset.data },
+              { ...options, query: evidence.question, title: dataset.title, data: dataset.data },
               {
                 type: SkillType.EXECUTABLE,
                 category: SkillCategory.ANALYSIS,
@@ -339,6 +372,14 @@ function createRunSkillTool(deps: LoopSkillDeps): AgentTool {
   };
 }
 
-export function createLoopSkillTools(deps: LoopSkillDeps): AgentTool[] {
-  return [createLoadSkillTool(deps), createReadSkillFileTool(deps), createRunSkillTool(deps)];
+export function createLoopSkillTools(
+  deps: LoopSkillDeps,
+  options: { supervisor?: boolean } = {}
+): AgentTool[] {
+  const supervisor = options.supervisor === true;
+  return [
+    createLoadSkillTool(deps, supervisor),
+    createReadSkillFileTool(deps),
+    createRunSkillTool(deps, supervisor),
+  ];
 }

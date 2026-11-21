@@ -7,6 +7,7 @@ import {
 } from "../data-query/adapter";
 import { batchAppendChartFieldMapper } from "./planning/core/chart-recommender";
 import { buildDatasetProfile } from "./planning/core/utils";
+import { parseResultTruncation } from "../data-query/protocol";
 import { HttpError } from "../../utils/errors";
 import { backendPost, BackendResponseError } from "../../utils/backend-client";
 import { buildAbcProgramQueryPayload, normalizeAbcProgram } from "./abc-program";
@@ -23,6 +24,9 @@ export function wrapDashboardBackendError(error: unknown, messageKey: string) {
     }),
     { cause: error }
   );
+}
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
 }
 function applySimpleConditions(
   rows: Array<Record<string, unknown>>,
@@ -156,6 +160,14 @@ export async function queryDashboardData(body: any, tk: string, locale?: string)
   const rows = abcProgram
     ? extractRowsFromBackendPayload(payload)
     : applySimpleConditions(extractRowsFromDslResult(payload.data), conditions);
+  // The ABC program reports its marker beside the rows; a DSL reports it on the answer pack
+  // whose rows the widget shows.
+  const truncation = abcProgram
+    ? parseResultTruncation(isRecord(payload) ? payload : {}, endpoint)
+    : parseResultTruncation(
+        isRecord(payload?.data?.data?.[0]) ? payload.data.data[0] : {},
+        endpoint
+      );
   const chartType = String(body?.chartType || "bar").trim();
   const chartTitle = String(body?.chartTitle || body?.name || tApp("queryFixed.149")).trim();
   const inputFields =
@@ -186,5 +198,6 @@ export async function queryDashboardData(body: any, tk: string, locale?: string)
     fields,
     dsl: dsl || {},
     abcProgram: abcProgram || undefined,
+    ...truncation,
   };
 }

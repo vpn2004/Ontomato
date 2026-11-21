@@ -222,7 +222,7 @@ function buildResultsetsForPrompt(datasets: Dataset[], locale?: string): Conclus
       name: ds.description || tApp("queryFixed.227"),
       totalRows,
       columns,
-      dataView: buildModelDataView(promptRows),
+      dataView: buildModelDataView(promptRows, { truncation: ds }),
       fieldDisplayPlan: ds.fieldDisplayPlan,
       statistics: {
         numericColumns: extractNumericStatistics(rows),
@@ -300,7 +300,11 @@ export async function streamConclusion(
 
   const resultsetsForPrompt = buildResultsetsForPrompt(datasets, locale);
 
-  if (resultsetsForPrompt.length === 0 || resultsetsForPrompt.every((rs) => rs.totalRows === 0)) {
+  // Zero rows prove "no data" only when every result is complete.
+  if (
+    resultsetsForPrompt.length === 0 ||
+    resultsetsForPrompt.every((rs) => rs.totalRows === 0 && !rs.dataView.truncated)
+  ) {
     const emptyConclusion = tForLocale(locale, "query.conclusion.noDataFound");
     const fullContent = `${prefix}\n\n${emptyConclusion}\n`;
     push(fullContent);
@@ -317,7 +321,8 @@ export async function streamConclusion(
 
     for await (const chunk of stream) {
       const text = chunk.content;
-      if (typeof text === "string") {
+      // Reasoning-only chunks arrive with empty string content and add no body text.
+      if (typeof text === "string" && text) {
         fullContent += text;
         const patched = fullContent.replace(plainPrefix, styledPrefix);
         push(patched);

@@ -2,7 +2,10 @@ import type { QueryThinkingState, ThinkingAbcStep } from "@ontomato/contracts/qu
 import { GraphState, GraphUpdate, VisualizationResult } from "../state";
 import { createLogger } from "../../../../logging/logger";
 import { t, tApp } from "../../../../i18n";
-import { generateChartsFromCandidates } from "../../../charts/chart-generator";
+import {
+  generateChartsFromCandidates,
+  partialSourceNoticeHtml,
+} from "../../../charts/chart-generator";
 import { resolveVisualizationData } from "../utils/data-resolver";
 import {
   createRuntimeArtifactRef,
@@ -221,8 +224,21 @@ export async function visualizationNode(state: GraphState, config?: any): Promis
     logger.info(tApp("queryFixed.85", { v0: (dataSource), v1: (data.length) }));
 
     const noDataChart = noDataVisualization();
-    if (data.length === 0 && noDataChart) {
-      const { title, message, html } = noDataChart();
+    const truncation = artifactData?.truncation;
+    // Zero rows of a partial result are not "no data": that turn shows the source's partial notice.
+    const emptyChart = truncation
+      ? () => ({
+          title: t("query.display.emptyPartial"),
+          message: t("query.partialSource", {
+            source: visualizationInstruction,
+            rowLimit: truncation.rowLimit,
+            hint: truncation.truncationHint,
+          }),
+          html: partialSourceNoticeHtml(visualizationInstruction, truncation),
+        })
+      : noDataChart;
+    if (data.length === 0 && emptyChart) {
+      const { title, message, html } = emptyChart();
       visThinking = {
         ...visThinking,
         status: "completed",
@@ -272,9 +288,14 @@ export async function visualizationNode(state: GraphState, config?: any): Promis
       domainId,
       userQuestion: visualizationInstruction,
       scopeId: `visualization-${requestSeq}`,
-      candidates: [{ sourceSubQuestion: visualizationInstruction, data }],
+      candidates: [
+        {
+          sourceSubQuestion: visualizationInstruction,
+          data,
+          truncation,
+        },
+      ],
       maxCharts: 1,
-      failurePolicy: "error",
       signal: config?.configurable?.signal,
       onProgress(progress) {
         if (progress.stage === "planning") {
@@ -314,7 +335,7 @@ export async function visualizationNode(state: GraphState, config?: any): Promis
     });
     const chart = generation.charts[0];
     if (!chart) {
-      const errorMsg = generation.error!;
+      const errorMsg = generation.diagnostics.map((d) => d.message).join("\n");
       const reason = generation.diagnostics[0]?.reason;
       visThinking = failVisStep(
         visThinking,

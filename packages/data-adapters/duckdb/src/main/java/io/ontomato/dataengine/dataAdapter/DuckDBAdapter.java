@@ -1,13 +1,22 @@
 package io.ontomato.dataengine.dataAdapter;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.Date;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Timestamp;
+import java.sql.Types;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.OffsetDateTime;
+import java.time.format.DateTimeFormatter;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -27,7 +36,6 @@ import io.ontomato.dataengine.service.ai.MultiThreadAIChatService;
 import io.ontomato.dataengine.service.sys.bean.permission.UserDataPermission;
 import io.ontomato.dataengine.util.DslUtil;
 import io.ontomato.dataengine.util.HttpRequestUtil;
-import io.ontomato.dataengine.util.HttpRequestUtil.M3Mode;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -43,22 +51,71 @@ public class DuckDBAdapter implements DataAdapter {
 	}
 
 	@Override
-	public String executeDsl(String queryJson, String sessionId, M3Mode m3Mode, List<String> generatedMqls) throws Exception {
-		log.info("[" + sessionId + "] DuckDB query DSL: " + queryJson);
+	public Connection openConnection() throws SQLException {
+		return DriverManager.getConnection(connection.getUrl());
+	}
+
+	/**
+	 * A missing database file fails the test without creating anything; the DuckDB
+	 * driver would otherwise create an empty database on connect. Queries and writes
+	 * keep that behavior and are untouched.
+	 */
+	@Override
+	public JSONObject testConnection() throws Exception {
+		String url = connection.getUrl();
+		if (url == null || url.isBlank()) {
+			throw new IllegalStateException("DuckDB database URL is missing");
+		}
+		if (isFileDatabase(url) && !Files.exists(Path.of(filePath(url)))) {
+			throw new IllegalStateException("DuckDB database file does not exist: " + filePath(url));
+		}
+		return DataAdapter.super.testConnection();
+	}
+
+	private static final String URL_PREFIX = "jdbc:duckdb:";
+
+	/** In-memory URLs never touch the file system; anything without the prefix is left to the driver. */
+	static boolean isFileDatabase(String url) {
+		if (!url.startsWith(URL_PREFIX)) {
+			return false;
+		}
+		String rest = url.substring(URL_PREFIX.length());
+		return !rest.isEmpty() && !rest.equals(":memory:");
+	}
+
+	static String filePath(String url) {
+		return url.substring(URL_PREFIX.length());
+	}
+
+	@Override
+	public String executeDsl(String queryJson, String sessionId, DslExecutionMode mode, List<String> generatedMqls) throws Exception {
+		log.debug("[{}] DuckDB query DSL: {}", sessionId, queryJson);
 		JSONArray dsls = JSONArray.parseArray(queryJson);
-		String sql = toSql(dsls.getJSONObject(0), jsonRule);
+		DslRowLimit.Tracker rowLimit = new DslRowLimit.Tracker();
+		String sql = toSql(dsls.getJSONObject(0), jsonRule, rowLimit);
 		generatedMqls.add(sql);
-		log.info("[" + sessionId + "] Converted DuckDB sql: " + sql);
-		JSONArray data = querySql(connection, sql);
+		log.debug("[{}] Converted DuckDB sql: {}", sessionId, sql);
+		JSONArray data = querySql(sql);
+		boolean truncated = rowLimit.defaulted() && data.size() > rowLimit.effectiveLimit();
+		if (truncated) {
+			data.remove(rowLimit.effectiveLimit()); // drop the truncation probe row
+		}
 		JSONArray answers = new JSONArray();
 		JSONObject answer = new JSONObject();
 		answer.put("answer", data);
 		answer.put("mqls", generatedMqls);
+		if (truncated) {
+			answer.put(DslRowLimit.TRUNCATED, true);
+			answer.put(DslRowLimit.ROW_LIMIT, rowLimit.effectiveLimit());
+			answer.put(DslRowLimit.TRUNCATION_HINT, DslRowLimit.truncationHint(rowLimit.effectiveLimit()));
+			log.warn("[" + sessionId + "] DSL result truncated at the default row limit of "
+					+ rowLimit.effectiveLimit());
+		}
 		answers.add(answer);
 		return JSON.toJSONString(answers, Feature.WriteMapNullValue);
 	}
 
-	private String toSql(JSONObject dsl, Map<String, Object> jsonRule) throws Exception {
+	private String toSql(JSONObject dsl, Map<String, Object> jsonRule, DslRowLimit.Tracker rowLimit) throws Exception {
 		try {
 			@SuppressWarnings("unchecked")
 			List<Map<String, Object>> classDefs = (List<Map<String, Object>>) jsonRule.get("classDef");
@@ -97,6 +154,12 @@ public class DuckDBAdapter implements DataAdapter {
 				String objWhere = "";
 				if (object.getJSONObject("conditions") != null) {
 					JSONObject conditions = object.getJSONObject("conditions");
+						if (conditions.getJSONObject("timeseries") != null) {
+							throw new DslContractViolationException(
+									DslContractViolationException.Code.UNSUPPORTED_CONSTRUCT,
+									"conditions.timeseries",
+									"the timeseries condition is not implemented by " + getClass().getSimpleName());
+						}
 					if (conditions.getJSONObject("properties") != null) {
 						JSONObject properties = conditions.getJSONObject("properties");
 						List<Object[]> queue = new ArrayList<>();
@@ -135,6 +198,13 @@ public class DuckDBAdapter implements DataAdapter {
 								newQueue.add(new Object[] { null, ")" });
 								newQueue.addAll(queue);
 								queue = newQueue;
+							} else if (cond.getJSONArray("not") != null && cond.getJSONArray("not").size() > 0) {
+								objWhere += "(not (";
+								List<Object[]> newQueue = new ArrayList<>();
+								newQueue.add(new Object[] { DslGrammarValidator.negated(cond), null });
+								newQueue.add(new Object[] { null, "))" });
+								newQueue.addAll(queue);
+								queue = newQueue;
 							} else {
 								String attr = cond.getString("field");
 								String type = attrTypeMap.get(attr);
@@ -149,7 +219,12 @@ public class DuckDBAdapter implements DataAdapter {
 												+ " " + cond.get("value");
 									} else if ("date".equals(type) || "timestamp".equals(type)) {
 										sqlCond = "\"" + alias + "\"." + attr + " " + cond.getString("operator")
-												+ " " + toTimestampSql(cond.getLong("value"));
+												+ " " + timeLiteral(cond.get("value"));
+									}
+								} else if ("like".equals(cond.getString("operator")) && LikePattern.escaped(cond)) {
+									if ("varchar".equals(type) || "text".equals(type)) {
+										String pattern = LikePattern.of(cond, true).sql("").replace("'", "''");
+										sqlCond = "\"" + alias + "\"." + attr + " like '" + pattern + "' escape '!'";
 									}
 								} else if ("like".equals(cond.getString("operator"))
 										|| "not like".equals(cond.getString("operator"))) {
@@ -170,7 +245,7 @@ public class DuckDBAdapter implements DataAdapter {
 												+ " " + cond.get("value");
 									} else if ("date".equals(type) || "timestamp".equals(type)) {
 										sqlCond = "\"" + alias + "\"." + attr + " " + cond.getString("operator")
-												+ " " + toTimestampSql(cond.getLong("value"));
+												+ " " + timeLiteral(cond.get("value"));
 									} else if ("varchar".equals(type)) {
 										sqlCond = "\"" + alias + "\"." + attr + " " + cond.getString("operator")
 												+ " '" + cond.get("value").toString().replace("'", "''") + "'";
@@ -181,9 +256,9 @@ public class DuckDBAdapter implements DataAdapter {
 										sqlCond = "(\"" + alias + "\"." + attr + " >= " + value.get(0)
 												+ " and \"" + alias + "\"." + attr + " <= " + value.get(1) + ")";
 									} else if ("date".equals(type) || "timestamp".equals(type)) {
-										sqlCond = "(\"" + alias + "\"." + attr + " >= " + toTimestampSql(value.getLong(0))
+										sqlCond = "(\"" + alias + "\"." + attr + " >= " + timeLiteral(value.get(0))
 												+ " and \"" + alias + "\"." + attr
-												+ " <= " + toTimestampSql(value.getLong(1)) + ")";
+												+ " <= " + timeLiteral(value.get(1)) + ")";
 									} else if ("varchar".equals(type)) {
 										sqlCond = "(\"" + alias + "\"." + attr + " >= '" + value.get(0).toString().replace("'", "''")
 												+ "' and \"" + alias + "\"." + attr + " <= '" + value.get(1).toString().replace("'", "''") + "')";
@@ -207,7 +282,7 @@ public class DuckDBAdapter implements DataAdapter {
 									} else if ("date".equals(type) || "timestamp".equals(type)) {
 										String in = "";
 										for (int j = 0; j < value.size(); j++) {
-											in += toTimestampSql(value.getLong(j)) + ",";
+											in += timeLiteral(value.get(j)) + ",";
 										}
 										in = "(" + in.substring(0, in.length() - 1) + ")";
 										sqlCond = "\"" + alias + "\"." + attr + " in " + in;
@@ -216,9 +291,15 @@ public class DuckDBAdapter implements DataAdapter {
 										|| "is not".equals(cond.getString("operator"))) {
 									sqlCond = "\"" + alias + "\"." + attr + " " + cond.getString("operator") + " null";
 								}
-								if (sqlCond != null) {
-									objWhere += sqlCond;
+								if (sqlCond == null) {
+									throw new DslContractViolationException(
+											DslContractViolationException.Code.UNSUPPORTED_OPERATOR_FOR_TYPE,
+											"conditions.properties",
+											"operator '" + cond.getString("operator") + "' on field '" + attr
+													+ "' of type '" + type + "' is not supported by "
+													+ getClass().getSimpleName());
 								}
+								objWhere += sqlCond;
 							}
 						}
 					}
@@ -371,7 +452,7 @@ public class DuckDBAdapter implements DataAdapter {
 			if (steps.size() == 1) {
 				subSelectSql = appendGroupByHaving(firstStep, subSelectSql, null);
 				subSelectSql = appendOrderBy(firstStep, subSelectSql, null);
-				subSelectSql = appendLimit(firstStep, subSelectSql);
+				subSelectSql = appendLimit(firstStep, subSelectSql, rowLimit);
 				return subSelectSql;
 			} else {
 				JSONObject secondStep = steps.getJSONObject(1);
@@ -432,9 +513,13 @@ public class DuckDBAdapter implements DataAdapter {
 
 				sql = appendGroupByHaving(secondStep, sql, tmpClassAs);
 				sql = appendOrderBy(secondStep, sql, tmpClassAs);
-				sql = appendLimit(secondStep, sql);
+				sql = appendLimit(secondStep, sql, rowLimit);
 				return sql;
 			}
+		} catch (DslContractViolationException e) {
+			// located + actionable: let it through unchanged
+			log.warn(e.getMessage());
+			throw e;
 		} catch (Exception e) {
 			log.error(e.getMessage(), e);
 			throw new Exception("Failed to convert DSL to SQL");
@@ -494,22 +579,29 @@ public class DuckDBAdapter implements DataAdapter {
 		return sql;
 	}
 
-	private String appendLimit(JSONObject step, String sql) {
-		if (step.getJSONObject("output").getJSONObject("limit") == null) {
-			return sql + "\nlimit 20000";
+	private String appendLimit(JSONObject step, String sql, DslRowLimit.Tracker rowLimit) {
+		JSONObject limit = step.getJSONObject("output").getJSONObject("limit");
+		if (limit == null) {
+			// An omitted limit means "apply the engine default", never an unbounded read. Fetch one
+			// extra row so a real truncation is detected without a count(*) pass.
+			int cap = DslRowLimit.defaultRowLimit();
+			rowLimit.terminalLimit(cap, true);
+			return sql + "\nlimit " + (cap + 1);
 		}
-		Integer offset = step.getJSONObject("output").getJSONObject("limit").getInteger("offset");
+		Integer offset = limit.getInteger("offset");
 		if (offset == null) {
 			offset = 0;
 		}
-		sql += "\nlimit " + step.getJSONObject("output").getJSONObject("limit").getInteger("count")
-				+ " offset " + offset;
+		sql += "\nlimit " + limit.getInteger("count") + " offset " + offset;
+		rowLimit.terminalLimit(limit.getInteger("count"), false);
 		return sql;
 	}
 
-	private String toTimestampSql(long epochMillis) {
-		return "TIMESTAMP '1970-01-01' + (" + epochMillis + " * INTERVAL 1 MILLISECOND)";
+	/** A time condition value is passed through verbatim: the source's own time convention is never re-interpreted. */
+	private static String timeLiteral(Object value) {
+		return "'" + String.valueOf(value).replace("'", "''") + "'";
 	}
+
 
 	@Override
 	public String getSampleDataFileName(String sampleDataDirName, String className) {
@@ -527,7 +619,7 @@ public class DuckDBAdapter implements DataAdapter {
 				}
 			}
 			String sql = "select " + select + " from " + className + " limit 1";
-			JSONArray data = querySql(connection, sql);
+			JSONArray data = querySql(sql);
 			if (data.size() > 0) {
 				JSONObject datum = data.getJSONObject(0);
 				Set<String> keys = datum.keySet();
@@ -550,32 +642,26 @@ public class DuckDBAdapter implements DataAdapter {
 		}
 	}
 
-	private JSONArray querySql(DataAdapterConnection connection, String sql) throws Exception {
-		log.info(sql);
-		SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+	private JSONArray querySql(String sql) throws Exception {
+		log.debug(sql);
 		Connection conn = null;
 		PreparedStatement pst = null;
 		ResultSet rs = null;
 		try {
 			JSONArray rows = new JSONArray();
-			conn = DriverManager.getConnection(connection.getUrl());
+			conn = openConnection();
 			pst = conn.prepareStatement(sql);
 			rs = pst.executeQuery();
 			ResultSetMetaData meta = rs.getMetaData();
 			while (rs.next()) {
 				JSONObject row = new JSONObject();
 				for (int i = 1; i <= meta.getColumnCount(); i++) {
-					Object value = rs.getObject(i);
-					if (value == null) {
-						row.put(meta.getColumnLabel(i), null);
+					String label = meta.getColumnLabel(i);
+					if (isTemporalColumn(meta.getColumnType(i))) {
+						// Return the source's own text: a tz-aware column keeps its offset and a naive one keeps its wall clock.
+						row.put(label, temporalValue(rs, i, meta.getColumnType(i)));
 					} else {
-						if (value instanceof Timestamp) {
-							row.put(meta.getColumnLabel(i), sdf.format((Timestamp) value));
-						} else if (value instanceof Date) {
-							row.put(meta.getColumnLabel(i), sdf.format((Date) value));
-						} else {
-							row.put(meta.getColumnLabel(i), value);
-						}
+						row.put(label, rs.getObject(i));
 					}
 				}
 				rows.add(row);
@@ -597,8 +683,7 @@ public class DuckDBAdapter implements DataAdapter {
 	}
 
 	@Override
-	public boolean useM3() {
-		return false;
+	public void validatePrimaryKeyName(String attrName) throws Exception {
 	}
 
 	@Override
@@ -623,13 +708,13 @@ public class DuckDBAdapter implements DataAdapter {
 	@Override
 	public void truncateNamespace(String namespace) {
 		try {
-			JSONArray current_schemas = querySql(connection, "SELECT current_schema();");
+			JSONArray current_schemas = querySql("SELECT current_schema() AS current_schema;");
 			String current_schema = current_schemas.getJSONObject(0).getString("current_schema");
-			JSONArray tableNames = querySql(connection, "SELECT table_name FROM information_schema.tables WHERE table_schema = '" + current_schema + "' AND table_type = 'BASE TABLE';");
+			JSONArray tableNames = querySql("SELECT table_name FROM information_schema.tables WHERE table_schema = '" + current_schema + "' AND table_type = 'BASE TABLE';");
 			for (int i = 0; i < tableNames.size(); i++) {
 				String tableName = tableNames.getJSONObject(i).getString("table_name");
 				if (namespace == null || tableName.toLowerCase().startsWith(namespace.toLowerCase())) {
-					executeSql(connection, "delete from " + tableName);
+					executeSql("delete from " + tableName);
 				}
 			}
 		} catch (Exception e) {
@@ -640,13 +725,13 @@ public class DuckDBAdapter implements DataAdapter {
 	@Override
 	public void dropNamespace(String namespace) {
 		try {
-			JSONArray current_schemas = querySql(connection, "SELECT current_schema();");
+			JSONArray current_schemas = querySql("SELECT current_schema() AS current_schema;");
 			String current_schema = current_schemas.getJSONObject(0).getString("current_schema");
-			JSONArray tableNames = querySql(connection, "SELECT table_name FROM information_schema.tables WHERE table_schema = '" + current_schema + "' AND table_type = 'BASE TABLE';");
+			JSONArray tableNames = querySql("SELECT table_name FROM information_schema.tables WHERE table_schema = '" + current_schema + "' AND table_type = 'BASE TABLE';");
 			for (int i = 0; i < tableNames.size(); i++) {
 				String tableName = tableNames.getJSONObject(i).getString("table_name");
 				if (namespace == null || tableName.toLowerCase().startsWith(namespace.toLowerCase())) {
-					executeSql(connection, "drop table " + tableName);
+					executeSql("drop table " + tableName);
 				}
 			}
 		} catch (Exception e) {
@@ -697,7 +782,7 @@ public class DuckDBAdapter implements DataAdapter {
 				sql.append(" ").append(field).append(" " + (i == fields.size() - 1 ? "" : ",") + "\n");
 			}
 			sql.append(" );");
-			executeSql(connection, sql.toString());
+			executeSql(sql.toString());
 		} catch (Exception e) {
 			log.error(e.getMessage(), e);
 		}
@@ -779,7 +864,7 @@ public class DuckDBAdapter implements DataAdapter {
 				
 				sqls.add(sql.toString());
 			}
-			executeSql(connection, sqls);
+			executeSql(sqls);
 		} else {
 			throw new Exception("The insert statement must contain the primary key field");
 		}
@@ -850,7 +935,7 @@ public class DuckDBAdapter implements DataAdapter {
 			sql += " where " + whereStr;
 		}
 		
-		executeSql(connection, sql);
+		executeSql(sql);
 	}
 	
 	private String generateWhere(JSONObject condition, Map<String, String> attrTypeMap, SimpleDateFormat ymd, SimpleDateFormat ymdhms) throws Exception {
@@ -926,6 +1011,44 @@ public class DuckDBAdapter implements DataAdapter {
 	    }
 	}
 	
+	private static final DateTimeFormatter TEMPORAL_TEXT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+	/** A temporal column is a date/time type, returned as its own text rather than re-rendered in the process zone. */
+	private static boolean isTemporalColumn(int sqlType) {
+		return sqlType == Types.DATE || sqlType == Types.TIME || sqlType == Types.TIMESTAMP
+				|| sqlType == Types.TIME_WITH_TIMEZONE || sqlType == Types.TIMESTAMP_WITH_TIMEZONE;
+	}
+
+	/**
+	 * The source's own text for a temporal column: a naive value keeps its wall clock, a tz-aware value
+	 * keeps its offset, and the process zone is never applied. A driver without the typed read falls
+	 * back to its own string form.
+	 */
+	private static Object temporalValue(ResultSet rs, int i, int sqlType) throws SQLException {
+		try {
+			switch (sqlType) {
+				case Types.DATE: {
+					LocalDate d = rs.getObject(i, LocalDate.class);
+					return d == null ? null : d.toString();
+				}
+				case Types.TIME: {
+					LocalTime t = rs.getObject(i, LocalTime.class);
+					return t == null ? null : t.toString();
+				}
+				case Types.TIMESTAMP: {
+					LocalDateTime dt = rs.getObject(i, LocalDateTime.class);
+					return dt == null ? null : dt.format(TEMPORAL_TEXT);
+				}
+				default: {
+					OffsetDateTime odt = rs.getObject(i, OffsetDateTime.class);
+					return odt == null ? null : odt.toString();
+				}
+			}
+		} catch (SQLException e) {
+			return rs.getString(i);
+		}
+	}
+
 	private String toSqlValue(String type, Object value, SimpleDateFormat ymd, SimpleDateFormat ymdhms) throws Exception {
 		String valueSql = "";
 		if ("varchar".equals(type) || "text".equals(type) || "vector".equals(type)) {
@@ -985,7 +1108,7 @@ public class DuckDBAdapter implements DataAdapter {
 			sql += " where " + whereStr;
 		}
 		
-		executeSql(connection, sql);
+		executeSql(sql);
 	}
 
 	@Override
@@ -1043,7 +1166,7 @@ public class DuckDBAdapter implements DataAdapter {
 			}
 			
 			if (sql != null) {
-				executeSql(connection, sql);
+				executeSql(sql);
 			}
 		} else {
 			throw new Exception("Object class [" + sourceClassName + "] and object class [" + targetClassName + "] have no relationship definition [" + relationName + "]");
@@ -1105,29 +1228,29 @@ public class DuckDBAdapter implements DataAdapter {
 			}
 			
 			if (sql != null) {
-				executeSql(connection, sql);
+				executeSql(sql);
 			}
 		} else {
 			throw new Exception("Object class [" + sourceClassName + "] and object class [" + targetClassName + "] have no relationship definition [" + relationName + "]");
 		}
 	}
 	
-	private void executeSql(DataAdapterConnection connection, String sql) throws Exception {
+	private void executeSql(String sql) throws Exception {
 		List<String> sqls = new ArrayList<String>();
 		sqls.add(sql);
-		executeSql(connection, sqls);
+		executeSql(sqls);
 	}
 	
-	private void executeSql(DataAdapterConnection connection, List<String> sqls) throws Exception {
+	private void executeSql(List<String> sqls) throws Exception {
 		Connection conn = null;
 		Statement st = null;
 		
 		try {
-			conn = DriverManager.getConnection(connection.getUrl());
+			conn = openConnection();
 			conn.setAutoCommit(false);
 			st = conn.createStatement();
 			for (String sql : sqls) {
-				log.info(sql);
+				log.debug(sql);
 				st.addBatch(sql);
 			}
 			st.executeBatch();
@@ -1156,7 +1279,7 @@ public class DuckDBAdapter implements DataAdapter {
 		String fullClassName = (String) classDef.get("className");
 		String pk = DslUtil.getPrimaryKey(classDef);
 		String sql = "select " + attrName + " from " + fullClassName + " where " + pk + " = '" + objectId.replace("'", "''") + "'";
-		JSONArray rows = querySql(connection, sql);
+		JSONArray rows = querySql(sql);
 		if (rows == null || rows.isEmpty()) {
 			throw new IllegalArgumentException("Object " + objectId + " of class " + fullClassName + " does not exist");
 		}
@@ -1173,7 +1296,7 @@ public class DuckDBAdapter implements DataAdapter {
     	dsls.add(dsl);
     	List<Map<String, Object>> classDefs = (List<Map<String, Object>>)jsonRule.get("classDef");
 		String dslStr = DslUtil.normalizeClassNames(JSONArray.toJSONString(dsls, Feature.WriteMapNullValue), classDefs);
-		dslStr = DslUtil.setConditionTimeColumnToCorrectFormat(dslStr, dataRagConfig.getDslMightTimeFormats(), classDefs);
+		dslStr = DslUtil.setConditionTimeColumnToCorrectFormat(dslStr, dataRagConfig.getDslMightTimeFormats(), classDefs, timeConditionsAsEpochMillis(), timeConditionZone());
 		
 		JSONObject dataMap = new JSONObject();
 		DslExecutionResult result = null;
@@ -1184,10 +1307,10 @@ public class DuckDBAdapter implements DataAdapter {
 				classDef.put("className", className);
 			}
 			String sandboxDslStr = addSandboxId(dslStr, sandboxId);
-			result = HttpRequestUtil.getM3Data(dataRagConfig, this, sandboxDslStr, null, true, jsonRule, vectorResourceDao, userDataPermission, HttpRequestUtil.M3Mode.V1, domainId)[1];
+			result = HttpRequestUtil.executeDsl(dataRagConfig, this, sandboxDslStr, null, true, jsonRule, vectorResourceDao, userDataPermission, DslExecutionMode.OPTIMIZED, domainId)[1];
 			data = result.data();
 		} else {
-			result = HttpRequestUtil.getM3Data(dataRagConfig, this, dslStr, null, true, jsonRule, vectorResourceDao, userDataPermission, HttpRequestUtil.M3Mode.V1, domainId)[1];
+			result = HttpRequestUtil.executeDsl(dataRagConfig, this, dslStr, null, true, jsonRule, vectorResourceDao, userDataPermission, DslExecutionMode.OPTIMIZED, domainId)[1];
 			data = result.data();
 		}
 		

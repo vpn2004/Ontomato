@@ -1,4 +1,4 @@
-import type { DiagnosisStreamEvent } from "@ontomato/contracts/diagnosis";
+import type { AgentResponseEvent } from "@ontomato/contracts/agent-chat";
 import type { HttpResponse } from "@ontomato/contracts/http";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -47,7 +47,7 @@ function deferred<T>(): {
   return { promise, resolve, reject };
 }
 
-function streamResponse(events: DiagnosisStreamEvent[], signal?: AbortSignal): Response {
+function streamResponse(events: AgentResponseEvent[], signal?: AbortSignal): Response {
   const encoder = new TextEncoder();
   return new Response(
     new ReadableStream<Uint8Array>({

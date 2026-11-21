@@ -1,3 +1,4 @@
+import { withRenderedLinks } from "./rendered-links";
 import { marked } from "./marked";
 import { withSkillResourceCredentials } from "../features/skills/utils/skill-resource";
 
@@ -37,7 +38,7 @@ export function renderMarkdown(text: string): string {
     result = result.replace(block.fullMatch, iframeHtml);
   }
 
-  return marked.parse(result) as string;
+  return withRenderedLinks(marked.parse(result) as string);
 }
 
 export function stripMarkdown(text: string): string {

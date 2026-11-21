@@ -1,0 +1,312 @@
+package io.ontomato.dataengine.dataAdapter;
+
+import java.io.ByteArrayOutputStream;
+import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Flow;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BiFunction;
+import java.util.function.Supplier;
+import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONObject;
+
+/** Only schema/instance reads and the native read-query endpoint are exposed. */
+final class OnnCoreHttpClient {
+    private static final int MAX_BYTES = 8 * 1024 * 1024;
+    private static final HttpClient CLIENT = HttpClient.newBuilder()
+        .connectTimeout(Duration.ofSeconds(3)).followRedirects(HttpClient.Redirect.NEVER).build();
+    private final String configuredUrl;
+    private final String gatewayToken;
+    private final Duration timeout;
+    private final int maxBytes;
+    private final Map<String, String> principalHeaders;
+    private final OnnCoreTiming timing;
+
+    OnnCoreHttpClient(String url) { this(url, null, Duration.ofSeconds(12), MAX_BYTES); }
+
+    OnnCoreHttpClient(String url, String gatewayToken) { this(url, gatewayToken, Duration.ofSeconds(12), MAX_BYTES); }
+
+    OnnCoreHttpClient(String url, Duration timeout, int maxBytes) {
+        this(url, null, timeout, maxBytes);
+    }
+
+    OnnCoreHttpClient(String url, String gatewayToken, Duration timeout, int maxBytes) {
+        this(url, gatewayToken, timeout, maxBytes, Map.of());
+    }
+
+    private OnnCoreHttpClient(String url, String gatewayToken, Duration timeout, int maxBytes, Map<String, String> principalHeaders) {
+        this(url, gatewayToken, timeout, maxBytes, principalHeaders, null);
+    }
+    private OnnCoreHttpClient(String url, String gatewayToken, Duration timeout, int maxBytes, Map<String, String> principalHeaders, OnnCoreTiming timing) {
+        this.timing = timing;
+        if (timeout == null || timeout.toMillis() < 1 || maxBytes < 1) throw new IllegalArgumentException("Invalid ONN read limits");
+        this.configuredUrl = url; this.gatewayToken = gatewayToken == null || gatewayToken.isBlank() ? null : gatewayToken;
+        this.timeout = timeout; this.maxBytes = maxBytes;
+        this.principalHeaders = Map.copyOf(principalHeaders);
+    }
+
+    OnnCoreHttpClient withTiming(OnnCoreTiming timing) {
+        return new OnnCoreHttpClient(configuredUrl, gatewayToken, timeout, maxBytes, principalHeaders, timing);
+    }
+    OnnCoreTiming timing() { return timing; }
+
+    OnnCoreHttpClient asPrincipal(ConditionalObjectWrites.Principal principal) {
+        if (gatewayToken == null) throw new UnsupportedOperationException("ONN conditional writes require a configured trusted gateway");
+        return new OnnCoreHttpClient(configuredUrl, gatewayToken, timeout, maxBytes,
+            Map.of("X-OMS-Subject", principal.subject(), "X-OMS-Roles", String.join(",", principal.roles()),
+                "X-OMS-Audit-Who", principal.subject()), timing);
+    }
+
+    JSONObject patch(String className, String id, JSONObject attributes, String etag, String idempotencyKey) throws Exception {
+        return request(OnnCoreTiming.Operation.INSTANCE, "PATCH", () -> "/data/instance", () -> JSON.toJSONString(JSONObject.of("class_path", className, "id", id,
+            "attributes", attributes), com.alibaba.fastjson2.JSONWriter.Feature.WriteMapNullValue), false, timeout,
+            () -> Map.of("If-Match", etag, "X-OMS-Idempotency-Key", idempotencyKey,
+                "X-Request-ID", idempotencyKey, "X-OMS-Audit-Why", "controlled-action:" + idempotencyKey));
+    }
+
+    String baseUrl() {
+        if (configuredUrl == null || configuredUrl.isBlank()) throw new IllegalArgumentException("Configure the ONN Core service URL first");
+        URI uri = URI.create(configuredUrl.trim());
+        String path = uri.getPath();
+        if (!("http".equals(uri.getScheme()) || "https".equals(uri.getScheme())) || uri.getHost() == null
+            || uri.getUserInfo() != null || uri.getQuery() != null || uri.getFragment() != null
+            || !(path == null || path.isEmpty() || path.equals("/") || path.equals("/api/v1") || path.equals("/api/v1/"))) {
+            throw new IllegalArgumentException("ONN Core URL must be an HTTP(S) origin or end in /api/v1, without credentials or query parameters");
+        }
+        return uri.getScheme() + "://" + uri.getRawAuthority() + "/api/v1";
+    }
+
+    JSONObject schema() throws Exception {
+        return request(OnnCoreTiming.Operation.SCHEMA, "GET", () -> "/schema/all", () -> null, false, timeout);
+    }
+    record SchemaResponse(JSONObject body, String etag, boolean notModified) { }
+    SchemaResponse schema(String etag) throws Exception {
+        return measured(OnnCoreTiming.Operation.SCHEMA, "GET", () -> "/schema/all", () -> null, timeout,
+            () -> etag == null ? Map.of() : Map.of("If-None-Match", etag), (response, route) -> {
+                if (response.statusCode() == 304) {
+                    if (etag == null || response.body().length != 0
+                        || response.headers().firstValue("ETag").filter(tag -> !tag.equals(etag)).isPresent())
+                        throw new IllegalStateException("ONN returned an unsolicited or nonempty schema 304");
+                    return new SchemaResponse(null, etag, true);
+                }
+                JSONObject body = decodeMeasured(OnnCoreTiming.Operation.SCHEMA, response, "GET", "/schema/all", false);
+                String tag = response.headers().firstValue("ETag").orElse(null);
+                if (tag != null && (!tag.matches("\"[a-zA-Z0-9._-]{1,256}\"")))
+                    throw new IllegalStateException("ONN returned an invalid strong schema ETag");
+                return new SchemaResponse(body, tag, false);
+            });
+    }
+    String cacheScope() {
+        return OnnCoreSchema.digest(JSON.toJSONString(java.util.Arrays.asList(baseUrl(), gatewayToken,
+            new java.util.TreeMap<>(principalHeaders)), com.alibaba.fastjson2.JSONWriter.Feature.WriteMapNullValue));
+    }
+    JSONObject capabilities() throws Exception {
+        return request(OnnCoreTiming.Operation.CAPABILITIES, "GET", () -> "/system/capabilities", () -> null, false, timeout);
+    }
+    JSONObject sample(String className) throws Exception {
+        return request(OnnCoreTiming.Operation.OTHER, "GET", () -> "/data/sample?class=" + encode(className) + "&limit=1", () -> null, false, timeout);
+    }
+    JSONObject instance(String className, String id) throws Exception {
+        try { return request(OnnCoreTiming.Operation.INSTANCE, "GET", () -> "/data/instance?class_path=" + encode(className) + "&id=" + encode(id), () -> null, false, timeout); }
+        catch (OnnHttpException e) { if (e.status == 404) return null; throw e; }
+    }
+    JSONObject query(JSONObject query) throws Exception {
+        return request(OnnCoreTiming.Operation.OTHER, "POST", () -> "/query/execute", () -> JSON.toJSONString(query), false, timeout);
+    }
+    JSONObject queryPage(JSONObject query, Duration remaining) throws Exception {
+        return request(OnnCoreTiming.Operation.PAGE, "POST", () -> "/query/execute", () -> JSON.toJSONString(query), true, remaining);
+    }
+    JSONObject pipelinePage(JSONObject query, Duration remaining) throws Exception {
+        return request(OnnCoreTiming.Operation.PAGE, "POST", () -> "/query/pipeline", () -> JSON.toJSONString(query), true, remaining);
+    }
+    JSONObject page(JSONObject query, Duration remaining, boolean pipeline, boolean profile) throws Exception {
+        return request(OnnCoreTiming.Operation.PAGE, "POST", () -> (pipeline ? "/query/pipeline" : "/query/execute") + (profile ? "?profile=1" : ""),
+            () -> JSON.toJSONString(query, com.alibaba.fastjson2.JSONWriter.Feature.WriteMapNullValue), true, remaining);
+    }
+    void closeSnapshot(String id, Duration remaining) throws Exception {
+        if (id == null || id.isBlank()) return;
+        request(OnnCoreTiming.Operation.CLOSE, "DELETE", () -> "/query/snapshots/" + encode(id), () -> null, false, remaining);
+    }
+    void closeWindow(String token, Duration remaining) throws Exception {
+        measured(OnnCoreTiming.Operation.CLOSE, "POST", () -> "/query/windows/close", () -> JSON.toJSONString(JSONObject.of("close_token", token)), remaining, Map::of, (response, route) -> {
+            if (response.statusCode() != 204 || response.body().length != 0)
+                throw new IllegalStateException("ONN binding window was not released");
+            return null;
+        });
+    }
+    static String encode(String value) { return URLEncoder.encode(value, StandardCharsets.UTF_8); }
+
+    private JSONObject request(OnnCoreTiming.Operation operation, String method, Supplier<String> route, Supplier<String> body,
+                               boolean paged, Duration remaining) throws Exception {
+        return request(operation, method, route, body, paged, remaining, Map::of);
+    }
+
+    private JSONObject request(OnnCoreTiming.Operation operation, String method, Supplier<String> route, Supplier<String> body,
+                               boolean paged, Duration remaining, Supplier<Map<String, String>> headers) throws Exception {
+        return measured(operation, method, route, body, remaining, headers,
+            (response, encodedRoute) -> decodeMeasured(operation, response, method, encodedRoute, paged));
+    }
+
+    // 父阶段包含编码、完整响应接收与响应校验；操作标签只由固定枚举提供。
+    private <T> T measured(OnnCoreTiming.Operation operation, String method, Supplier<String> route, Supplier<String> body,
+                           Duration remaining, Supplier<Map<String, String>> headers, BiFunction<HttpResponse<byte[]>, String, T> accept) throws Exception {
+        long started = System.nanoTime();
+        boolean success = false;
+        try {
+            HttpRequest request;
+            Duration deadline;
+            String encodedRoute;
+            long encodeStarted = System.nanoTime();
+            try {
+                encodedRoute = route.get();
+                String encodedBody = body.get();
+                deadline = remaining.compareTo(timeout) < 0 ? remaining : timeout;
+                request = encodeRequest(method, encodedRoute, encodedBody, deadline, headers.get());
+            } finally { if (timing != null) timing.add(operation, "requestEncode", encodeStarted); }
+            T result = accept.apply(exchange(operation, request, deadline), encodedRoute);
+            success = true;
+            return result;
+        } finally {
+            if (timing != null) {
+                timing.add(operation, "requestTotal", started);
+                timing.count(operation, success ? "success" : "failure", 1);
+            }
+        }
+    }
+
+    private HttpRequest encodeRequest(String method, String route, String body, Duration deadline, Map<String, String> headers) throws HttpTimeoutException {
+        if (deadline.isNegative() || deadline.isZero()) throw new HttpTimeoutException("ONN query exceeded its response deadline");
+        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(baseUrl() + route))
+            .timeout(deadline).header("Accept", "application/json");
+        if (gatewayToken != null) {
+            builder.header("Authorization", "Bearer " + gatewayToken)
+                .header("X-OMS-Gateway-Token", gatewayToken);
+        }
+        principalHeaders.forEach(builder::header);
+        headers.forEach(builder::header);
+        if (body == null) builder.method(method, HttpRequest.BodyPublishers.noBody());
+        else builder.header("Content-Type", "application/json").method(method, HttpRequest.BodyPublishers.ofString(body));
+        return builder.build();
+    }
+
+    private HttpResponse<byte[]> exchange(OnnCoreTiming.Operation operation, HttpRequest request, Duration deadline) throws Exception {
+        long httpStart = System.nanoTime();
+        AtomicLong receivedBytes = new AtomicLong();
+        try {
+            // The deadline includes body consumption. An InputStream body handler completes
+            // after headers and would allow a stalled response body to block indefinitely.
+            CompletableFuture<HttpResponse<byte[]>> pending = CLIENT.sendAsync(request, info -> new BoundedBodySubscriber(maxBytes, receivedBytes));
+            try { return pending.get(Math.max(1, deadline.toMillis()), TimeUnit.MILLISECONDS); }
+            catch (TimeoutException e) {
+                pending.cancel(true);
+                throw new HttpTimeoutException("ONN read exceeded its response deadline");
+            } catch (InterruptedException e) { pending.cancel(true); Thread.currentThread().interrupt(); throw e; }
+            catch (ExecutionException e) {
+                if (e.getCause() instanceof Exception cause) throw cause;
+                throw new IllegalStateException("ONN response failed", e.getCause());
+            }
+        } finally {
+            if (timing != null) {
+                timing.add(operation, "httpExchange", httpStart);
+                timing.count(operation, "responseBytes", receivedBytes.get());
+            }
+        }
+    }
+
+    private JSONObject decodeMeasured(OnnCoreTiming.Operation operation, HttpResponse<byte[]> response, String method, String route, boolean paged) {
+        if (method.equals("DELETE") && (response.statusCode() == 204 || response.statusCode() == 404))
+            return decode(response, method, route, paged);
+        long started = System.nanoTime();
+        try { return decode(response, method, route, paged); }
+        finally { if (timing != null) timing.add(operation, "responseDecode", started); }
+    }
+
+    private JSONObject decode(HttpResponse<byte[]> response, String method, String route, boolean paged) {
+        byte[] bytes = response.body();
+        if (method.equals("DELETE") && (response.statusCode() == 204 || response.statusCode() == 404)) return new JSONObject();
+        if (response.statusCode() != 200) throw new OnnHttpException(response.statusCode(), operation(method, route), errorCode(bytes));
+        JSONObject result;
+        try { result = JSON.parseObject(new String(bytes, StandardCharsets.UTF_8)); }
+        catch (RuntimeException e) { throw new IllegalStateException("ONN returned an invalid JSON response", e); }
+        if (result == null || Boolean.TRUE.equals(result.getBoolean("degraded"))
+            || Boolean.FALSE.equals(result.getBoolean("success")) || result.containsKey("error")
+            || Boolean.TRUE.equals(result.getBoolean("partial")) || Boolean.TRUE.equals(result.getBoolean("truncated"))
+            || Boolean.FALSE.equals(result.getBoolean("complete"))
+            || (!paged && route.startsWith("/query/") && Boolean.TRUE.equals(result.getBoolean("has_more")))
+            || Set.of("failed", "failure", "error", "invalid", "unknown", "incomplete", "degraded", "partial", "truncated", "timeout", "cancelled", "canceled")
+                .contains(result.getString("status") == null ? "" : result.getString("status").toLowerCase(Locale.ROOT))) {
+            throw new IllegalStateException("ONN returned a failed, degraded or incomplete response; no answer was produced");
+        }
+        return result;
+    }
+
+    private static String operation(String method, String route) {
+        return method + " " + (route.startsWith("/query/snapshots/") ? "/query/snapshots/{id}" : route.split("\\?")[0]);
+    }
+
+    private static String errorCode(byte[] bytes) {
+        try {
+            JSONObject error = JSON.parseObject(new String(bytes, StandardCharsets.UTF_8));
+            String code = error.getString("code");
+            if (code == null && error.get("error") instanceof JSONObject nested) code = nested.getString("code");
+            if (code != null && code.matches("[A-Z][A-Z0-9_]{0,79}")) return code;
+        } catch (RuntimeException ignored) { }
+        return "HTTP_ERROR";
+    }
+
+    private static final class BoundedBodySubscriber implements HttpResponse.BodySubscriber<byte[]> {
+        private final CompletableFuture<byte[]> body = new CompletableFuture<>();
+        private final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        private final int limit;
+        private final AtomicLong receivedBytes;
+        private Flow.Subscription subscription;
+        BoundedBodySubscriber(int limit, AtomicLong receivedBytes) { this.limit = limit; this.receivedBytes = receivedBytes; }
+        public CompletionStage<byte[]> getBody() { return body; }
+        public void onSubscribe(Flow.Subscription subscription) {
+            this.subscription = subscription; subscription.request(Long.MAX_VALUE);
+        }
+        public void onNext(List<ByteBuffer> buffers) {
+            if (body.isDone()) return;
+            long chunkBytes = 0;
+            for (ByteBuffer buffer : buffers) chunkBytes += buffer.remaining();
+            // 统计已交付的原始响应字节，即使该块随后被读取限额拒绝。
+            receivedBytes.addAndGet(chunkBytes);
+            long nextSize = bytes.size() + chunkBytes;
+            if (nextSize > limit) {
+                subscription.cancel();
+                body.completeExceptionally(new IllegalStateException("ONN response exceeds the read limit; query was not accepted as complete"));
+                return;
+            }
+            for (ByteBuffer buffer : buffers) {
+                byte[] chunk = new byte[buffer.remaining()]; buffer.get(chunk); bytes.writeBytes(chunk);
+            }
+        }
+        public void onError(Throwable error) { body.completeExceptionally(error); }
+        public void onComplete() { body.complete(bytes.toByteArray()); }
+    }
+
+    static final class OnnHttpException extends IllegalStateException {
+        final int status;
+        final String code;
+        OnnHttpException(int status, String operation, String code) {
+            super("ONN " + operation + " failed (HTTP " + status + ", code=" + code + ")");
+            this.status = status; this.code = code;
+        }
+    }
+}

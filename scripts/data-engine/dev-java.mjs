@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseEnv } from "node:util";
 import { holdForeground } from "../dev-command.mjs";
 import { stageResources } from "./build-images.mjs";
 
@@ -91,20 +92,7 @@ export function mavenInvocation(wrapper, args, platform = process.platform, coms
   return { command: comspec, args: ["/d", "/s", "/c", `"${line}"`], verbatim: true };
 }
 
-// The app's .env, read as the old host loader did: one KEY=value per line split at the first "=",
-// value kept literally (spaces and further "=" included); blank keys and "#" lines are skipped.
-// A trailing CR is a line terminator, not part of the value. Nothing is sourced or evaluated.
-export function readDotEnv(text) {
-  const vars = {};
-  for (const raw of text.split("\n")) {
-    const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
-    const at = line.indexOf("=");
-    const key = at === -1 ? line : line.slice(0, at);
-    if (key === "" || key.startsWith("#")) continue;
-    vars[key] = at === -1 ? "" : line.slice(at + 1);
-  }
-  return vars;
-}
+export const readDotEnv = parseEnv;
 
 function executable(path) {
   try {
@@ -115,14 +103,14 @@ function executable(path) {
   }
 }
 
-// The child environment: file values override inherited ones. Windows variable names are
-// case-insensitive, so an inherited Path and a file PATH are the same variable and only the file
+// Process values override the shared root .env. Windows variable names are
+// case-insensitive, so an inherited Path and a file PATH are the same variable and only the process
 // value survives; POSIX names stay case-sensitive and are merged as before.
 export function mergeEnvironment(inherited, vars, platform = process.platform) {
-  if (platform !== "win32") return { ...inherited, ...vars };
+  if (platform !== "win32") return { ...vars, ...inherited };
   const env = {};
   const spellings = new Map();
-  for (const [name, value] of [...Object.entries(inherited), ...Object.entries(vars)]) {
+  for (const [name, value] of [...Object.entries(vars), ...Object.entries(inherited)]) {
     const upper = name.toUpperCase();
     if (spellings.has(upper)) delete env[spellings.get(upper)];
     spellings.set(upper, name);
@@ -146,8 +134,8 @@ export function startDevJava({ app, appDir, wrapper, profiles }, userArgs, inher
   const lang = inherited.PROMPT_LANG ?? app.promptLang;
   if (!app.supportedPromptLangs.includes(lang))
     throw new Error(`PROMPT_LANG must be one of ${app.supportedPromptLangs.join(", ")}`);
-  const envFile = join(appDir, ".env");
-  if (!existsSync(envFile)) throw new Error(`Missing ${envFile}: create it with this app's Java settings first`);
+  const envFile = join(app.repoRoot, ".env");
+  if (!existsSync(envFile)) throw new Error(`Missing ${envFile}: copy the product root .env.example first`);
   const python = ensurePythonEnv(appDir, join(app.requirements.root, app.requirements.path), inherited);
   const vars = readDotEnv(readFileSync(envFile, "utf8"));
 

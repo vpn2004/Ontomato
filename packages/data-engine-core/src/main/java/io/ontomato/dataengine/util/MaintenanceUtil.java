@@ -1,77 +1,50 @@
 package io.ontomato.dataengine.util;
 
 import java.io.*;
+import java.lang.management.ManagementFactory;
 import java.net.InetAddress;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.*;
-import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import com.alibaba.fastjson2.*;
-import org.yaml.snakeyaml.Yaml;
-import lombok.extern.slf4j.Slf4j;
+import com.sun.management.OperatingSystemMXBean;
 
 /**
- * System monitoring class, used to collect the running status information of the host, M3 ONNStore, backend and frontend Docker containers.
- * Aggregates all information into JSON format, supporting console output and file saving.
+ * System monitoring class: collects the resources visible to this process (CPU, memory, disk) and the status of the
+ * data engine's own Java process, aggregated into JSON. Read-only: it never starts, stops or restarts anything.
  */
-@Slf4j
 public class MaintenanceUtil {
 
-
-        /** Supported action types: stop, start, restart */
-        private static final String[] ACTIONS_FULL = {"stop", "start", "restart"};
-        /** Restart is the only supported action */
-        private static final String[] ACTIONS_RESTART = {"restart"};
-
-        /** Used to parse the CPU usage (us/sy/id/wa) from the top command output */
+        /** Used to parse the CPU usage (us/sy/id/wa) from the Linux top command output */
         private static final Pattern CPU_PATTERN = Pattern.compile(
                 "(\\d+\\.?\\d*)\\s*us.*?(\\d+\\.?\\d*)\\s*sy.*?(\\d+\\.?\\d*)\\s*id.*?(\\d+\\.?\\d*)\\s*wa");
-        /** Used to parse the memory information (total/free/used) from the top command output */
-        private static final Pattern MEM_PATTERN = Pattern.compile(
-                ":?\\s*(\\d+\\.?\\d*)\\s*\\S*\\s*total[,\\s]*" +
-                        "(\\d+\\.?\\d*)\\s*\\S*\\s*free[,\\s]*" +
-                        "(\\d+\\.?\\d*)\\s*\\S*\\s*used");
-        /** Used to match the JVM initial heap memory parameter -Xms */
-        private static final Pattern JVM_XMS_PATTERN = Pattern.compile("-Xms(\\d+)([gGmMkK]?)");
-        /** Used to match the JVM maximum heap memory parameter -Xmx */
-        private static final Pattern JVM_XMX_PATTERN = Pattern.compile("-Xmx(\\d+)([gGmMkK]?)");
+        /** Used to parse the macOS top output, which has no wait time: "CPU usage: 21.3% user, 6.1% sys, 72.4% idle" */
+        private static final Pattern MAC_CPU_PATTERN = Pattern.compile(
+                "(\\d+\\.?\\d*)%\\s*user,\\s*(\\d+\\.?\\d*)%\\s*sys,\\s*(\\d+\\.?\\d*)%\\s*idle");
+        /** Used to parse the page size from the macOS vm_stat header */
+        private static final Pattern VM_PAGE_SIZE_PATTERN = Pattern.compile("page size of (\\d+) bytes");
+        /** Used to parse one "Pages xxx: 123." counter of the macOS vm_stat output */
+        private static final Pattern VM_PAGE_COUNT_PATTERN = Pattern.compile("^Pages ([^:]+):\\s*(\\d+)\\.");
         /** Used to parse the process running time format (dd-HH:MM:SS) */
         private static final Pattern ETIME_PATTERN = Pattern.compile(
                 "(?:(\\d+)-)?(?:(\\d{2}):)?(\\d{2}):(\\d{2})");
 
         /**
          * Collects all monitoring information
-         * @param onnStoreRoot ONNStore root directory path
          * @return JSON object containing all monitoring data
          */
-        public JSONObject collectAll(String onnStoreRoot) {
+        public JSONObject collectAll() {
             JSONObject result = new JSONObject();
             result.put("timestamp",
-                    ZonedDateTime.now(ZoneOffset.ofHours(8))
+                    ZonedDateTime.now()
                             .format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssXXX")));
             result.put("hostname", getHostname());
             result.put("server", getHostInfo());
-            result.put("m3", getM3Info(onnStoreRoot));
             result.put("backend", getBackendInfo());
-            result.put("frontend", getFrontendInfo());
             return result;
-        }
-
-        /**
-         * Saves the JSON data to the specified file
-         * @param json JSON object to save
-         * @param filePath target file path
-         * @throws IOException thrown when writing the file fails
-         */
-        public void saveToFile(JSONObject json, String filePath) throws IOException {
-            String content = json.toString();
-            Files.write(Paths.get(filePath), content.getBytes(StandardCharsets.UTF_8),
-                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
         }
 
         // ======================== 1. Host information ========================
@@ -89,7 +62,9 @@ public class MaintenanceUtil {
         }
 
         /**
-         * Gets CPU usage information (via the top command)
+         * Gets CPU usage information. Linux is read from top, macOS from top's CPU usage line and, when
+         * neither command is available (for example a slim container image), from the JVM's own view of
+         * the host.
          * @return JSON object containing user/system/idle/wait and the usage rate
          */
         private JSONObject getCpuInfo() {
@@ -99,6 +74,19 @@ public class MaintenanceUtil {
             cpu.put("idle", 100.0);
             cpu.put("wait", 0);
             cpu.put("userate", 0);
+            boolean parsed = isMac() ? parseMacCpu(cpu) : parseLinuxCpu(cpu);
+            if (!parsed) {
+                applyJvmCpuLoad(cpu);
+            }
+            return cpu;
+        }
+
+        /**
+         * Parses the CPU line of the Linux top command.
+         * @param cpu JSON object to fill
+         * @return true when the output was parsed
+         */
+        private boolean parseLinuxCpu(JSONObject cpu) {
             try {
                 String output = runCommand("bash", "-c",
                         "LC_ALL=C top -bn2 -d 1 2>/dev/null | grep '%Cpu' | tail -1");
@@ -114,16 +102,67 @@ public class MaintenanceUtil {
                         cpu.put("idle", id);
                         cpu.put("wait", wa);
                         cpu.put("userate", Math.round((100.0 - id) * 10.0) / 10.0);
+                        return true;
                     }
+                }
+            } catch (Exception e) {
+                // fall through to the JVM view
+            }
+            return false;
+        }
+
+        /**
+         * Parses the CPU line of the macOS top command. macOS reports no wait time, so it stays 0.
+         * @param cpu JSON object to fill
+         * @return true when the output was parsed
+         */
+        private boolean parseMacCpu(JSONObject cpu) {
+            try {
+                String output = runCommand("bash", "-c",
+                        "LC_ALL=C top -l 2 -n 0 2>/dev/null | grep 'CPU usage' | tail -1");
+                if (output != null && !output.isEmpty()) {
+                    Matcher m = MAC_CPU_PATTERN.matcher(output);
+                    if (m.find()) {
+                        double us = Double.parseDouble(m.group(1));
+                        double sy = Double.parseDouble(m.group(2));
+                        double id = Double.parseDouble(m.group(3));
+                        cpu.put("user", us);
+                        cpu.put("system", sy);
+                        cpu.put("idle", id);
+                        cpu.put("wait", 0);
+                        cpu.put("userate", Math.round((100.0 - id) * 10.0) / 10.0);
+                        return true;
+                    }
+                }
+            } catch (Exception e) {
+                // fall through to the JVM view
+            }
+            return false;
+        }
+
+        /**
+         * Uses the JVM's host CPU load when the platform commands are unavailable.
+         * @param cpu JSON object to fill
+         */
+        private void applyJvmCpuLoad(JSONObject cpu) {
+            try {
+                double load = ManagementFactory.getPlatformMXBean(OperatingSystemMXBean.class).getCpuLoad();
+                if (load >= 0) {
+                    double userate = Math.round(load * 1000.0) / 10.0;
+                    cpu.put("user", userate);
+                    cpu.put("system", 0);
+                    cpu.put("idle", Math.round((100.0 - userate) * 10.0) / 10.0);
+                    cpu.put("wait", 0);
+                    cpu.put("userate", userate);
                 }
             } catch (Exception e) {
                 // keep defaults
             }
-            return cpu;
         }
 
         /**
-         * Gets memory usage information (via the top command)
+         * Gets memory usage information. Linux is read from free, macOS from vm_stat and sysctl and, when
+         * neither command is available, from the JVM's own view of the host.
          * @return JSON object containing total_gb/used_gb/free_gb/usage_percent
          */
         private JSONObject getMemoryInfo() {
@@ -132,6 +171,19 @@ public class MaintenanceUtil {
             memory.put("used_gb", 0);
             memory.put("free_gb", 0);
             memory.put("usage_percent", 0);
+            boolean parsed = isMac() ? parseMacMemory(memory) : parseLinuxMemory(memory);
+            if (!parsed) {
+                applyJvmMemory(memory);
+            }
+            return memory;
+        }
+
+        /**
+         * Parses the memory line of the Linux free command.
+         * @param memory JSON object to fill
+         * @return true when the output was parsed
+         */
+        private boolean parseLinuxMemory(JSONObject memory) {
             try {
                 String output = runCommand("bash", "-c",
                         "LC_ALL=C free -g 2>/dev/null | grep '^Mem:' | head -1");
@@ -141,22 +193,133 @@ public class MaintenanceUtil {
                         double total = Double.parseDouble(parts[1]);
                         double used = Double.parseDouble(parts[2]);
                         double free = Double.parseDouble(parts[3]);
-                        double totalRounded = Math.round(total * 100.0) / 100.0;
-                        double usedRounded = Math.round(used * 100.0) / 100.0;
-                        double freeRounded = Math.round(free * 100.0) / 100.0;
-                        double usagePercent = total > 0
-                                ? Math.round(used / total * 1000.0) / 10.0
-                                : 0;
-                        memory.put("total_gb", totalRounded);
-                        memory.put("used_gb", usedRounded);
-                        memory.put("free_gb", freeRounded);
-                        memory.put("usage_percent", usagePercent);
+                        putMemory(memory, total, used, free);
+                        return true;
                     }
+                }
+            } catch (Exception e) {
+                // fall through to the JVM view
+            }
+            return false;
+        }
+
+        /**
+         * Reads the macOS physical memory from vm_stat and sysctl. Used memory is the sum of active,
+         * wired and compressed pages, matching the value Activity Monitor reports as "Memory Used".
+         * @param memory JSON object to fill
+         * @return true when the output was parsed
+         */
+        private boolean parseMacMemory(JSONObject memory) {
+            try {
+                String totalOutput = runCommand("sysctl", "-n", "hw.memsize");
+                String vmOutput = runCommand("vm_stat");
+                if (totalOutput == null || totalOutput.trim().isEmpty() || vmOutput == null
+                        || vmOutput.isEmpty()) {
+                    return false;
+                }
+                long totalBytes = Long.parseLong(totalOutput.trim());
+                Matcher pageSizeMatcher = VM_PAGE_SIZE_PATTERN.matcher(vmOutput);
+                if (totalBytes <= 0 || !pageSizeMatcher.find()) {
+                    return false;
+                }
+                long pageSize = Long.parseLong(pageSizeMatcher.group(1));
+                long activePages = 0;
+                long wiredPages = 0;
+                long compressedPages = 0;
+                for (String line : vmOutput.split("\n")) {
+                    Matcher m = VM_PAGE_COUNT_PATTERN.matcher(line.trim());
+                    if (!m.find()) {
+                        continue;
+                    }
+                    String counter = m.group(1).trim();
+                    long pages = Long.parseLong(m.group(2));
+                    if ("active".equalsIgnoreCase(counter)) {
+                        activePages = pages;
+                    } else if ("wired down".equalsIgnoreCase(counter)) {
+                        wiredPages = pages;
+                    } else if ("occupied by compressor".equalsIgnoreCase(counter)) {
+                        compressedPages = pages;
+                    }
+                }
+                long usedBytes = (activePages + wiredPages + compressedPages) * pageSize;
+                if (usedBytes <= 0 || usedBytes > totalBytes) {
+                    usedBytes = Math.max(0, totalBytes - freeBytesFromJvm());
+                }
+                long freeBytes = Math.max(0, totalBytes - usedBytes);
+                double totalGb = Math.round(bytesToGb(totalBytes) * 100.0) / 100.0;
+                double usedGb = Math.round(bytesToGb(usedBytes) * 100.0) / 100.0;
+                double freeGb = Math.round(bytesToGb(freeBytes) * 100.0) / 100.0;
+                putMemory(memory, totalGb, usedGb, freeGb);
+                return true;
+            } catch (Exception e) {
+                // fall through to the JVM view
+            }
+            return false;
+        }
+
+        /**
+         * Uses the JVM's host memory sizes when the platform commands are unavailable.
+         * @param memory JSON object to fill
+         */
+        private void applyJvmMemory(JSONObject memory) {
+            try {
+                OperatingSystemMXBean os = ManagementFactory.getPlatformMXBean(OperatingSystemMXBean.class);
+                long totalBytes = os.getTotalMemorySize();
+                long freeBytes = os.getFreeMemorySize();
+                if (totalBytes > 0) {
+                    long usedBytes = Math.max(0, totalBytes - Math.max(0, freeBytes));
+                    putMemory(memory, bytesToGb(totalBytes), bytesToGb(usedBytes), bytesToGb(freeBytes));
                 }
             } catch (Exception e) {
                 // keep defaults
             }
-            return memory;
+        }
+
+        /**
+         * Stores the memory sizes rounded to two decimals and derives the usage percentage.
+         * @param memory JSON object to fill
+         * @param totalGb total memory in GB
+         * @param usedGb used memory in GB
+         * @param freeGb free memory in GB
+         */
+        private void putMemory(JSONObject memory, double totalGb, double usedGb, double freeGb) {
+            memory.put("total_gb", Math.round(totalGb * 100.0) / 100.0);
+            memory.put("used_gb", Math.round(usedGb * 100.0) / 100.0);
+            memory.put("free_gb", Math.max(0, Math.round(freeGb * 100.0) / 100.0));
+            memory.put("usage_percent", totalGb > 0
+                    ? Math.round(usedGb / totalGb * 1000.0) / 10.0
+                    : 0);
+        }
+
+        /**
+         * Converts bytes to gigabytes.
+         * @param bytes byte count
+         * @return the value in GB
+         */
+        private double bytesToGb(long bytes) {
+            return bytes / 1024.0 / 1024.0 / 1024.0;
+        }
+
+        /**
+         * Reads the JVM-visible free memory, used only to keep the macOS split consistent.
+         * @return free bytes, or 0 when unavailable
+         */
+        private long freeBytesFromJvm() {
+            try {
+                return Math.max(0,
+                        ManagementFactory.getPlatformMXBean(OperatingSystemMXBean.class).getFreeMemorySize());
+            } catch (Exception e) {
+                return 0;
+            }
+        }
+
+        /**
+         * Whether the current platform is macOS.
+         * @return true on macOS
+         */
+        private boolean isMac() {
+            String os = System.getProperty("os.name", "");
+            return os.toLowerCase().contains("mac");
         }
 
         /**
@@ -200,223 +363,7 @@ public class MaintenanceUtil {
             return disks;
         }
 
-        // ======================== 2. M3 ONNStore configuration and service status ========================
-
-        /**
-         * Gets the configuration information and service status of M3 ONNStore
-         * @param onnStoreRoot ONNStore root directory path
-         * @return JSON object containing ONNStoreConfig and services
-         */
-        public JSONObject getM3Info(String onnStoreRoot) {
-            JSONObject m3 = new JSONObject();
-            if (onnStoreRoot == null || onnStoreRoot.isEmpty()) {
-                m3.put("ONNStoreConfig", new JSONObject());
-                m3.put("services", new JSONArray());
-                return m3;
-            }
-            Path root = Paths.get(onnStoreRoot);
-            m3.put("ONNStoreConfig", getOnnStoreConfig(root));
-            m3.put("services", getM3Services(root));
-            return m3;
-        }
-
-        /**
-         * Parses the ONNStore configuration files (cassandra.yaml and jvm-server.options)
-         * @param root ONNStore root directory
-         * @return JSON object containing the configuration parameters
-         */
-        private JSONObject getOnnStoreConfig(Path root) {
-            JSONObject config = new JSONObject();
-            config.put("concurrent_writes", 0);
-            config.put("file_cache_size_in_mb", 0);
-            config.put("jvm_ms", 0);
-            config.put("jvm_mx", 0);
-
-            // Parse cassandra.yaml
-            Path yamlPath = root.resolve("cassandra/conf/cassandra.yaml");
-            if (Files.exists(yamlPath)) {
-                try {
-                    Yaml yaml = new Yaml();
-                    Map<String, Object> yamlMap = yaml.load(Files.newInputStream(yamlPath));
-                    Object cw = findYamlKey(yamlMap, "concurrent_writes");
-                    Object fcs = findYamlKey(yamlMap, "file_cache_size_in_mb");
-                    if (cw instanceof Number) {
-                        config.put("concurrent_writes", ((Number) cw).intValue());
-                    }
-                    if (fcs instanceof Number) {
-                        config.put("file_cache_size_in_mb", ((Number) fcs).intValue());
-                    }
-                } catch (Exception e) {
-                    // keep defaults
-                }
-            }
-
-            // Parse jvm-server.options
-            Path jvmPath = root.resolve("cassandra/conf/jvm-server.options");
-            if (Files.exists(jvmPath)) {
-                try {
-                    String jvmContent = new String(Files.readAllBytes(jvmPath), StandardCharsets.UTF_8);
-                    Matcher msMatcher = JVM_XMS_PATTERN.matcher(jvmContent);
-                    Matcher mxMatcher = JVM_XMX_PATTERN.matcher(jvmContent);
-                    if (msMatcher.find()) {
-                        config.put("jvm_ms", parseJvmSizeToGb(msMatcher.group(1), msMatcher.group(2)));
-                    }
-                    if (mxMatcher.find()) {
-                        config.put("jvm_mx", parseJvmSizeToGb(mxMatcher.group(1), mxMatcher.group(2)));
-                    }
-                } catch (Exception e) {
-                    // keep defaults
-                }
-            }
-            return config;
-        }
-
-        /**
-         * Gets the running status of each M3 sub-service via the matrix.sh script
-         * @param root ONNStore root directory
-         * @return JSON array containing the status of each service
-         */
-        private JSONArray getM3Services(Path root) {
-            JSONArray services = new JSONArray();
-            List<String> listM3Service = List.of("cassandra","etcd","nats","odbserver","parser","sched","web");
-            Path matrixScript = root.resolve("sbin/matrix.sh");
-            if (!Files.exists(matrixScript)) {
-                return services;
-            }
-            try {
-                ProcessBuilder pb = new ProcessBuilder(matrixScript.toString(), "status");
-                pb.directory(root.toFile());
-                pb.redirectErrorStream(true);
-                Process p = pb.start();
-                String output = readProcessOutput(p);
-                p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
-
-                if (output != null && !output.isEmpty()) {
-                    String[] lines = output.split("\n");
-                    for (String line : lines) {
-                        line = line.trim();
-                        if (line.isEmpty()) {
-                            continue;
-                        }
-                        String[] parts = line.split("\\s+");
-                        if (parts.length < 2) {
-                            continue;
-                        }
-                        String name = parts[0];
-                        if(!listM3Service.contains(name.toLowerCase())){
-                            continue;
-                        } else if (name.toLowerCase().equals("cassandra")){
-                            name = "onnstore";
-                        } else if (name.toLowerCase().equals("odbserver")){
-                            name = "onnserver";
-                        }
-                        String status = parts[1];
-                        String pid = parts.length >= 3 && !"stopped".equals(status)
-                                && !"empty".equals(status) ? parts[2] : null;
-                        String user = parts.length >= 4 ? parts[3] : null;
-
-                        JSONObject svc = new JSONObject();
-                        svc.put("name", name);
-                        svc.put("status", status);
-                        svc.put("pid", pid != null ? pid : "");
-                        svc.put("user", user != null ? user : "");
-                        svc.put("cpu_percent", 0);
-                        svc.put("memory_mb", 0);
-                        svc.put("uptime_seconds", 0);
-                        svc.put("actions", ACTIONS_FULL);
-
-                        if (pid != null && !pid.isEmpty() && !"empty".equals(status)) {
-                            try {
-                                JSONObject detail = getServiceDetail(pid);
-                                svc.put("cpu_percent", detail.getDouble("cpu_percent"));
-                                svc.put("memory_mb", detail.getDouble("memory_mb"));
-                                svc.put("uptime_seconds", detail.getLong("uptime_seconds"));
-                                if (detail.containsKey("user") && !detail.getString("user").isEmpty()) {
-                                    svc.put("user", detail.getString("user"));
-                                }
-                            } catch (Exception e) {
-                                // keep defaults for this service
-                            }
-                        }
-                        services.add(svc);
-                    }
-                }
-            } catch (Exception e) {
-                // return empty services
-            }
-            return services;
-        }
-
-        /**
-         * Operates M3 services (start/stop/restart) as the matrix user
-         * @param onnStoreRoot ONNStore root directory path
-         * @param serviceName service name, such as web, parser, sched, etc.
-         * @param action action type, such as start, stop, restart
-         * @return JSON object containing the execution result
-         */
-        public JSONObject operateM3Services(String onnStoreRoot,String serviceName,String action){
-            JSONObject result = new JSONObject();
-            result.put("success", false);
-            result.put("service", serviceName);
-            result.put("action", action);
-            if (onnStoreRoot == null || onnStoreRoot.isEmpty()) {
-                result.put("message", "ONNStore root path is required");
-                return result;
-            }
-            if (serviceName == null || serviceName.isEmpty()) {
-                result.put("message", "Service name is required");
-                return result;
-            }
-            if (action == null || action.isEmpty()) {
-                result.put("message", "Action is required");
-                return result;
-            }
-
-            try {
-                Path root = Paths.get(onnStoreRoot);
-                Path matrixScript = root.resolve("sbin/matrix.sh");
-                if (!Files.exists(matrixScript)) {
-                    result.put("message", "matrix.sh not found at: " + matrixScript);
-                    return result;
-                }
-
-                String name = null;
-                if (serviceName.toLowerCase().equals("onnstore")){
-                    name = "cassandra";
-                } else if (serviceName.toLowerCase().equals("onnserver")){
-                    name = "odbserver";
-                } else {
-                    name = serviceName.toLowerCase();
-                }
-
-                String cmd = "cd " + root.toAbsolutePath().toString()
-                        + " && sbin/matrix.sh " + action + " " + serviceName;
-                ProcessBuilder pb = new ProcessBuilder(
-                        "sudo", "-E", "-u", "matrix", "bash", "-l", "-c", cmd);
-                pb.redirectErrorStream(true);
-                Process p = pb.start();
-                String output = readProcessOutput(p);
-                boolean finished = p.waitFor(30, java.util.concurrent.TimeUnit.SECONDS);
-                if (!finished) {
-                    p.destroyForcibly();
-                    result.put("message", "Command timed out");
-                    return result;
-                }
-                int exitCode = p.exitValue();
-                result.put("success", exitCode == 0);
-                result.put("exitCode", exitCode);
-                result.put("output", output != null ? output.trim() : "");
-                result.put("message", exitCode == 0 ? "Operation completed successfully" : "Operation failed");
-            }
-            catch (Exception e) {
-                result.put("success", false);
-                result.put("message", e.getMessage());
-            }
-
-            return result;
-        }
-
-        // ======================== 3. Backend service status ========================
+        // ======================== 2. Backend service status ========================
 
         /**
          * Gets the running status of the current backend service (dataagent-backend)
@@ -424,7 +371,7 @@ public class MaintenanceUtil {
          */
         public JSONObject getBackendInfo() {
             JSONObject backend = new JSONObject();
-            JSONObject service = getDefaultServiceJson("dataagent-backend", ACTIONS_RESTART);
+            JSONObject service = getDefaultServiceJson("dataagent-backend");
             try {
                 long pid = ProcessHandle.current().pid();
                 service.put("pid", String.valueOf(pid));
@@ -443,201 +390,14 @@ public class MaintenanceUtil {
             return backend;
         }
 
-
-    /**
-     * Restarts the backend service by executing the bin/restart.sh script in the working directory
-     * @return JSON object containing the execution result
-     */
-    public JSONObject restartBackend() {
-        JSONObject result = new JSONObject();
-        result.put("success", false);
-        try {
-            Path workDir = Paths.get("").toAbsolutePath();
-            Path restartScript = workDir.resolve("bin/restart.sh");
-            if (!Files.exists(restartScript)) {
-                result.put("message", "restart script not found at: " + restartScript);
-                return result;
-            }
-            log.warn("restart:{}",restartScript.toString());
-
-            ProcessBuilder pb = new ProcessBuilder("bash", restartScript.toString());
-            pb.directory(workDir.toFile());
-            pb.redirectErrorStream(true);
-            Process p = pb.start();
-            String output = readProcessOutput(p);
-            boolean finished = p.waitFor(10, java.util.concurrent.TimeUnit.SECONDS);
-            if (!finished) {
-                p.destroyForcibly();
-                result.put("message", "Restart command timed out");
-                return result;
-            }
-            int exitCode = p.exitValue();
-            result.put("success", exitCode == 0);
-            result.put("exitCode", exitCode);
-            result.put("output", output != null ? output.trim() : "");
-            result.put("message", exitCode == 0 ? "Backend restarted successfully" : "Restart failed");
-        } catch (Exception e) {
-            result.put("success", false);
-            result.put("message", e.getMessage());
-        }
-        return result;
-    }
-
-        // ======================== 4. Frontend container running status ========================
-
-        /**
-         * Gets the running status of the frontend Docker container
-         * @return JSON object containing the Docker container information
-         */
-        public JSONObject getFrontendInfo() {
-            JSONObject frontend = new JSONObject();
-            JSONObject docker = new JSONObject();
-            docker.put("actions", ACTIONS_RESTART);
-            JSONArray containers = new JSONArray();
-            try {
-                // Get basic container information
-                String psOutput = runCommand("bash", "-c",
-                        "docker ps -a --no-trunc --format '{{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}\\t{{.RunningFor}}' 2>/dev/null");
-                if (psOutput == null || psOutput.trim().isEmpty()) {
-                    docker.put("containers", containers);
-                    frontend.put("docker", docker);
-                    return frontend;
-                }
-
-                // Get container resource usage
-                String statsOutput = runCommand("bash", "-c",
-                        "docker stats --no-stream --format '{{.Name}}\\t{{.CPUPerc}}\\t{{.MemUsage}}' 2>/dev/null");
-
-                // Build the container information map
-                Map<String, JSONObject> containerMap = new LinkedHashMap<>();
-                String[] psLines = psOutput.split("\n");
-                for (String line : psLines) {
-                    line = line.trim();
-                    if (line.isEmpty()) {
-                        continue;
-                    }
-                    String[] parts = line.split("\t");
-                    if (parts.length < 3) {
-                        continue;
-                    }
-
-                    String containerName = parts[0].toLowerCase();
-                    if(containerName.indexOf("data-agent-app") < 0){
-                        continue;
-                    }
-
-                    JSONObject container = new JSONObject();
-                    container.put("name", parts[0]);
-                    container.put("image", parts.length > 1 ? parts[1] : "");
-                    String statusStr = parts.length > 2 ? parts[2] : "";
-                    String status = statusStr.toLowerCase().startsWith("up ") ? "running" : statusStr;
-                    container.put("status", status);
-                    container.put("ports", parts.length > 3 ? parts[3] : "");
-                    container.put("cpu_percent", 0);
-                    container.put("memory_mb", 0);
-                    container.put("uptime_seconds", 0);
-
-                    // Parse the running time
-                    if (parts.length > 4) {
-                        container.put("uptime_seconds", parseDockerRunningFor(parts[4]));
-                    }
-                    containerMap.put(parts[0], container);
-                }
-
-                // Fill in the CPU and memory data
-                if (statsOutput != null && !statsOutput.trim().isEmpty()) {
-                    String[] statsLines = statsOutput.split("\n");
-                    for (String line : statsLines) {
-                        line = line.trim();
-                        if (line.isEmpty()) {
-                            continue;
-                        }
-                        String[] parts = line.split("\t");
-                        if (parts.length < 2) {
-                            continue;
-                        }
-                        JSONObject container = containerMap.get(parts[0]);
-                        if (container != null) {
-                            String cpuStr = parts[1].replace("%", "").trim();
-                            try {
-                                container.put("cpu_percent", Double.parseDouble(cpuStr));
-                            } catch (NumberFormatException e) {
-                                // keep default
-                            }
-                            if (parts.length >= 3) {
-                                container.put("memory_mb", parseDockerMemMb(parts[2]));
-                            }
-                        }
-                    }
-                }
-                for (JSONObject c : containerMap.values()) {
-                    containers.add(c);
-                }
-            } catch (Exception e) {
-                // return empty containers
-            }
-            docker.put("containers", containers);
-            frontend.put("docker", docker);
-            return frontend;
-        }
-
-
-    /**
-     * Restarts the frontend containers via docker compose up -d
-     * @param composePath path of the directory containing docker-compose.yml and the .env file
-     * @return JSON object containing the execution result
-     */
-    public JSONObject restartFrontend(String composePath) {
-        JSONObject result = new JSONObject();
-        result.put("success", false);
-
-        if (composePath == null || composePath.isEmpty()) {
-            result.put("message", "compose path is required");
-            return result;
-        }
-
-        try {
-            Path composeDir = Paths.get(composePath);
-            Path composeFile = composeDir.resolve("docker-compose.yml");
-            if (!Files.exists(composeFile)) {
-                result.put("message", "docker-compose.yml not found at: " + composeFile);
-                return result;
-            }
-
-            ProcessBuilder pb = new ProcessBuilder(
-                    "docker", "compose", "up", "-d");
-            pb.directory(composeDir.toFile());
-            pb.redirectErrorStream(true);
-            Process p = pb.start();
-            String output = readProcessOutput(p);
-            boolean finished = p.waitFor(60, java.util.concurrent.TimeUnit.SECONDS);
-            if (!finished) {
-                p.destroyForcibly();
-                result.put("message", "Docker compose command timed out");
-                return result;
-            }
-            int exitCode = p.exitValue();
-            result.put("success", exitCode == 0);
-            result.put("exitCode", exitCode);
-            result.put("output", output != null ? output.trim() : "");
-            result.put("message", exitCode == 0
-                    ? "Frontend containers restarted successfully" : "Restart failed");
-        } catch (Exception e) {
-            result.put("success", false);
-            result.put("message", e.getMessage());
-        }
-        return result;
-    }
-
         // ======================== Helper methods ========================
 
         /**
          * Builds the default service JSON object (status is stopped)
          * @param name service name
-         * @param actions supported action types
          * @return default service JSON
          */
-        private JSONObject getDefaultServiceJson(String name, String[] actions) {
+        private JSONObject getDefaultServiceJson(String name) {
             JSONObject svc = new JSONObject();
             svc.put("name", name);
             svc.put("status", "stopped");
@@ -646,7 +406,6 @@ public class MaintenanceUtil {
             svc.put("cpu_percent", 0);
             svc.put("memory_mb", 0);
             svc.put("uptime_seconds", 0);
-            svc.put("actions", actions);
             return svc;
         }
 
@@ -662,7 +421,7 @@ public class MaintenanceUtil {
             detail.put("uptime_seconds", 0);
             detail.put("user", "");
             try {
-                String output = runCommand("ps", "--no-headers", "-p", pid, "-o", "pcpu,rss,etime,user");
+                String output = runCommand("ps", "-p", pid, "-o", "pcpu=,rss=,etime=,user=");
                 if (output != null && !output.trim().isEmpty()) {
                     String[] parts = output.trim().split("\\s+");
                     if (parts.length >= 3) {
@@ -732,150 +491,6 @@ public class MaintenanceUtil {
             return 0;
         }
 
-        /**
-         * Converts the running time description output by Docker to seconds
-         * Supports year/month/week/day/hour/minute/second and descriptions such as "About a minute ago"
-         * @param runningFor running time field output by Docker ps
-         * @return total seconds
-         */
-        private long parseDockerRunningFor(String runningFor) {
-            if (runningFor == null || runningFor.isEmpty()) {
-                return 0;
-            }
-            long seconds = 0;
-            Pattern p = Pattern.compile("(\\d+)\\s*(year|month|week|day|hour|minute|second)s?",
-                    Pattern.CASE_INSENSITIVE);
-            Matcher m = p.matcher(runningFor);
-            while (m.find()) {
-                long val = Long.parseLong(m.group(1));
-                String unit = m.group(2).toLowerCase();
-                switch (unit) {
-                    case "year":
-                        seconds += val * 365 * 86400;
-                        break;
-                    case "month":
-                        seconds += val * 30 * 86400;
-                        break;
-                    case "week":
-                        seconds += val * 7 * 86400;
-                        break;
-                    case "day":
-                        seconds += val * 86400;
-                        break;
-                    case "hour":
-                        seconds += val * 3600;
-                        break;
-                    case "minute":
-                        seconds += val * 60;
-                        break;
-                    case "second":
-                        seconds += val;
-                        break;
-                }
-            }
-            // Special cases of Docker such as "About a minute ago"
-            if (seconds == 0) {
-                if (runningFor.toLowerCase().contains("less than a second")) {
-                    return 1;
-                }
-                if (runningFor.toLowerCase().contains("about a minute")) {
-                    return 60;
-                }
-            }
-            return seconds;
-        }
-
-        /**
-         * Parses the Docker memory usage string, extracts the used part and converts it to MB
-         * Format example: 123.4MiB / 1.5GiB
-         * @param memUsage memory field output by Docker stats
-         * @return used memory (MB)
-         */
-        private long parseDockerMemMb(String memUsage) {
-            if (memUsage == null || memUsage.isEmpty()) {
-                return 0;
-            }
-            int slashIdx = memUsage.indexOf('/');
-            String usedPart = slashIdx >= 0 ? memUsage.substring(0, slashIdx).trim() : memUsage.trim();
-            return parseSizeToMb(usedPart);
-        }
-
-        /**
-         * Converts a memory size string with a unit to an MB value
-         * Supports suffixes such as GiB/GB/MiB/MB/KiB/KB/B
-         * @param sizeStr size string
-         * @return MB value
-         */
-        private long parseSizeToMb(String sizeStr) {
-            if (sizeStr == null || sizeStr.isEmpty()) {
-                return 0;
-            }
-            sizeStr = sizeStr.trim().toUpperCase();
-            try {
-                if (sizeStr.endsWith("GIB") || sizeStr.endsWith("GB")) {
-                    double val = Double.parseDouble(sizeStr.replaceAll("[^\\d.]", ""));
-                    return Math.round(val * 1024);
-                } else if (sizeStr.endsWith("MIB") || sizeStr.endsWith("MB")) {
-                    double val = Double.parseDouble(sizeStr.replaceAll("[^\\d.]", ""));
-                    return Math.round(val);
-                } else if (sizeStr.endsWith("KIB") || sizeStr.endsWith("KB")) {
-                    double val = Double.parseDouble(sizeStr.replaceAll("[^\\d.]", ""));
-                    return Math.round(val / 1024);
-                } else if (sizeStr.endsWith("B")) {
-                    double val = Double.parseDouble(sizeStr.replaceAll("[^\\d.]", ""));
-                    return Math.round(val / 1024 / 1024);
-                }
-                return Math.round(Double.parseDouble(sizeStr) / 1024 / 1024);
-            } catch (NumberFormatException e) {
-                return 0;
-            }
-        }
-
-        /**
-         * Parses the JVM memory parameter value and converts it to GB
-         * @param value numeric part
-         * @param unit unit (G/M/K, or empty meaning bytes)
-         * @return GB integer value
-         */
-        private int parseJvmSizeToGb(String value, String unit) {
-            double number = Double.parseDouble(value);
-            if (unit == null || unit.isEmpty()) {
-                return (int) Math.round(number / 1024.0 / 1024.0 / 1024.0);
-            }
-            switch (unit.toLowerCase()) {
-                case "g":
-                    return (int) Math.round(number);
-                case "m":
-                    return (int) Math.round(number / 1024.0);
-                case "k":
-                    return (int) Math.round(number / 1024.0 / 1024.0);
-                default:
-                    return (int) Math.round(number / 1024.0 / 1024.0 / 1024.0);
-            }
-        }
-
-        /**
-         * Recursively finds the value of the specified key in the YAML parsing result
-         * @param map Map parsed from YAML
-         * @param key key to find
-         * @return the found value, or null when not found
-         */
-        @SuppressWarnings("unchecked")
-        private Object findYamlKey(Map<String, Object> map, String key) {
-            if (map.containsKey(key)) {
-                return map.get(key);
-            }
-            for (Object value : map.values()) {
-                if (value instanceof Map) {
-                    Object result = findYamlKey((Map<String, Object>) value, key);
-                    if (result != null) {
-                        return result;
-                    }
-                }
-            }
-            return null;
-        }
-
         // ======================== Command line utility methods ========================
 
         /**
@@ -912,44 +527,5 @@ public class MaintenanceUtil {
                 }
             }
             return sb.toString();
-        }
-
-        // ======================== main entry ========================
-
-        /**
-         * Program entry, parses the command line arguments and performs system monitoring data collection
-         * Supported arguments: --root/-r <path>  specifies the ONNStore root directory
-         *          --output/-o <path> specifies the output file path (optional; when not specified, output goes to the console)
-         */
-        public static void main(String[] args) {
-            String onnStoreRoot = null;
-            String outputPath = null;
-
-            for (int i = 0; i < args.length; i++) {
-                if ("--root".equals(args[i]) && i + 1 < args.length) {
-                    onnStoreRoot = args[++i];
-                } else if ("--output".equals(args[i]) && i + 1 < args.length) {
-                    outputPath = args[++i];
-                } else if ("-r".equals(args[i]) && i + 1 < args.length) {
-                    onnStoreRoot = args[++i];
-                } else if ("-o".equals(args[i]) && i + 1 < args.length) {
-                    outputPath = args[++i];
-                }
-            }
-
-            MaintenanceUtil monitor = new MaintenanceUtil();
-            JSONObject result = monitor.collectAll(onnStoreRoot);
-
-            if (outputPath != null && !outputPath.isEmpty()) {
-                try {
-                    monitor.saveToFile(result, outputPath);
-                    System.out.println("Monitor data saved to: " + outputPath);
-                } catch (IOException e) {
-                    System.err.println("Failed to save file: " + e.getMessage());
-                    System.out.println(result.toString());
-                }
-            } else {
-                System.out.println(result.toString());
-            }
         }
 }

@@ -36,6 +36,20 @@ public class TestEnvController {
 		return ret;
 	}
 	
+	@GetMapping("/testEnv/mode")
+	@ResponseBody
+	public JSONObject mode() {
+		JSONObject ret = new JSONObject();
+		try {
+			ret.put("success", true);
+			ret.put("data", envService.isProductionEnvConfigured() ? "two-env" : "single-env");
+		} catch (Exception e) {
+			ret.put("success", false);
+			ret.put("message", e.getMessage());
+		}
+		return ret;
+	}
+
 	@PostMapping("/testEnv/importData")
     @ResponseBody
     public JSONObject importTestData(@RequestParam(value = "file") MultipartFile file) {

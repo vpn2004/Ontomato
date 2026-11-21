@@ -115,7 +115,7 @@ export async function execute(input) {
 
 function inferTimeField(fields, data) {
   const namedField = fields.find((field) =>
-    /(^|_)(time|date|year|month|day|quarter|period|week)(_|$)|time|date|year|quarter|month|week/i.test(field)
+    /(^|_)(time|date|year|month|day|quarter|period|week)(_|$)|time|date|year|quarter|month|week|\u65f6\u95f4|\u65e5\u671f|\u5e74|\u5b63\u5ea6|\u6708|\u5468/i.test(field)
   );
   if (namedField) return namedField;
 
@@ -140,7 +140,7 @@ function inferValueField(fields, data, timeField, query) {
   return (
     numericFields.find((field) => normalizedQuery.includes(field.toLowerCase())) ||
     numericFields.find((field) =>
-      /sales amount|revenue|amount|quantity|headcount|count|value|amount|sales|revenue|gdp/i.test(field)
+      /sales|revenue|amount|quantity|headcount|count|value|gdp|\u9500\u552e\u989d|\u6536\u5165|\u91d1\u989d|\u6570\u91cf|\u4eba\u6570/i.test(field)
     ) ||
     numericFields[0]
   );

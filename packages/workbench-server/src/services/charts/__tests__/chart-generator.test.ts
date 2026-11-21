@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { configureI18n } from "../../../i18n";
 import { appTextEn } from "../../../i18n/app-text-en";
 import { en, enLocaleMeta } from "../../../i18n/locales/en";
-import { generateChartsFromCandidates } from "../chart-generator";
+import { generateChartsFromCandidates, partialSourceNoticeHtml } from "../chart-generator";
 
 configureI18n({
   defaultLocale: "en",
@@ -15,10 +15,12 @@ vi.mock("../../../logging/model-agents", () => ({
   modelAgentName: () => "chartPlanner",
 }));
 
+const response = vi.hoisted(() => ({ empty: false }));
+
 vi.mock("../../../config/model-factory", () => ({
   createModel: () => ({
     invoke: async () => ({
-      content: JSON.stringify([
+      content: JSON.stringify(response.empty ? [] : [
         {
           title: "Sales By Department",
           chartType: "bar",
@@ -76,6 +78,15 @@ vi.mock("../../../core/skills/execution/runtime", () => ({
 }));
 
 describe("generateChartsFromCandidates", () => {
+  it("returns no_viable_plan when the model supplies no plan", async () => {
+    response.empty = true;
+    try {
+      const result = await generateChartsFromCandidates({ domainId: "domain-1", userQuestion: "q", scopeId: "scope-1",
+        candidates: [{ sourceSubQuestion: "q1", data: [{ x: 1, y: 2 }] }], maxCharts: 1 });
+      expect(result.charts).toEqual([]);
+      expect(result.diagnostics).toMatchObject([{ scopeId: "scope-1", reason: "no_viable_plan" }]);
+    } finally { response.empty = false; }
+  });
   it("executes and produces chart for executable skill without chart type declaration", async () => {
     const result = await generateChartsFromCandidates({
       domainId: "domain-1",
@@ -91,14 +102,77 @@ describe("generateChartsFromCandidates", () => {
         },
       ],
       maxCharts: 1,
-      failurePolicy: "error",
     });
 
-    expect(result.error).toBeUndefined();
     expect(result.charts).toHaveLength(1);
     expect(result.charts[0].skillId).toBe("custom-bar-skill");
     expect(result.charts[0].chartType).toBe("bar");
     expect(result.charts[0].html).toBe("<div id='chart'>rendered chart</div>");
     expect(result.diagnostics).toEqual([]);
+  });
+
+  it("diagnoses invalid_plan with missing field and existing fields when yField does not exist in data", async () => {
+    const result = await generateChartsFromCandidates({
+      domainId: "domain-1",
+      userQuestion: "Sales by department",
+      scopeId: "scope-2",
+      candidates: [
+        {
+          sourceSubQuestion: "q1",
+          data: [
+            { dept: "Engineering", count: 10 },
+            { dept: "Sales", count: 20 },
+          ],
+        },
+      ],
+      maxCharts: 1,
+    });
+
+    expect(result.charts).toHaveLength(0);
+    expect(result.diagnostics).toHaveLength(1);
+    expect(result.diagnostics[0]).toMatchObject({
+      scopeId: "scope-2",
+      reason: "invalid_plan",
+    });
+    expect(result.diagnostics[0].message).toContain("sales");
+    expect(result.diagnostics[0].message).toContain("dept, count");
+  });
+
+  it("marks a chart drawn from a partial source and writes the source's notice into its html", async () => {
+    const marker = {
+      truncated: true as const,
+      rowLimit: 100000,
+      truncationHint: "Intermediate rows reached the processing cap.",
+    };
+    const partial = await generateChartsFromCandidates({
+      domainId: "domain-1",
+      userQuestion: "Sales by department",
+      scopeId: "scope-3",
+      candidates: [
+        {
+          sourceSubQuestion: "q1",
+          data: [{ dept: "Engineering", sales: 100 }],
+          truncation: marker,
+        },
+      ],
+      maxCharts: 1,
+    });
+
+    expect(partial.charts[0]).toMatchObject(marker);
+    expect(partial.charts[0].html).toBe(
+      `${partialSourceNoticeHtml("q1", marker)}<div id='chart'>rendered chart</div>`
+    );
+    expect(partialSourceNoticeHtml("q1", marker)).toContain(
+      "a 100000-row cap was reached, so this may not cover all matching data. Intermediate rows reached the processing cap."
+    );
+
+    const complete = await generateChartsFromCandidates({
+      domainId: "domain-1",
+      userQuestion: "Sales by department",
+      scopeId: "scope-4",
+      candidates: [{ sourceSubQuestion: "q1", data: [{ dept: "Engineering", sales: 100 }] }],
+      maxCharts: 1,
+    });
+    expect(complete.charts[0]).not.toHaveProperty("truncated");
   });
 });

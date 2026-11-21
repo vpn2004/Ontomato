@@ -17,6 +17,7 @@ export type ClarificationResult = {
 };
 
 const TaskPlannerReplyKindSchema = z.enum([
+  "generate_ppt",
   "greeting",
   "out_of_scope",
   "capability",
@@ -176,6 +177,7 @@ export const GraphStateAnnotation = Annotation.Root({
 
   // Execution plan from task planner
   plan: Annotation<Plan | undefined>,
+  reportOntology: Annotation<{ requestSeq: number; capturedAt: string; markdown: string } | undefined>,
 
   // Mock data (user-provided or generated)
   mockData: Annotation<Record<string, unknown>[] | undefined>,

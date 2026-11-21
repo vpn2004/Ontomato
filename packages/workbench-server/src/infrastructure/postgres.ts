@@ -1,5 +1,6 @@
 import pg from "pg";
 import { harnessSessions } from "./harness-sessions";
+import { recoverInterruptedReports } from "./chat-report-recovery";
 import { environment } from "../config/environment";
 import { createLogger } from "../logging/logger";
 import { tApp } from "../i18n";
@@ -41,6 +42,7 @@ export async function initializePostgres(): Promise<void> {
 
     await runPostgresBusinessMigrations(client);
     await harnessSessions.recoverAllInterrupted();
+    await recoverInterruptedReports(client);
 
     logger.info(tApp("foundation.log.pg.schemaReady"));
   } finally {

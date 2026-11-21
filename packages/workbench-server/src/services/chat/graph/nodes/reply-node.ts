@@ -9,6 +9,7 @@ import { estimateMessagesSize } from "../../../../utils/prompt-context";
 import { upsertChatRenderSnapshot } from "../../chat-snapshot-store";
 import { renderPrompt } from "../../../../core/prompts/loader";
 import { datasetSchemaService } from "../../../data-query/dataset-schema";
+import { generateQueryConversationPpt } from "../utils/conversation-ppt";
 
 const logger = createLogger("reply-node");
 
@@ -34,6 +35,15 @@ export async function replyNode(state: GraphState, config?: any): Promise<GraphU
     const token = config?.configurable?.token;
     const apiKey = config?.configurable?.apiKey;
     const taskReply = state.taskPlannerResult?.status === "reply" ? state.taskPlannerResult : null;
+
+    if (taskReply?.replyKind === "generate_ppt") {
+      const file = await generateQueryConversationPpt(state, config);
+      const text = `[${file.fileName}](${file.url})` + (file.warnings.length ? `\n\n${file.warnings.join("\n")}` : "");
+      sendEvent({type: "token", node: "reply", content: text, timestamp: Date.now()});
+      const requestSeq = config?.configurable?.requestSeq ?? state.requestSeq;
+      await upsertChatRenderSnapshot({threadId: state.threadId, requestSeq, snapshot: buildDirectResponseSnapshot(text, "completed"), source: "runtime"});
+      return {messages: [new AIMessage({content: text, additional_kwargs: {requestSeq}})]};
+    }
 
     const shouldIncludeDataset =
       taskReply?.replyKind === "capability" || taskReply?.replyKind === "direct_explanation";

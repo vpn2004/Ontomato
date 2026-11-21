@@ -4,8 +4,9 @@ import {
   Box,
   ChevronRight,
   Download,
-  Focus,
-  Maximize2,
+  Maximize,
+  Network,
+  Minus,
   MousePointerClick,
   RefreshCw,
   Route,
@@ -13,8 +14,7 @@ import {
   Unplug,
   Waypoints,
   Workflow,
-  ZoomIn,
-  ZoomOut,
+  Plus,
 } from "lucide-vue-next";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
@@ -31,6 +31,7 @@ import {
 import { useManagerFeedback } from "../feedback";
 import type { OntologyObject, OntologyRelation } from "../api";
 import { useManagerClient, useManagerContext, useOntologyText, useSharedText } from "../context";
+import { graphLayout, initialNodePosition } from "../ontology-graph-layout";
 
 const emit = defineEmits<{ "open-modeling": [focus: "object" | "relation", id: string] }>();
 const context = useManagerContext();
@@ -175,35 +176,6 @@ function saveLayout() {
   localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(positions));
 }
 
-function initialNodePosition(index: number, count: number) {
-  const columns = Math.max(1, Math.ceil(Math.sqrt(count)));
-  return {
-    x: (index % columns) * 180,
-    y: Math.floor(index / columns) * 140,
-  };
-}
-
-function seededRandom(seed = 20260915) {
-  let value = seed >>> 0;
-  return () => {
-    value += 0x6d2b79f5;
-    let next = value;
-    next = Math.imul(next ^ (next >>> 15), next | 1);
-    next ^= next + Math.imul(next ^ (next >>> 7), next | 61);
-    return ((next ^ (next >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-function graphLayout() {
-  return {
-    type: "d3-force" as const,
-    preventOverlap: true,
-    linkDistance: 180,
-    nodeStrength: -420,
-    randomSource: seededRandom(),
-  };
-}
-
 function nodeOptions(colors: ReturnType<typeof graphColors>) {
   return {
     type: "circle" as const,
@@ -290,10 +262,10 @@ async function fitGraphToContainer(target: Graph) {
   if (!width || !height) return;
   target.resize(Math.round(width), Math.round(height));
   await target.fitView({ when: "always", direction: "both" });
-  // Host-supplied fit limit (null for none): with few nodes the graph is not zoomed beyond it.
-  const { maxFitZoom } = context.presentation;
-  if (maxFitZoom !== null && target.getZoom() > maxFitZoom) {
-    await target.zoomTo(maxFitZoom, false);
+  // Keep automatic fitting at native size or below; manual zoom remains available.
+  const maxZoom = Math.min(1, context.presentation.maxFitZoom ?? 1);
+  if (target.getZoom() > maxZoom) {
+    await target.zoomTo(maxZoom, false);
   }
   await target.fitCenter();
 }
@@ -576,7 +548,7 @@ onBeforeUnmount(() => {
           <strong>{{ relations.length }}</strong>
           {{ t("nav.relationTypes") }}
         </span>
-        <el-button :icon="RefreshCw" circle :title="t('common.refresh')" @click="refresh" />
+        <el-button :icon="RefreshCw" text circle :title="t('common.refresh')" @click="refresh" />
       </div>
     </header>
 
@@ -659,13 +631,13 @@ onBeforeUnmount(() => {
           <span>{{ ot("createObjectsFirst") }}</span>
         </div>
         <div class="graph-toolbar">
-          <button :title="ot('zoomIn')" @click="zoomIn"><ZoomIn :size="17" /></button>
-          <button :title="ot('zoomOut')" @click="zoomOut"><ZoomOut :size="17" /></button>
-          <button :title="ot('fitCanvas')" @click="fitGraph"><Maximize2 :size="17" /></button>
+          <button :title="ot('zoomIn')" @click="zoomIn"><Plus :size="18" /></button>
+          <button :title="ot('zoomOut')" @click="zoomOut"><Minus :size="18" /></button>
+          <button :title="ot('fitCanvas')" @click="fitGraph"><Maximize :size="18" /></button>
           <button :title="ot('relayout')" :disabled="layouting" @click="relayoutGraph">
-            <Focus :size="17" />
+            <Network :size="18" />
           </button>
-          <button :title="ot('downloadPng')" @click="downloadGraph"><Download :size="17" /></button>
+          <button :title="ot('downloadPng')" @click="downloadGraph"><Download :size="18" /></button>
         </div>
         <div class="graph-hint">
           <span />
@@ -710,7 +682,6 @@ onBeforeUnmount(() => {
           <div class="panel-heading">
             <div>
               <strong>{{ ot("inspector") }}</strong>
-              <small>{{ ot("inspectorDesc") }}</small>
             </div>
             <el-button
               v-if="selectedObject || selectedRelation"
@@ -1041,7 +1012,7 @@ onBeforeUnmount(() => {
 }
 .graph-toolbar button {
   display: grid;
-  width: 34px;
+  width: 32px;
   height: 32px;
   place-items: center;
   border: 0;
@@ -1140,7 +1111,7 @@ onBeforeUnmount(() => {
   border-radius: 999px;
   color: var(--el-color-primary);
   background: var(--el-color-primary-light-9);
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: var(--font-semibold);
   line-height: 16px;
 }
@@ -1262,7 +1233,7 @@ code {
   font-size: var(--text-sm);
 }
 .inspector-empty span {
-  max-width: 220px;
+  max-width: 100%;
   font-size: var(--text-xs);
   line-height: var(--leading-relaxed);
   white-space: normal;

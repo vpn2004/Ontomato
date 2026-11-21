@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ChevronDown, Moon, Settings, Sun, UserRound } from "lucide-vue-next";
+import { ChevronDown, Languages, Moon, Settings, Sun, UserRound } from "lucide-vue-next";
 import { useLocale } from "@ontomato/workbench-ui";
 
 defineProps<{
@@ -14,7 +14,7 @@ const emit = defineEmits<{
   toggleTheme: [];
 }>();
 
-const { t } = useLocale();
+const { t, currentLocale } = useLocale();
 
 function closeAll() {
   emit("update:visible", false);
@@ -53,6 +53,15 @@ function handleToggleTheme() {
             <Settings :size="14" />
             <span>{{ t("nav.admin") }}</span>
           </div>
+          <button
+            type="button"
+            class="user-menu-item language-switch"
+            aria-label="中文 / English"
+            @click="currentLocale = currentLocale === 'zh-CN' ? 'en' : 'zh-CN'"
+          >
+            <Languages :size="14" />
+            <span>{{ currentLocale === "zh-CN" ? "English" : "简体中文" }}</span>
+          </button>
           <div class="user-menu-item" @click="handleToggleTheme">
             <Sun v-if="isDark" :size="14" />
             <Moon v-else :size="14" />
@@ -151,6 +160,12 @@ function handleToggleTheme() {
   color: var(--el-text-color-regular);
   cursor: pointer;
   transition: background 0.12s;
+}
+.language-switch {
+  width: 100%;
+  background: transparent;
+  border: 0;
+  text-align: left;
 }
 .user-menu-item:hover {
   background: var(--el-fill-color-light);

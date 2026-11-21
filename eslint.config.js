@@ -75,22 +75,9 @@ export default [
     },
   },
   {
-    // .mjs entry points running on Node (app build entries and development entries): add
-    // only the Node globals.
-    files: [
-      "apps/*/build.mjs",
-      "apps/*/build.node-test.mjs",
-      "scripts/dev-command.mjs",
-      "scripts/dev-command.node-test.mjs",
-      "scripts/product-targets.node-test.mjs",
-      "scripts/dev-stack.mjs",
-      "scripts/dev-stack.node-test.mjs",
-      "scripts/dev-platform-windows.mjs",
-      "scripts/dev-platform-windows.node-test.mjs",
-      "apps/data-engine/dev.mjs",
-      "scripts/data-engine/dev-java.mjs",
-      "scripts/data-engine/dev-java.node-test.mjs",
-    ],
+    // Every .mjs here runs on Node (build, packaging and development entries, their tests, and
+    // the agent skill CLIs): add only the Node globals.
+    files: ["scripts/**/*.mjs", "apps/*/*.mjs", "agent-skills/*/*.mjs"],
     languageOptions: { globals: globals.node },
   },
   {
@@ -111,6 +98,22 @@ export default [
       // rules are off for Vue files, without changing the existing TS checks.
       ...prettierConfig.rules,
       "no-restricted-imports": restrict([]),
+    },
+  },
+  {
+    // Browser code and shared contracts must also work on plain HTTP intranet deployments.
+    files: [
+      "packages/{contracts,apps-sdk,design-tokens,foundation-ui,agent-shell-ui,ontology-manager,platform-admin,platform-schedules,platform-shell,platform-web,workbench-ui}/src/**/*.{ts,js,vue}",
+      "apps/workbench/web/**/*.{ts,js,vue}",
+    ],
+    rules: {
+      "no-restricted-properties": [
+        "error",
+        {
+          property: "randomUUID",
+          message: "Use randomId() from @ontomato/contracts/random-id; crypto.randomUUID is unavailable over HTTP.",
+        },
+      ],
     },
   },
   {

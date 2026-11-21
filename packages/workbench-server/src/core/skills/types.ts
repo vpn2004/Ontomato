@@ -7,12 +7,14 @@ export type { SkillManifest } from "./manifest";
 
 export interface SkillMeta {
   id: string;
+  isPublic: boolean;
   path: string;
   manifest: SkillManifest;
   skillMdPath?: string;
 }
 
 export interface SkillInput {
+  locale?: string;
   query?: string;
   data?: any[] | any[][];
   datasets?: Array<{
@@ -56,6 +58,7 @@ export interface SkillInput {
   topN?: number;
   excludeCategoryValues?: ChartCategoryValue[];
   services?: {
+    generatePpt?: () => Promise<{ url: string; fileName: string; warnings: string[] }>;
     createModel?: (temperature?: number) => any;
     createLogger?: (name: string) => any;
   };

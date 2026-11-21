@@ -4,6 +4,7 @@ import { createSseErrorEvent } from "../../utils/sse";
 
 export function convertEventForFrontend(event: any): ChatClientEvent | null {
   const { type, node, content } = event;
+  if (type === "report_checkpoint") return { type, requestSeq: event.requestSeq, resumable: event.resumable };
 
   if (type === "thinking_state") {
     return {
@@ -22,18 +23,8 @@ export function convertEventForFrontend(event: any): ChatClientEvent | null {
   }
 
   if (type === "abc_content") {
-    return {
-      type: "abc_content",
-      content: content.content || content,
-      loading: content.loading,
-    };
-  }
-
-  if (type === "abc_analysis") {
-    return {
-      type: "abc_analysis",
-      ...content,
-    };
+    // The query executor already produced the wire event (append or replace).
+    return content;
   }
 
   if (type === "query_datasets") {
@@ -66,17 +57,6 @@ export function convertEventForFrontend(event: any): ChatClientEvent | null {
       type: "clarification",
       message: content.message,
       options: content.options || [],
-    };
-  }
-
-  if (
-    type === "abc_analysis_start" ||
-    type === "abc_analysis_chunk" ||
-    type === "abc_analysis_done"
-  ) {
-    return {
-      type,
-      ...content,
     };
   }
 

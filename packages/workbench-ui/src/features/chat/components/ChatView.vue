@@ -9,7 +9,9 @@ import { useI18n } from "vue-i18n";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { ThumbsUp, ThumbsDown, Copy, Check } from "lucide-vue-next";
 import SnapshotContent from "./SnapshotContent.vue";
+import ReportEvidenceDownload from "./ReportEvidenceDownload.vue";
 import type { ClarificationOption } from "@ontomato/contracts/chat";
+import { answerBodyText } from "@ontomato/contracts/query-execution";
 import type { Message, ResponseSnapshot } from "../../../types/chat";
 import { setupAiTableEnhancer } from "../utils/table";
 import TurnDiagnoseButton from "../../diagnosis/components/TurnDiagnoseButton.vue";
@@ -32,9 +34,7 @@ const messagesContainerRef = ref<HTMLElement | null>(null);
 
 const copyContent = async (snapshot: ResponseSnapshot, msgId: number) => {
   try {
-    const textToCopy = [snapshot.primaryText, snapshot.analysisText]
-      .filter(Boolean)
-      .join("\n\n---\n\n");
+    const textToCopy = buildOutput(snapshot);
     if (!textToCopy) {
       ElMessage.warning(t("chat.noContentCopy"));
       return;
@@ -58,8 +58,21 @@ function findUserInputForMessage(msgId: number): string {
   return "";
 }
 
+/** The answer as plain text for copying and feedback: body placements removed. */
 function buildOutput(snapshot: ResponseSnapshot): string {
-  return [snapshot.primaryText, snapshot.analysisText].filter(Boolean).join("\n\n---\n\n");
+  return [answerBodyText(snapshot.primaryText), snapshot.analysisText]
+    .filter(Boolean)
+    .join("\n\n---\n\n");
+}
+
+/** Turn duration from the server-recorded fact, e.g. "Took 32s" / "Took 1m 12s". */
+function formatTurnDuration(durationMs: number): string {
+  const totalSeconds = Math.max(1, Math.round(durationMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes
+    ? t("chat.turnDurationMinutes", { minutes, seconds })
+    : t("chat.turnDurationSeconds", { seconds });
 }
 
 function feedbackTargetId(msg: Message): string {
@@ -268,6 +281,18 @@ watch(
                 </div>
 
                 <div class="message-actions">
+                  <ReportEvidenceDownload
+                    v-if="msg.snapshot.threadId && msg.snapshot.reportEvidenceRequestSeq !== undefined"
+                    :thread-id="msg.snapshot.threadId"
+                    :request-seq="msg.snapshot.reportEvidenceRequestSeq"
+                  />
+                  <button
+                    v-if="msg.snapshot.reportRecoveryRequestSeq !== undefined && !chatStore.isLoading"
+                    class="ui-btn"
+                    @click="chatStore.sendMessage({ submitText: t('chat.resumeSavedReport'), resumeReportSeq: msg.snapshot.reportRecoveryRequestSeq })"
+                  >
+                    {{ t('chat.resumeSavedReport') }}
+                  </button>
                   <button
                     class="ui-icon-btn action-btn"
                     :class="{ active: feedbackState[msg.id] === 'like' }"
@@ -300,6 +325,9 @@ watch(
                     <Copy v-else :size="14" />
                   </button>
                   <TurnDiagnoseButton class="ui-icon-btn action-btn" :turn="msg.snapshot" />
+                  <span v-if="msg.snapshot.durationMs" class="turn-duration">
+                    {{ formatTurnDuration(msg.snapshot.durationMs) }}
+                  </span>
                 </div>
               </template>
             </div>
@@ -464,11 +492,22 @@ watch(
   border-radius: 10px;
 }
 
+.turn-duration {
+  align-self: center;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
 .action-btn:hover,
-.action-btn.active,
 .action-btn.copied {
   background: var(--el-fill-color-light);
   color: var(--el-text-color-primary);
+}
+
+.action-btn.active {
+  color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+  box-shadow: inset 0 0 0 1px var(--el-color-primary-light-7);
 }
 
 @keyframes streaming-glow {

@@ -1,11 +1,16 @@
 import type {
-  AnalysisTaskDetail as AnalysisTask,
+  AnalysisTask,
   AnalysisTaskPage,
   AnalysisTaskRun,
   AnalysisConversationTurn,
   LoopSubagentTrace,
 } from "@ontomato/contracts/analysis-task";
-import type { AnalysisAgent } from "@ontomato/contracts/analysis-agent";
+import type {
+  AgentLineupEntry,
+  AnalysisAgent,
+  SaveAgentLineupRequest,
+} from "@ontomato/contracts/analysis-agent";
+import type { QueryExecutionDisplayFact } from "@ontomato/contracts/query-execution";
 import type { AnalysisReportHotCardSummary } from "@ontomato/contracts/analysis-report";
 import type { AnalysisStreamEvent } from "@ontomato/contracts/analysis-events";
 import { workbenchI18n } from "../../i18n";
@@ -23,29 +28,14 @@ import {
 import { workbenchContent } from "../../content";
 
 export const analysisAgentApi = {
-  async listAgents(): Promise<AnalysisAgent[]> {
-    const res = await nodeApiGet("/analysis-agents");
-    // Handle two response formats: { success: true, data: [...] } or directly return [...]
-    if (res.success && Array.isArray(res.data)) {
-      return res.data;
-    }
-    if (Array.isArray(res)) {
-      return res;
-    }
-    return [];
+  /** The domain's agents (enabled or not) and the built-in Q&A agent, in display order. */
+  async getAgentLineup(): Promise<AgentLineupEntry[]> {
+    const res = await nodeApiGet("/analysis-agents/lineup");
+    if (!res?.success || !Array.isArray(res.data)) throw new Error("Invalid agent lineup response");
+    return res.data;
   },
-  async getEnabledAgents(): Promise<AnalysisAgent[]> {
-    const res = await nodeApiGet("/analysis-agents/enabled");
-    if (res.success && Array.isArray(res.data)) {
-      return res.data;
-    }
-    if (res.data && Array.isArray(res.data.data)) {
-      return res.data.data;
-    }
-    if (Array.isArray(res)) {
-      return res;
-    }
-    return [];
+  async saveAgentLineup(order: string[]): Promise<void> {
+    await nodeApiPut("/analysis-agents/lineup", { order } satisfies SaveAgentLineupRequest);
   },
   async getAgent(id: string): Promise<AnalysisAgent> {
     const res = await nodeApiGet(`/analysis-agents/${id}`);
@@ -427,6 +417,31 @@ export const analysisTaskApi = {
     const data = res.data || res;
     return Array.isArray(data) ? data : [];
   },
+  /** One historical run's replay snapshot; null when that legacy run saved none. */
+  async getRunSnapshot(taskId: string, runId: string): Promise<unknown> {
+    const res = await nodeApiGet(
+      `/analysis-tasks/${encodeURIComponent(taskId)}/runs/${encodeURIComponent(runId)}`
+    );
+    return res.data;
+  },
+  /**
+   * Full query facts of a deferred question: `runId` for a historical report run, `requestSeq` for a
+   * regular-session turn, neither for the current report run.
+   */
+  async getQuestionExecution(
+    taskId: string,
+    questionId: string,
+    scope: { runId?: string; requestSeq?: number }
+  ): Promise<QueryExecutionDisplayFact> {
+    const query = new URLSearchParams();
+    if (scope.runId !== undefined) query.set("runId", scope.runId);
+    if (scope.requestSeq !== undefined) query.set("requestSeq", String(scope.requestSeq));
+    const suffix = query.size ? `?${query}` : "";
+    const res = await nodeApiGet(
+      `/analysis-tasks/${encodeURIComponent(taskId)}/questions/${encodeURIComponent(questionId)}/execution${suffix}`
+    );
+    return res.data;
+  },
   /** Regular conversations are read by turn; turns and the report body are saved separately so later turns don't overwrite earlier ones. */
   async getTurns(id: string): Promise<AnalysisConversationTurn[]> {
     const res = await nodeApiGet(`/analysis-tasks/${encodeURIComponent(id)}/turns`);
@@ -545,6 +560,7 @@ export const analysisReportApi = {
   updateCardBusinessDescription: (id: string, businessDescription: string) =>
     nodeApiPut(`/analysis-reports/cards/${id}/business-description`, { businessDescription }),
   summarizePpt: (body: unknown) => nodeApiPost("/ppt/summarize", body),
+  pptDefaults: () => nodeApiGet("/ppt/defaults"),
 };
 
 export function cancelDeepAnalysisRun(threadId: string, runId?: string): Promise<Response> {

@@ -151,9 +151,11 @@ export function reduceDeepAnalysisEvent(
       break;
     }
     case "run_started":
-      return { ...snapshot, runId: event.runId };
+      return { ...snapshot, runId: event.runId, ...("taskId" in event ? { taskId: event.taskId } : {}) };
     case "workflow_complete":
       return snapshot;
+    case "turn_finished":
+      return { ...snapshot, durationMs: event.durationMs };
     case "title":
     case "auth_failed":
     case "error":

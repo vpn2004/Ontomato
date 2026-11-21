@@ -16,7 +16,7 @@ import {
 } from "../utils/query-artifact-cache";
 import { executeBaseQuery, STANDARD_QUERY_BRANCHES } from "../../../data-query/base-query-executor";
 import { runtimeDefaults } from "../../../../runtime/defaults";
-import type { QueryBackendSession } from "@ontomato/contracts/query-execution";
+import { answerBodyText, type QueryBackendSession } from "@ontomato/contracts/query-execution";
 import {
   startQueryRun,
   updateQueryRunBackendSessions,
@@ -46,7 +46,18 @@ export async function queryNode(state: GraphState, config?: any): Promise<GraphU
   };
 
   const queryStep = state.plan?.steps.find((step) => step.type === "query");
-  const queryQuestion = queryStep?.type === "query" ? queryStep.question : state.userQuestion;
+  const plannedQuestion = queryStep?.type === "query" ? queryStep.question : state.userQuestion;
+  const collectingReport = state.plan?.nodes.includes("analysis");
+  const queryQuestion = collectingReport ? [
+    "Collect read-only evidence for a report. The original user request is authoritative; the supporting collection plan may elaborate but must not narrow or omit its entities, relationship scopes or output requirements. Return complete evidence tables, not the report prose.",
+    `Original user request:\n${state.userQuestion}`,
+    `Supporting collection plan:\n${plannedQuestion}`,
+    "Keep whole-population scope separate from selected examples or defects. When complete downstream reachability is required and outputs can become inputs, traverse the relevant directed paths with visited IDs until no new objects remain; preserve distinct membership, path records and termination evidence. Do not expand unrelated business paths or equate graph association with confirmed defects.",
+  ].join("\n\n") : plannedQuestion === state.userQuestion ? plannedQuestion : [
+    "Answer the original user request. Use resolved context to interpret follow-ups or clarification replies, but preserve explicit entity filters, named relationship paths, distinct keys, time boundaries, ordering and requested output. A named relationship does not imply similarly named sibling relationships. The planning suggestion must not expand or narrow explicit user constraints.",
+    `Original user request:\n${state.userQuestion}`,
+    `Resolved context / planning suggestion:\n${plannedQuestion}`,
+  ].join("\n\n");
   const queryRunIdentity = {
     threadId,
     requestSeq,
@@ -164,6 +175,7 @@ export async function queryNode(state: GraphState, config?: any): Promise<GraphU
 
     const execution = await executeBaseQuery({
       queryQuestion,
+      answerMode: collectingReport ? "evidence" : "answer",
       token,
       apiKey,
       userId,
@@ -212,7 +224,7 @@ export async function queryNode(state: GraphState, config?: any): Promise<GraphU
               abcCodes: fallback?.abcCodes,
               abcOutKeyRefs: fallback?.abcOutKeyRefs,
               replayPlan: fallback?.replayPlan,
-              markdownTable: fallbackContent || undefined,
+              markdownTable: fallbackContent ? answerBodyText(fallbackContent) : undefined,
               datasets: fallbackDatasets,
               // The failure reason travels with the execution facts: live and history both see the error description through the same facts.
               error: errorMsg,
@@ -296,7 +308,7 @@ export async function queryNode(state: GraphState, config?: any): Promise<GraphU
       abcCodes,
       abcOutKeyRefs,
       replayPlan,
-      markdownTable: content,
+      markdownTable: answerBodyText(content),
       datasets,
     };
 

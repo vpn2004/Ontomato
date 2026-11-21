@@ -5,6 +5,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -29,6 +32,7 @@ import io.ontomato.dataengine.config.BusinessConfig;
 import io.ontomato.dataengine.dao.JSONRuleDao;
 import io.ontomato.dataengine.dao.VectorResourceDao;
 import io.ontomato.dataengine.dataAdapter.DataAdapter;
+import io.ontomato.dataengine.dataAdapter.DataAdapterCapabilities;
 import io.ontomato.dataengine.dataAdapter.DataAdapterRegistry;
 import io.ontomato.dataengine.service.BusinessConfigService;
 
@@ -42,7 +46,7 @@ class VectorResourceServiceImplTest {
 	private final VectorResourceServiceImpl service = new VectorResourceServiceImpl();
 	private final VectorResourceDao vectorResourceDao = mock(VectorResourceDao.class);
 	private final DataAdapterRegistry registry = mock(DataAdapterRegistry.class);
-	private final DataAdapter adapter = mock(DataAdapter.class);
+	private final DataAdapter adapter = mock(DataAdapter.class, CALLS_REAL_METHODS);
 	private final BusinessConfig businessConfig = new BusinessConfig();
 	private final Map<String, Object> jsonRule = Map.of("classDef", List.of(PRODUCT));
 
@@ -64,7 +68,7 @@ class VectorResourceServiceImplTest {
 	@Test
 	void uploadAppendsTheOriginalTextUnderTheRelationalPrimaryKey() throws Exception {
 		InputStream file = new ByteArrayInputStream(new byte[] {1});
-		when(vectorResourceDao.insert(any(), eq(file), eq("png"), eq("d1"))).thenAnswer(call -> {
+		when(vectorResourceDao.insert(any(), eq(file), eq("png"), eq("d1"), isNull())).thenAnswer(call -> {
 			VectorResource saved = call.getArgument(0);
 			saved.setPath("idx/new.png");
 			saved.setContent("cleaned");
@@ -80,20 +84,19 @@ class VectorResourceServiceImplTest {
 	}
 
 	@Test
-	void deleteDropsTheEntryUnderTheM3ObjectId() throws Exception {
-		when(adapter.useM3()).thenReturn(true);
-
+	void deleteDropsTheEntryUnderTheModelPrimaryKey() throws Exception {
 		service.deleteAndDetach("/Product", "photos", "P1", "idx/old.png", "d1");
 
 		verify(vectorResourceDao).delete("/Product", "photos", "P1", "idx/old.png", "d1");
 		JSONObject[] update = capturedUpdate();
 		assertEquals(JSON.parseArray("[]"), update[0].getJSONArray("photos"));
-		assertEquals(where("id", "P1"), update[1]);
+		// Design 3: the core writes back by the model key for every adapter; M3's id is its own adapter's concern.
+		assertEquals(where("code", "P1"), update[1]);
 	}
 
 	@Test
 	void textOnlyUploadSavesTxtResourceAndAttaches() throws Exception {
-		when(vectorResourceDao.insert(any(), eq(null), eq(null), eq("d1"))).thenAnswer(call -> {
+		when(vectorResourceDao.insert(any(), eq(null), eq(null), eq("d1"), isNull())).thenAnswer(call -> {
 			VectorResource saved = call.getArgument(0);
 			saved.setPath("idx/text.txt");
 			saved.setContent("cleaned");
@@ -110,7 +113,7 @@ class VectorResourceServiceImplTest {
 
 	@Test
 	void attachFailureRollsBackSavedResourceAndThrows() throws Exception {
-		when(vectorResourceDao.insert(any(), any(), any(), eq("d1"))).thenAnswer(call -> {
+		when(vectorResourceDao.insert(any(), any(), any(), eq("d1"), isNull())).thenAnswer(call -> {
 			VectorResource saved = call.getArgument(0);
 			saved.setPath("idx/new.png");
 			return saved;
@@ -124,7 +127,7 @@ class VectorResourceServiceImplTest {
 
 	@Test
 	void rollbackFailureIsSuppressedWhenAttachFails() throws Exception {
-		when(vectorResourceDao.insert(any(), any(), any(), eq("d1"))).thenAnswer(call -> {
+		when(vectorResourceDao.insert(any(), any(), any(), eq("d1"), isNull())).thenAnswer(call -> {
 			VectorResource saved = call.getArgument(0);
 			saved.setPath("idx/new.png");
 			return saved;
@@ -173,6 +176,44 @@ class VectorResourceServiceImplTest {
 
 		assertThrows(IllegalArgumentException.class,
 				() -> service.deleteAndDetach("/Product", "photos", "P1", "idx/other.png", "d1"));
+		verify(adapter, never()).updateObjects(any(), any(), any(), any());
+	}
+
+	@Test
+	void readOnlyAdaptersRejectAttachBeforeReadingTheObjectOrSavingAResource() throws Exception {
+		doReturn(DataAdapterCapabilities.onnReadOnly()).when(adapter).capabilities();
+
+		assertThrows(UnsupportedOperationException.class,
+				() -> service.saveAndAttach(resource("text"), new ByteArrayInputStream(new byte[] {1}), "png", "d1"));
+
+		verifyNoInteractions(vectorResourceDao);
+		verify(adapter, never()).queryVectorAttr(any(), any(), any());
+		verify(adapter, never()).updateObjects(any(), any(), any(), any());
+	}
+
+	@Test
+	void readOnlyAdaptersRejectBatchBeforeEmbeddingOrWriting() throws Exception {
+		doReturn(DataAdapterCapabilities.onnReadOnly()).when(adapter).capabilities();
+		var embedding = mock(io.ontomato.dataengine.service.ai.EmbeddingService.class);
+		var gate = mock(io.ontomato.dataengine.service.vector.VectorRetrievalGate.class);
+		ReflectionTestUtils.setField(service, "embeddingService", embedding);
+		ReflectionTestUtils.setField(service, "retrievalGate", gate);
+		assertThrows(UnsupportedOperationException.class,
+				() -> service.saveAndAttachAll(List.of(resource("text")), "d1"));
+		verifyNoInteractions(vectorResourceDao, embedding, gate);
+		verify(adapter, never()).queryVectorAttr(any(), any(), any());
+		verify(adapter, never()).updateObjects(any(), any(), any(), any());
+	}
+
+	@Test
+	void readOnlyAdaptersRejectDetachBeforeReadingTheObjectOrDeletingAResource() throws Exception {
+		doReturn(DataAdapterCapabilities.onnReadOnly()).when(adapter).capabilities();
+
+		assertThrows(UnsupportedOperationException.class,
+				() -> service.deleteAndDetach("/Product", "photos", "P1", "idx/old.png", "d1"));
+
+		verifyNoInteractions(vectorResourceDao);
+		verify(adapter, never()).queryVectorAttr(any(), any(), any());
 		verify(adapter, never()).updateObjects(any(), any(), any(), any());
 	}
 

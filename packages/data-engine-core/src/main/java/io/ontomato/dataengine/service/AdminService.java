@@ -15,7 +15,7 @@ public interface AdminService {
 	
 	public void delRelationship(String relationName, User user);
 
-	public void setRelationshipDesc(String relationship, String desc, User user);
+	public void editRelationship(String relationship, String desc, String fromField, String toField, User user);
 	
 	public void addClass(String className, String primaryKeyName, String showName, String classDesc, boolean classToCard, boolean instanceToCard, boolean inStarChart, String lang, User user) throws Exception;
 	
@@ -39,8 +39,6 @@ public interface AdminService {
 	
 	public void setClassAttrShouldReturn(String className, String attr, boolean shouldReturn, User user);
 
-	public void setClassAttrPermissionField(String className, String attr, boolean permissionField, User user);
-	
 	public void setClassAttrPrimaryKey(String className, String attr, String lang, User user) throws Exception;
 	
 	public void addBucketIndicator(String className, String attrName, String indicatorName, String indicatorDesc, String indicatorUnit, String lang, User user) throws Exception;

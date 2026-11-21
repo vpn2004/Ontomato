@@ -1,49 +1,42 @@
-// Offline deployment pack: one tar.gz holding the deploy template, the assembly
-// recipes and one gzip archive per already imported image of one architecture.
+// Deployment template plus an oc-mirror delivery. Mirror state stays outside the pack.
 // Node built-ins and the Docker CLI only; no host shell.
-import { cpSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { execute, exportImage, inspectImage, parseOptions } from "./build-support.mjs";
+import { execute, output, parseOptions } from "./build-support.mjs";
 
 // Only the deploy template goes into the pack. .env, backend_data and
 // frontend_data are onsite state and are never packed.
-export const TEMPLATE_ENTRIES = ["docker-compose.yml", "initdb.sql", "README.md", "assemble"];
-const FLAGS = { "--arch": "value", "--deploy-dir": "value", "--name": "value", "--image": "list" };
+export const TEMPLATE_ENTRIES = ["docker-compose.yml", "initdb.sql", "README.md"];
+// The product hands over one directory of assembled onsite entries (install.sh and any
+// other entry with its helper scripts); the whole directory lands at the pack root, so a
+// new entry needs no change here. Top-level shell entries stay executable whatever the umask.
+export function stageInstallEntry(installDir, staging) {
+  try {
+    readFileSync(join(installDir, "install.sh"));
+  } catch {
+    throw new Error(`Install entry missing: ${join(installDir, "install.sh")}`);
+  }
+  cpSync(installDir, staging, { recursive: true });
+  for (const name of readdirSync(installDir))
+    if (name.endsWith(".sh")) chmodSync(join(staging, name), 0o755);
+}
+
+const FLAGS = {
+  "--arch": "value", "--version": "value", "--image-tag": "value",
+  "--registry": "value", "--state": "value", "--cache-dir": "value",
+  "--network": "value", "--insecure-source": "boolean", "--postgres": "value",
+  "--tool-bundle": "value", "--source-version": "value", "--application-only": "boolean",
+};
 
 // The pack is the only place that rewrites a template file, and only this line.
 export function renderEnvExample(text, arch) {
   const lines = text.split("\n");
-  if (lines.filter((line) => line.startsWith("ARCH=")).length !== 1)
+  if (lines.filter((line) => /^(?:#\s*)?ARCH=/.test(line)).length !== 1)
     throw new Error(".env.example must contain exactly one ARCH= line");
   return lines
-    .map((line) => (line.startsWith("ARCH=") ? `ARCH=${arch}` : line))
+    .map((line) => /^(?:#\s*)?ARCH=/.test(line)
+      ? `${line.startsWith("#") ? "# " : ""}ARCH=${arch}` : line)
     .join("\n");
-}
-
-// inspectImage filters by platform on Docker API 1.49+ and returns null there;
-// the explicit comparison covers older servers, where the flag is not sent.
-export function assertImagePlatform(image, ref, arch) {
-  if (!image || image.Os !== "linux" || image.Architecture !== arch)
-    throw new Error(
-      `Missing image or wrong architecture (linux/${arch}): ${ref}\n` +
-        `Pull it with docker pull --platform linux/${arch} ${ref}, or import the matching architecture with docker load -i.`,
-    );
-  return image;
-}
-
-// Every app image carries the product version; one pack cannot mix two versions.
-export function bundleVersion(apps) {
-  if (apps.length === 0)
-    throw new Error(
-      "No app image (io.runtime.kind=app) among --image; the pack version comes from the app images",
-    );
-  const versions = [...new Set(apps.map((app) => app.version))];
-  if (versions.length !== 1 || versions[0] === "")
-    throw new Error(
-      `App images report different versions: ${apps.map((app) => `${app.ref}=${app.version || "<none>"}`).join(", ")}`,
-    );
-  return versions[0];
 }
 
 const STAMP_OFFSET_MS = 8 * 3600 * 1000;
@@ -60,56 +53,62 @@ export function bundleName(name, version, arch, now) {
   return `${name}-${version}-${bundleStamp(now)}-${arch}`;
 }
 
-export function imageFileName(ref) {
-  return `${ref.replace(/[/:]/g, "-")}.tar.gz`;
+export function parseBundleOptions(argv) {
+  const options = parseOptions(argv, FLAGS);
+  for (const name of ["--version", "--image-tag", "--registry", "--state", "--tool-bundle"])
+    if (!options[name]) throw new Error(`Required ${name}`);
+  return options;
 }
 
-async function main() {
-  const options = parseOptions(process.argv.slice(2), FLAGS);
-  if (!options["--deploy-dir"]) throw new Error("Required --deploy-dir <deploy directory>");
-  if (!options["--name"]) throw new Error("Required --name <product name>");
-  if ((options["--image"] || []).length === 0)
-    throw new Error("Required at least one --image <reference>");
+// Product entries own their image list and validation; this module only transports and packs it.
+export function buildBundle(options, { name, deployDir, installDir, images, validateImages }) {
   const arch = options["--arch"];
-  const deployDir = resolve(options["--deploy-dir"]);
-  const images = options["--image"].map((ref) => ({
-    ref,
-    image: assertImagePlatform(inspectImage(ref, `linux/${arch}`), ref, arch),
-  }));
-  const labels = (image) => image.Config.Labels || {};
-  const version = bundleVersion(
-    images
-      .filter(({ image }) => labels(image)["io.runtime.kind"] === "app")
-      .map(({ ref, image }) => ({
-        ref,
-        version: labels(image)["org.opencontainers.image.version"] || "",
-      })),
-  );
-
-  const base = bundleName(options["--name"], version, arch, new Date());
+  const version = options["--version"];
+  const tools = resolve(options["--tool-bundle"]);
+  const mirror = join(tools, "mirror.py");
+  execute("python3", [mirror, "tools-verify", "--bundle", tools, "--arch", arch]);
+  const imageArgs = (refs) => refs.flatMap((ref, i) => [
+    ["--workbench", "--data-engine", "--manager", "--postgres"][i], ref,
+  ]);
+  const resolved = JSON.parse(output("python3", [mirror, "resolve", "--arch", arch, ...imageArgs(images)]));
+  validateImages(resolved);
+  const base = bundleName(name, version, arch, new Date());
   const bundleRoot = resolve(".build", "bundle");
   const staging = join(bundleRoot, base);
-  rmSync(staging, { recursive: true, force: true });
   mkdirSync(staging, { recursive: true });
-  // realpathSync dereferences the deploy/assemble symlink: the pack holds files.
+  // The prepared tool kit is independent of the application export.
   for (const entry of TEMPLATE_ENTRIES)
     cpSync(realpathSync(join(deployDir, entry)), join(staging, entry), { recursive: true });
+  if (!options["--application-only"]) {
+    cpSync(tools, join(staging, "offline"), { recursive: true });
+    if (installDir) stageInstallEntry(installDir, staging);
+  }
   writeFileSync(
     join(staging, ".env.example"),
     renderEnvExample(readFileSync(join(deployDir, ".env.example"), "utf8"), arch),
   );
-  mkdirSync(join(staging, "images"));
-  for (const { ref } of images)
-    await exportImage([ref], join(staging, "images", imageFileName(ref)));
+  execute("python3", [
+    mirror, "export", "--arch", arch, "--version", version,
+    "--state", resolve(options["--state"]), "--output", join(staging, "package"),
+    ...(options["--cache-dir"] ? ["--cache-dir", resolve(options["--cache-dir"])] : []),
+    ...imageArgs(resolved),
+    ...(options["--network"] ? ["--network", options["--network"]] : []),
+    ...(options["--insecure-source"] ? ["--insecure-source"] : []),
+    ...(process.env.REGISTRY_AUTH_FILE ? ["--authfile", resolve(process.env.REGISTRY_AUTH_FILE)] : []),
+  ]);
 
-  const archive = `${staging}.tar.gz`;
+  if (options["--source-version"]) {
+    const path = join(staging, "package/delivery.json");
+    const delivery = JSON.parse(readFileSync(path, "utf8"));
+    writeFileSync(path, `${JSON.stringify({ ...delivery, source: options["--source-version"] }, null, 2)}\n`);
+  }
+  if (options["--application-only"]) return staging;
+  // Not gzipped: package/mirror_*.tar already holds compressed layers, so gzip barely shrinks it but costs a lot of CPU.
+  const archive = `${staging}.tar`;
   rmSync(archive, { force: true });
-  execute("tar", ["--exclude=.DS_Store", "-czf", archive, "-C", bundleRoot, base]);
-  console.log(`BUNDLE_TAR=${archive}`);
-}
-
-if (process.argv[1] === fileURLToPath(import.meta.url))
-  main().catch((error) => {
-    console.error(`[bundle] ${error.message}`);
-    process.exitCode = 1;
+  execute("tar", ["--no-xattrs", "--exclude=.DS_Store", "--exclude=__pycache__", "--exclude=*.pyc", "-cf", archive, "-C", bundleRoot, base], {
+    env: { ...process.env, COPYFILE_DISABLE: "1" },
   });
+  console.log(`BUNDLE_TAR=${archive}`);
+  return archive;
+}

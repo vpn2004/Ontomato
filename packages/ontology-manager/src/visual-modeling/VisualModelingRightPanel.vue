@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ElButton, ElInput, ElSwitch, ElTag, ElTooltip } from "element-plus";
 import { Plus } from "lucide-vue-next";
-import { useSharedText } from "../context";
+import { useManagerAdapter, useSharedText } from "../context";
 
 interface AttrDef {
   name: string;
@@ -9,7 +9,6 @@ interface AttrDef {
   showName: string;
   attrDesc: string;
   enable: boolean;
-  bizzkey: string;
   bizzkeyBool: boolean;
   primaryKey: boolean;
 }
@@ -38,6 +37,7 @@ const emit = defineEmits<{
   saveClassDesc: [node: ClassDef];
   attrEnableChange: [node: ClassDef, attr: AttrDef];
   attrBizKeyChange: [node: ClassDef, attr: AttrDef];
+  attrPrimaryKeyChange: [node: ClassDef, attr: AttrDef];
   attrShowNameFocus: [node: ClassDef, attr: AttrDef];
   attrShowNameBlur: [node: ClassDef, attr: AttrDef];
   saveAttrDesc: [node: ClassDef, attr: AttrDef];
@@ -45,6 +45,7 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useSharedText();
+const { capabilities } = useManagerAdapter();
 </script>
 
 <template>
@@ -66,7 +67,6 @@ const { t } = useSharedText();
           <span class="label">{{ t("hotData.displayName") }}</span>
           <el-input
             :model-value="selectedNode.showName"
-            size="small"
             :placeholder="t('admin.displayName')"
             @update:model-value="emit('updateClassField', selectedNode, 'showName', String($event))"
             @focus="emit('classShowNameFocus', selectedNode)"
@@ -77,7 +77,6 @@ const { t } = useSharedText();
           <span class="label">{{ t("common.description") }}</span>
           <el-input
             :model-value="selectedNode.classDesc"
-            size="small"
             type="textarea"
             :autosize="{ minRows: 2, maxRows: 4 }"
             :placeholder="t('hotData.classDesc')"
@@ -96,6 +95,7 @@ const { t } = useSharedText();
             <small>{{ selectedNode.attrs.length }}</small>
             <el-tooltip :content="t('hotData.createAttr')" placement="top">
               <el-button
+                v-if="capabilities.schemaWrite"
                 class="add-attr-button"
                 text
                 circle
@@ -126,6 +126,7 @@ const { t } = useSharedText();
               <span class="switch-label">{{ t("common.enable") }}</span>
               <el-switch
                 :model-value="prop.enable"
+                :disabled="!capabilities.schemaWrite"
                 size="small"
                 @update:model-value="emit('updateAttrField', prop, 'enable', Boolean($event))"
                 @change="emit('attrEnableChange', selectedNode, prop)"
@@ -135,9 +136,19 @@ const { t } = useSharedText();
               <span class="switch-label">{{ t("hotData.mustReturn") }}</span>
               <el-switch
                 :model-value="prop.bizzkeyBool"
+                :disabled="!capabilities.schemaWrite && !prop.enable"
                 size="small"
                 @update:model-value="emit('updateAttrField', prop, 'bizzkeyBool', Boolean($event))"
                 @change="emit('attrBizKeyChange', selectedNode, prop)"
+              />
+            </div>
+            <div class="switch-item">
+              <span class="switch-label">{{ t("hotData.primaryKey") }}</span>
+              <el-switch
+                :model-value="prop.primaryKey"
+                size="small"
+                :disabled="prop.primaryKey"
+                @change="emit('attrPrimaryKeyChange', selectedNode, prop)"
               />
             </div>
           </div>
@@ -146,7 +157,6 @@ const { t } = useSharedText();
               <span class="label">{{ t("hotData.displayName") }}</span>
               <el-input
                 :model-value="prop.showName"
-                size="small"
                 :placeholder="t('admin.displayName')"
                 @update:model-value="emit('updateAttrField', prop, 'showName', String($event))"
                 @focus="emit('attrShowNameFocus', selectedNode, prop)"
@@ -157,7 +167,6 @@ const { t } = useSharedText();
               <span class="label">{{ t("common.description") }}</span>
               <el-input
                 :model-value="prop.attrDesc"
-                size="small"
                 type="textarea"
                 :autosize="{ minRows: 1, maxRows: 3 }"
                 :placeholder="t('hotData.attributeDesc')"
@@ -174,6 +183,8 @@ const { t } = useSharedText();
 
 <style scoped>
 .right-panel {
+  min-height: 0;
+  flex-shrink: 0;
   width: 360px;
   background: var(--el-bg-color);
   border-left: 1px solid var(--el-border-color);
@@ -229,6 +240,7 @@ const { t } = useSharedText();
 
 .panel-content {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: var(--spacing-lg);
   background: var(--el-bg-color);
@@ -293,7 +305,7 @@ const { t } = useSharedText();
 }
 
 .label {
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   color: var(--el-text-color-secondary);
   font-weight: var(--font-medium);
 }
@@ -365,9 +377,9 @@ code {
 
 .attr-switches {
   display: flex;
-  justify-content: space-between;
-  gap: var(--spacing-sm);
-  padding: 7px var(--spacing-sm);
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-sm);
   margin-bottom: var(--spacing-md);
   border: 1px solid var(--el-border-color-light);
   border-radius: var(--radius-sm);
@@ -377,11 +389,12 @@ code {
 .switch-item {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: var(--spacing-xs);
 }
 
 .switch-label {
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   color: var(--el-text-color-secondary);
 }
 
@@ -389,6 +402,8 @@ code {
   display: grid;
   gap: var(--spacing-sm);
 }
+.attr-fields .field { margin-bottom: 0; }
+.right-panel :deep(.el-input), .right-panel :deep(.el-textarea) { font-size: var(--text-sm); }
 
 @container ontology-manager (max-width: 1400px) {
   .right-panel {

@@ -1,5 +1,8 @@
 package io.ontomato.dataengine.controller;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -66,6 +69,33 @@ public class ProductionEnvController {
 		
 	}
 	
+	@PostMapping("/productionEnv/sync")
+	@ResponseBody
+	public JSONObject sync(@RequestBody JSONObject param) {
+		JSONObject ret = new JSONObject();
+		try {
+			List<String> actionIds = new ArrayList<String>();
+			JSONArray actionArray = param.getJSONArray("actionIds");
+			if (actionArray != null) {
+				for (int i = 0; i < actionArray.size(); i++) {
+					actionIds.add(actionArray.getString(i));
+				}
+			}
+			List<String> metricViewIds = new ArrayList<String>();
+			JSONArray metricViewArray = param.getJSONArray("metricViewIds");
+			if (metricViewArray != null) {
+				for (int i = 0; i < metricViewArray.size(); i++) {
+					metricViewIds.add(metricViewArray.getString(i));
+				}
+			}
+			ret = envService.syncAssetsToProduction(actionIds, metricViewIds, Boolean.TRUE.equals(param.getBoolean("dryRun")));
+		} catch (Exception e) {
+			ret.put("success", false);
+			ret.put("message", e.getMessage());
+		}
+		return ret;
+	}
+
 	@PostMapping("/productionEnv/queryBusinessKnowledge")
     @ResponseBody
     public JSONObject queryBusinessKnowledge(@RequestBody JSONObject param) {

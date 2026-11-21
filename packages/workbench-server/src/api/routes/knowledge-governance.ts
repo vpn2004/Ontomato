@@ -9,6 +9,7 @@ import {
 import { readGovernanceSource } from "../../services/knowledge-governance/tools";
 import { requireDomainId, type AuthenticatedRequest } from "../../utils/request-identity";
 import { HttpError } from "../../utils/errors";
+import { subscribeResponseStream, writeUnavailableStream } from "../../utils/sse";
 import { requirePermission } from "../../identity/installed";
 import { asyncHandler } from "../utils/http";
 
@@ -21,6 +22,12 @@ function context(req: AuthenticatedRequest) {
     credentials: { domainId, token: req.token, apiKey: req.apiKey },
     locale: req.locale,
   };
+}
+function messageInput(body: unknown) {
+  const input = governanceMessageInputSchema.safeParse(body);
+  if (!input.success)
+    throw new HttpError(400, "A non-empty message up to 20000 characters is required");
+  return input.data.message;
 }
 function sessionId(value: string) {
   const result = z.string().uuid().safeParse(value);
@@ -36,8 +43,9 @@ router.get(
 router.post(
   "/",
   asyncHandler(async (req, res) => {
+    const message = messageInput(req.body);
     const { owner, credentials, locale } = context(req as AuthenticatedRequest);
-    res.status(201).json(await governanceRuntime.start(owner, credentials, locale));
+    res.status(201).json(await governanceRuntime.start(owner, credentials, locale, message));
   })
 );
 router.get(
@@ -56,9 +64,7 @@ router.get(
 router.post(
   "/:id/messages",
   asyncHandler(async (req, res) => {
-    const input = governanceMessageInputSchema.safeParse(req.body);
-    if (!input.success)
-      throw new HttpError(400, "A non-empty message up to 20000 characters is required");
+    const message = messageInput(req.body);
     const { owner, credentials, locale } = context(req as AuthenticatedRequest);
     res.json(
       await governanceRuntime.respond(
@@ -66,9 +72,23 @@ router.post(
         owner,
         credentials,
         locale,
-        input.data.message
+        message
       )
     );
+  })
+);
+// The turn id comes from the snapshot, so a resumed cursor only ever applies to its own turn.
+// Closing this subscription only detaches the page; Stop is the explicit cancel.
+router.get(
+  "/:id/turns/:turnId/stream",
+  asyncHandler(async (req, res) => {
+    const stream = await governanceRuntime.responseStream(
+      sessionId(req.params.id!),
+      context(req as AuthenticatedRequest).owner,
+      req.params.turnId!
+    );
+    if (stream) subscribeResponseStream(req, res, stream);
+    else writeUnavailableStream(res);
   })
 );
 router.post(

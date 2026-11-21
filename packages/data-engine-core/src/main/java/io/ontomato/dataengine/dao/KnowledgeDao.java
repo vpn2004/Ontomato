@@ -3,6 +3,7 @@ package io.ontomato.dataengine.dao;
 import com.alibaba.fastjson2.JSON;
 import com.pgvector.PGvector;
 import io.ontomato.dataengine.service.ai.EmbeddingService;
+import io.ontomato.dataengine.service.vector.VectorRetrievalGate;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.model.output.Response;
 import jakarta.annotation.PostConstruct;
@@ -23,6 +24,9 @@ public class KnowledgeDao extends BaseDao {
 
     @Autowired
     private EmbeddingService embeddingService;
+
+    @Autowired
+    private VectorRetrievalGate retrievalGate;
 
     private static final String TABLE_NAME = "knowledgeindex";
 
@@ -45,13 +49,18 @@ public class KnowledgeDao extends BaseDao {
                         + "status INTEGER DEFAULT 0, "
                         + "modify_time TIMESTAMP, "
                         + "domain_id VARCHAR(64), "
-                        + "knowledge_vector vector(" + embeddingModelProperties.getDimensions() + ")"
+                        + "knowledge_vector vector"
                         + ")");
         jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_" + TABLE_NAME + "_domain_id ON " + TABLE_NAME + "(domain_id)");
         jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_" + TABLE_NAME + "_status ON " + TABLE_NAME + "(status)");
     }
 
     public List<KnowledgeEntity> findKnowledge(String question, int maxResult, String domainId) {
+        return retrievalGate.read(domainId, () -> searchKnowledge(question, maxResult, domainId));
+    }
+
+    /** Runs inside the read boundary: the query vector and the rows belong to one generation. */
+    private List<KnowledgeEntity> searchKnowledge(String question, int maxResult, String domainId) {
         List<KnowledgeEntity> knowledgeEntities = new ArrayList<>();
         float[] findVector = null;
         String queryString = "";
@@ -60,7 +69,7 @@ public class KnowledgeDao extends BaseDao {
             findVector = embeddingResponse.content().vector();
 
             queryString = "SELECT " + COLUMNS + " FROM " + TABLE_NAME
-                    + " WHERE status = 1 AND domain_id = ? ORDER BY knowledge_vector <-> ?::vector LIMIT ?";
+                    + " WHERE status = 1 AND domain_id = ? AND knowledge_vector IS NOT NULL ORDER BY knowledge_vector <-> ?::vector LIMIT ?";
             PGvector pgVector = new PGvector(findVector);
 
             knowledgeEntities = jdbcTemplate.query(queryString,
@@ -95,10 +104,6 @@ public class KnowledgeDao extends BaseDao {
                                 String knowledgeTitle, String knowledgeText,
                                 List<String> knowledgeTags, int creatorType, int status,
                                 Date modifyTime) {
-        Response<Embedding> embeddingResponse = embeddingService.embedding(knowledgeText, domainId);
-        float[] embededVector = embeddingResponse.content().vector();
-        PGvector pgVector = new PGvector(embededVector);
-
         String tagsJson = (knowledgeTags != null && !knowledgeTags.isEmpty())
                 ? JSON.toJSONString(knowledgeTags) : "[]";
 
@@ -106,19 +111,66 @@ public class KnowledgeDao extends BaseDao {
                 ? new Timestamp(modifyTime.getTime())
                 : new Timestamp(System.currentTimeMillis());
 
-        jdbcTemplate.update(
+        int saved = retrievalGate.write(domainId, () -> {
+            float[] embededVector = embeddingService.embedding(knowledgeText, domainId).content().vector();
+            return jdbcTemplate.update(
                 "INSERT INTO " + TABLE_NAME + " (" + COLUMNS + ", knowledge_vector) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?::vector) "
                         + "ON CONFLICT (knowledge_id) DO UPDATE SET knowledge_title = EXCLUDED.knowledge_title, "
                         + "knowledge_text = EXCLUDED.knowledge_text, knowledge_tags = EXCLUDED.knowledge_tags, "
                         + "creator_type = EXCLUDED.creator_type, status = EXCLUDED.status, "
-                        + "modify_time = EXCLUDED.modify_time, domain_id = EXCLUDED.domain_id, "
-                        + "knowledge_vector = EXCLUDED.knowledge_vector",
+                        + "modify_time = EXCLUDED.modify_time, "
+                        + "knowledge_vector = EXCLUDED.knowledge_vector WHERE " + TABLE_NAME + ".domain_id = EXCLUDED.domain_id",
                 knowledgeid, knowledgeTitle, knowledgeText, tagsJson, creatorType, status,
-                modifyTimestamp, domainId, pgVector);
+                modifyTimestamp, domainId, new PGvector(embededVector));
+        });
+        if (saved == 0) {
+            throw new IllegalArgumentException("Business knowledge not found in the current domain");
+        }
     }
 
-    public void deleteKnowledge(String knowledgeid) {
-        jdbcTemplate.update("DELETE FROM " + TABLE_NAME + " WHERE knowledge_id = ?", knowledgeid);
+    public void requireKnowledgeInDomain(String knowledgeid, String domainId) {
+        int count = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM " + TABLE_NAME + " WHERE knowledge_id = ? AND domain_id = ?",
+                Integer.class, knowledgeid, domainId);
+        if (count == 0) {
+            throw new IllegalArgumentException("Business knowledge not found in the current domain");
+        }
+    }
+
+    public void deleteKnowledge(String knowledgeid, String domainId) {
+        int deleted = jdbcTemplate.update(
+                "DELETE FROM " + TABLE_NAME + " WHERE knowledge_id = ? AND domain_id = ?", knowledgeid, domainId);
+        if (deleted == 0) {
+            throw new IllegalArgumentException("Business knowledge not found in the current domain");
+        }
+    }
+
+    public int countDomainRows(String domainId) {
+        return jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM " + TABLE_NAME + " WHERE domain_id = ?", Integer.class, domainId);
+    }
+
+    public int countDomainPending(String domainId) {
+        return jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM " + TABLE_NAME + " WHERE domain_id = ? AND knowledge_vector IS NULL",
+                Integer.class, domainId);
+    }
+
+    public List<VectorRebuildItem> listDomainPending(String domainId) {
+        return jdbcTemplate.query(
+                "SELECT knowledge_id, knowledge_text FROM " + TABLE_NAME + " WHERE domain_id = ? AND knowledge_vector IS NULL",
+                (rs, rowNum) -> new VectorRebuildItem(rs.getString("knowledge_id"), rs.getString("knowledge_text")),
+                domainId);
+    }
+
+    public void clearDomainVectors(String domainId) {
+        jdbcTemplate.update("UPDATE " + TABLE_NAME + " SET knowledge_vector = NULL WHERE domain_id = ?", domainId);
+    }
+
+    /** Fill a pending row only: a row written meanwhile keeps the vector of its newer content. */
+    public void fillDomainVector(String knowledgeId, float[] vector) {
+        jdbcTemplate.update("UPDATE " + TABLE_NAME + " SET knowledge_vector = ?::vector WHERE knowledge_id = ? AND knowledge_vector IS NULL",
+                new PGvector(vector), knowledgeId);
     }
 
     private KnowledgeEntity mapRow(java.sql.ResultSet rs) throws java.sql.SQLException {

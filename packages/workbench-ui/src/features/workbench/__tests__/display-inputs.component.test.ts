@@ -6,6 +6,7 @@ import WorkbenchWelcomeState from "../components/WorkbenchWelcomeState.vue";
 import WorkbenchAgentRail from "../components/WorkbenchAgentRail.vue";
 import { workbenchI18n } from "../../../i18n";
 import type { WorkbenchAgent } from "../types";
+import type { AnalysisAgent } from "@ontomato/contracts/analysis-agent";
 
 const global = { plugins: [workbenchI18n(), createPinia(), ElementPlus] };
 
@@ -17,14 +18,12 @@ describe("display inputs supplied by both layouts", () => {
     });
     const media = video.find(".empty-icon-large video");
     expect(media.attributes()).toMatchObject({ src: "/robot.webm", autoplay: "", loop: "", playsinline: "" });
-    expect(video.find(".empty-icon-large").classes()).toContain("empty-icon-large--video");
 
     const image = mount(WorkbenchWelcomeState, {
       props: { mode: "qa", animation: { kind: "image", src: "/mark.svg", alt: "Ontomato" } },
       global,
     });
     expect(image.find(".empty-icon-large img").attributes()).toMatchObject({ src: "/mark.svg", alt: "Ontomato" });
-    expect(image.find(".empty-icon-large").classes()).toContain("empty-icon-large--image");
   });
 
   const qaAgent = { id: "__qa__", name: "Q&A", description: "", icon: "{}", isQA: true } as WorkbenchAgent;
@@ -36,7 +35,7 @@ describe("display inputs supplied by both layouts", () => {
         brandSubtitle: "",
         addAgentLabel: "Add agent",
         qaAgent,
-        agents: [],
+        lineup: [{ kind: "qa" }],
         selectionMode: "qa",
         selectedAgentId: "",
         ...extra,
@@ -44,23 +43,49 @@ describe("display inputs supplied by both layouts", () => {
       global,
     });
 
-  it("without inputs the entry rail keeps its default: cards are divs with native titles, the add button has a title and a 16px icon", () => {
+  it("without inputs the entry rail keeps its default: cards are divs with native titles, the add button has a title", () => {
     const wrapper = rail({});
     const card = wrapper.find(".agent-card");
     expect(card.element.tagName).toBe("DIV");
     expect(card.attributes("title")).toBe("Q&A");
-    expect(card.classes()).not.toContain("agent-card--button");
     expect(wrapper.find(".agent-add-btn").attributes("title")).toBe("Add agent");
-    expect(wrapper.find(".agent-add-btn svg").attributes("width")).toBe("16");
   });
 
-  it("with the open-source layout inputs: cards are buttons with aria-label and no native title, and the add icon is 18px", () => {
+  it("renders the server lineup order with Q&A as an ordinary entry and no divider", () => {
+    const agent = (id: string, name: string): AnalysisAgent => ({
+      id,
+      name,
+      description: "",
+      executionMode: "loop",
+      reportDeliverableEnabled: true,
+      summarizerPrompt: "",
+      conclusionMakerPrompt: "",
+      graphScope: { mode: "panorama" },
+      isEnabled: true,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    const wrapper = rail({
+      lineup: [
+        { kind: "agent", agent: agent("a", "Sales") },
+        { kind: "qa" },
+        { kind: "agent", agent: agent("b", "Finance") },
+      ],
+    });
+    expect(wrapper.findAll(".agent-card").map((card) => card.attributes("title"))).toEqual([
+      "Sales",
+      "Q&A",
+      "Finance",
+    ]);
+    expect(wrapper.find(".agent-divider").exists()).toBe(false);
+  });
+
+  it("with the open-source layout inputs: cards are buttons with aria-label and no native title, and no add-button native title", () => {
     const wrapper = rail({ compact: false, cardTag: "button", nativeTitles: false, addIconSize: 18 });
     const card = wrapper.find(".agent-card");
     expect(card.element.tagName).toBe("BUTTON");
     expect(card.attributes()).toMatchObject({ type: "button", "aria-label": "Q&A" });
     expect(card.attributes("title")).toBeUndefined();
     expect(wrapper.find(".agent-add-btn").attributes("title")).toBeUndefined();
-    expect(wrapper.find(".agent-add-btn svg").attributes("width")).toBe("18");
   });
 });

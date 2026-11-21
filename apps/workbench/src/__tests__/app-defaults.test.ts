@@ -50,9 +50,10 @@ describe("open-source application defaults", () => {
     });
   });
 
-  it("always asks DataRAG for English, even when the caller passes another locale", () => {
-    expect(buildHeaders(getApiConfig(), undefined, undefined, "zh-CN")["Accept-Language"]).toBe("en");
-    expect(buildHeaders(getApiConfig())["Accept-Language"]).toBe("en");
+  it("forwards the selected language to DataRAG and defaults to Chinese", () => {
+    expect(buildHeaders(getApiConfig(), undefined, undefined, "zh-CN")["Accept-Language"]).toBe("zh-CN");
+    expect(buildHeaders(getApiConfig(), undefined, undefined, "en")["Accept-Language"]).toBe("en");
+    expect(buildHeaders(getApiConfig())["Accept-Language"]).toBe("zh-CN");
   });
 
   it("strips chart field annotations with the open-source parenthesis rule", async () => {

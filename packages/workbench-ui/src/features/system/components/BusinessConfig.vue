@@ -1,9 +1,18 @@
 <script setup lang="ts">
 import type { SystemModelConfig } from "@ontomato/contracts/system-model";
+import {
+  dataAdapterTestResultSchema,
+  multiDataSourceRejectionSchema,
+  multiDataSourceType,
+  type DataAdapterInfo,
+  type DataAdapterRequest,
+  type DataAdaptersData,
+} from "@ontomato/contracts/data-adapters";
 
-import { ref, reactive, onMounted } from "vue";
+import { ref, reactive, onMounted, watch } from "vue";
 import { ElMessage } from "element-plus";
 import { adminApi } from "../../admin";
+import { ApiBusinessError } from "../../../utils/api";
 import { useI18n } from "vue-i18n";
 import { workbenchContent } from "../../../content";
 import DataAdapterConfigCard from "./business-config/DataAdapterConfigCard.vue";
@@ -11,9 +20,15 @@ import GeneralConfigCard from "./business-config/GeneralConfigCard.vue";
 import QuerySettingsCard from "./business-config/QuerySettingsCard.vue";
 import SkillDirConfigCard from "./business-config/SkillDirConfigCard.vue";
 import {
+  dataAdapterRequest,
+  multiDataSourceDefinition,
+  multiDataSourceDraft,
   type BusinessConfig,
-  type DataAdapterInfo,
+  type DataAdapterTestOutcome,
   type GeneralConfigKey,
+  type MultiDataSourceDraft,
+  type MultiDataSourceSaveFailure,
+  type OntologyOutline,
   type SystemSettings,
 } from "../types";
 import type { BusinessConfigProps } from "../business-config";
@@ -28,7 +43,7 @@ const backendLoadError = ref("");
 const querySettingsRef = ref<{ markSaved: () => void } | null>(null);
 
 // Draft of the general config, language and data adapter, bound two-way by the cards.
-const config = reactive<SystemSettings>({
+let config = reactive<SystemSettings>({
   knowledgeMaxResult: 10,
   toolAndPythonRetry: 0,
   dslCookerTries: 1,
@@ -53,7 +68,7 @@ async function loadConfig() {
       adminApi.listDataAdapters(),
     ]);
     if (res?.success) {
-      dataAdapters.value = adaptersRes.data;
+      dataAdapters.value = (adaptersRes.data as DataAdaptersData).adapters;
       const data = res.data as BusinessConfig;
       // The skill directory hangs on the coding role and is empty when unset.
       skilldir.value = data.agents.coding.skilldir ?? "";
@@ -69,6 +84,7 @@ async function loadConfig() {
         : props.defaultLanguage;
       config.dataAdapter = data.dataAdapter;
       config.dataAdapterConnections = data.dataAdapterConnections;
+      multiDraft.value = multiDataSourceDraft(data.multiDataSource);
       dataAdapterMode.value = config.dataAdapter;
     } else {
       backendLoadError.value = res?.message || t("admin.loadConfigFailed");
@@ -135,17 +151,36 @@ async function saveGeneralField(key: GeneralConfigKey) {
 
 const dataAdapterMode = ref("");
 const savingAdapter = ref(false);
+const testingAdapter = ref(false);
+const adapterTest = ref<DataAdapterTestOutcome | null>(null);
+// Bumped whenever the type or a connection field changes, so a test answering after such a change is dropped.
+let adapterFormRevision = 0;
+
+// A previous outcome describes the values it was run with, not the edited form.
+watch(
+  [dataAdapterMode, () => config.dataAdapterConnections],
+  () => {
+    adapterFormRevision++;
+    adapterTest.value = null;
+  },
+  { deep: true }
+);
+
+function selectedDataAdapter(): DataAdapterInfo {
+  return dataAdapters.value.find(({ type }) => type === dataAdapterMode.value)!;
+}
+
+// The card form builds the connection object of the selected type.
+function singleSourceRequest(adapter: DataAdapterInfo) {
+  return dataAdapterRequest(adapter, config.dataAdapterConnections[adapter.type]);
+}
 
 async function saveDataAdapter() {
+  if (dataAdapterMode.value === multiDataSourceType) return saveMultiDataSource();
   savingAdapter.value = true;
   try {
-    const adapter = dataAdapters.value.find(({ type }) => type === dataAdapterMode.value)!;
-    // Submit only the connection fields declared by the type; for types with fields, the card form builds the connection object.
-    const connection = config.dataAdapterConnections[adapter.type];
-    await adminApi.useDataAdapter({
-      type: adapter.type,
-      ...Object.fromEntries(adapter.fields.map((field) => [field, connection[field]])),
-    });
+    const adapter = selectedDataAdapter();
+    await adminApi.useDataAdapter(singleSourceRequest(adapter));
     ElMessage.success(t("admin.switchedDataAdapter", { name: adapter.label }));
     config.dataAdapter = dataAdapterMode.value;
   } catch (e: any) {
@@ -155,8 +190,75 @@ async function saveDataAdapter() {
   }
 }
 
+// Tests a candidate connection without saving it or switching this domain's adapter.
+async function testConnection(request: DataAdapterRequest): Promise<DataAdapterTestOutcome> {
+  try {
+    const res = await adminApi.testDataAdapter(request);
+    const report = dataAdapterTestResultSchema.safeParse(res.data);
+    return report.success
+      ? { ok: true, result: report.data }
+      : { ok: false, message: t("admin.dataAdapterInvalidReport") };
+  } catch (e: any) {
+    return { ok: false, message: e.message };
+  }
+}
+
+async function testDataAdapter() {
+  testingAdapter.value = true;
+  adapterTest.value = null;
+  const revision = adapterFormRevision;
+  const outcome = await testConnection(singleSourceRequest(selectedDataAdapter()));
+  testingAdapter.value = false;
+  if (revision === adapterFormRevision) adapterTest.value = outcome;
+}
+
+// Multi-source draft: kept apart from the single-source connections, so neither mode's save or edits touch the other.
+const multiDraft = ref<MultiDataSourceDraft>(multiDataSourceDraft(null));
+const multiSaveFailure = ref<MultiDataSourceSaveFailure | null>(null);
+// The ontology is read for the multi-source editor only, the first time that mode is shown.
+const ontology = ref<OntologyOutline | null>(null);
+const loadingOntology = ref(false);
+const ontologyLoadError = ref("");
+
+async function loadOntology() {
+  loadingOntology.value = true;
+  ontologyLoadError.value = "";
+  try {
+    ontology.value = await adminApi.getOntologyOutline();
+  } catch (e: any) {
+    ontologyLoadError.value = e.message;
+  } finally {
+    loadingOntology.value = false;
+  }
+}
+
+watch(dataAdapterMode, (mode) => {
+  if (mode === multiDataSourceType && ontology.value === null && !loadingOntology.value) {
+    loadOntology();
+  }
+});
+
+// The data engine checks the whole definition against the ontology; a rejection lists every located problem.
+async function saveMultiDataSource() {
+  savingAdapter.value = true;
+  multiSaveFailure.value = null;
+  try {
+    await adminApi.useMultiDataSource(multiDataSourceDefinition(multiDraft.value, ontology.value!));
+    ElMessage.success(t("admin.switchedDataAdapter", { name: selectedDataAdapter().label }));
+    config.dataAdapter = multiDataSourceType;
+  } catch (e: any) {
+    const rejection = e instanceof ApiBusinessError ? multiDataSourceRejectionSchema.safeParse(e.body) : null;
+    multiSaveFailure.value = {
+      message: e.message,
+      problems: rejection?.success ? rejection.data.data.problems : [],
+    };
+  } finally {
+    savingAdapter.value = false;
+  }
+}
+
 // Query settings live in the Node system model file and hold only the query mode and total time limit.
-const querySettings = reactive<SystemModelConfig>({
+let querySettings = reactive<SystemModelConfig>({
   abcQuestionMode: "harness",
   queryTimeoutSeconds: 600,
 });
@@ -249,8 +351,17 @@ onMounted(() => {
       :adapters="dataAdapters"
       :adapter-display="adapterDisplay"
       :saving="savingAdapter"
+      :testing="testingAdapter"
+      :test="adapterTest"
       :disabled="loading || !!backendLoadError"
+      v-model:multi-draft="multiDraft"
+      :ontology="ontology"
+      :ontology-load-error="ontologyLoadError"
+      :test-connection="testConnection"
+      :multi-save-failure="multiSaveFailure"
       @save="saveDataAdapter"
+      @test="testDataAdapter"
+      @retry-ontology="loadOntology"
     />
   </div>
 </template>

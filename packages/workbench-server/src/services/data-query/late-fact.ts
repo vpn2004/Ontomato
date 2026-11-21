@@ -19,8 +19,10 @@ import { updateQueryRunQualityCheck } from "./query-run-store";
 
 const logger = createLogger("data-query:late-fact");
 
-/** Bounded time limit of a late fact: it decides only "when to consider it dead", never "how long to wait before the result counts". */
+/** Maximum time without new review evidence; productive multi-program reviews may take longer overall. */
 export const LATE_FACT_SETTLE_TIMEOUT_MS = 60_000;
+export const QUALITY_CHECK_PHASE_TIMEOUT_MS = 300_000;
+export const QUALITY_CHECK_TOTAL_TIMEOUT_MS = 1_800_000;
 
 /**
  * A late fact registered by one run. A run that presents the fact calls settleAll before finalizing;
@@ -67,18 +69,22 @@ export function startQualityCheckSettlement(input: QualityCheckSettlementInput):
   let state: QcState = { status: "running", steps: [] };
   const publish = () => onState?.(state, buildQcMarkdown(state));
 
-  // The bounded time limit is owned by this fact itself: the backend quality-check read has no server-side timeout, so past the limit it is
-  // considered dead — abort the read, finalize as not ready, and skip the write-back. This is a resource boundary, not "how long to wait for a valid result".
+  // Expire stalled readers, not productive multi-program reviews. Only a new explanation renews
+  // this idle deadline; transport heartbeats and repeated evidence cannot keep a stuck review alive.
   const bound = new AbortController();
   const abortOnCaller = () => bound.abort();
   // Cancellation on entry and cancellation received while running reuse the same finalization; attaching only a listener is not enough.
   if (signal?.aborted) bound.abort();
   else signal?.addEventListener("abort", abortOnCaller);
   let timedOut = false;
-  const timer = setTimeout(() => {
+  const expire = () => {
     timedOut = true;
     bound.abort();
-  }, LATE_FACT_SETTLE_TIMEOUT_MS);
+  };
+  let timer = setTimeout(expire, LATE_FACT_SETTLE_TIMEOUT_MS);
+  const totalTimer = setTimeout(expire, QUALITY_CHECK_TOTAL_TIMEOUT_MS);
+  const explanations = new Set<string>();
+  const renew = (duration: number) => { clearTimeout(timer); timer = setTimeout(expire, duration); };
 
   publish();
 
@@ -92,7 +98,23 @@ export function startQualityCheckSettlement(input: QualityCheckSettlementInput):
         userId: input.userId,
         locale: input.locale,
         signal: bound.signal,
+        onPhase: (phase) => {
+          if (bound.signal.aborted || state.status !== "running") return;
+          // Phase changes and monotonic progress count; repeated frames never renew a lease.
+          if (state.phase === "assessing" && phase.phase !== "assessing") return;
+          if (state.phase !== phase.phase || phase.completedPrograms > (state.completedPrograms ?? -1)) {
+            state = { ...state, ...phase };
+            renew(QUALITY_CHECK_PHASE_TIMEOUT_MS);
+            publish();
+          }
+        },
         onStep: (step) => {
+          if (bound.signal.aborted) return;
+          const key = JSON.stringify([step.label ?? "", step.summary?.trim() ?? "", step.meaning?.trim() ?? ""]);
+          if (!explanations.has(key) && (step.summary?.trim() || step.meaning?.trim())) {
+            explanations.add(key);
+            renew(state.phase ? QUALITY_CHECK_PHASE_TIMEOUT_MS : LATE_FACT_SETTLE_TIMEOUT_MS);
+          }
           state = {
             ...state,
             steps: [
@@ -108,6 +130,7 @@ export function startQualityCheckSettlement(input: QualityCheckSettlementInput):
           publish();
         },
         onFinish: (finished) => {
+          if (bound.signal.aborted) return;
           state = {
             ...state,
             status: "completed",
@@ -127,22 +150,19 @@ export function startQualityCheckSettlement(input: QualityCheckSettlementInput):
         },
       });
 
-      // Past the time limit: finalize as not ready and push, but skip the write-back — there is no result to write.
+      // A timeout has no assessment, but its terminal state must survive a page reload.
+      if (signal?.aborted) return;
       if (timedOut) {
         state = { ...state, status: "unsettled" };
         publish();
-        return;
-      }
-      // Cancellation is not a failure, and no write-back — this run no longer cares about this evidence.
-      if (signal?.aborted) return;
-      if (!result) {
+      } else if (!result) {
         state = { ...state, status: "failed" };
         publish();
       }
 
       const updated = await updateQueryRunQualityCheck({
         ...identity,
-        qcResult: result ?? undefined,
+        qcResult: timedOut ? undefined : result ?? undefined,
         qcState: state,
       });
       if (updated === 0) {
@@ -152,7 +172,10 @@ export function startQualityCheckSettlement(input: QualityCheckSettlementInput):
         });
       }
     } catch (error) {
-      if (signal?.aborted || timedOut) return;
+      if (signal?.aborted) return;
+      state = { ...state, status: timedOut ? "unsettled" : "failed" };
+      publish();
+      await updateQueryRunQualityCheck({ ...identity, qcResult: undefined, qcState: state });
       logger.warn(tApp("queryFixed.260"), {
         sourceKind: identity.sourceKind,
         sourceRef: identity.sourceRef,
@@ -160,6 +183,7 @@ export function startQualityCheckSettlement(input: QualityCheckSettlementInput):
       });
     } finally {
       clearTimeout(timer);
+      clearTimeout(totalTimer);
       signal?.removeEventListener("abort", abortOnCaller);
     }
   })();

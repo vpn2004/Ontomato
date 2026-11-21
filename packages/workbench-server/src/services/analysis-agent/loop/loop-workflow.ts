@@ -25,7 +25,11 @@ import { renderPrompt } from "../../../core/prompts/loader";
 import { t } from "../../../i18n";
 import { buildTurnIdentity, runWithLogContext } from "../../../logging/log-context";
 import { createLogger } from "../../../logging/logger";
-import { recordTurnRunFinish, recordTurnRunStart } from "../../turn-run/turn-run-store";
+import {
+  recordTurnRunFinish,
+  recordTurnRunStart,
+  turnRunDurationMs,
+} from "../../turn-run/turn-run-store";
 import { allocateRequestSeq } from "../../chat/thread-store";
 import type { AnalysisRunIdentity } from "../task/run-history";
 import { datasetSchemaService } from "../../data-query/dataset-schema";
@@ -39,9 +43,16 @@ import type { DeepAnalysisTaskPayload } from "@ontomato/contracts/analysis-prese
 import { assembleLoopChartCapability } from "./chart";
 import { assembleLoopDispatchCapability, lastAssistantText } from "./dispatch";
 import { assembleLoopEvidenceCapability } from "./evidence";
+import { combineResultTruncation } from "../../data-query/protocol";
+import { partialReportNotice } from "../report/partial-result-notice";
 import { assembleLoopExternalMcpCapability } from "./external-mcp";
+import { assembleLoopActionCapability } from "./actions";
+import { assembleLoopMetricViewCapability } from "./metric-views";
 import { assembleLoopNotebookCapability } from "./notebook";
 import { assembleLoopDataProbeCapability } from "./probe";
+import { collectPptConversation } from "../delivery/ppt-conversation";
+import { generatePpt } from "../delivery/ppt-generator";
+import { pptArtifactStore } from "../delivery/ppt-artifacts";
 import { assembleLoopSkillCapability } from "./skills";
 import { createDeepAnalysisArtifactStore } from "../task/artifacts";
 import {
@@ -49,6 +60,7 @@ import {
   type QueryResultDatasetEntry,
 } from "../runtime/query-result";
 import { tApp } from "../../../i18n";
+import { intersectAnalysisClassNames } from "../config/graph-scope";
 
 
 const logger = createLogger("analysis-loop-workflow");
@@ -63,6 +75,8 @@ export const ANALYSIS_LOOP_COMPACTION_PROMPT_KEYS: CompactionPromptKeys = {
 export interface RunAnalysisLoopParams {
   userQuestion: string;
   userId: string;
+  /** Display name of the user the session talks to; regular-session turns carry it from the verified caller. */
+  userName?: string;
   threadId: string;
   taskId?: string;
   /** Run identity captured at acceptance; artifacts and terminal states use it to confirm the current task is still writable. */
@@ -78,6 +92,8 @@ export interface RunAnalysisLoopParams {
   conversationTurn?: AnalysisConversationTurnRecord;
   /** The entry point's override of the report deliverable; when absent the agent configuration applies. */
   reportDeliverableEnabled?: boolean;
+  graphScopeClassNames?: string[];
+  classNames?: string[];
 }
 
 function buildSystemPrompt(params: {
@@ -86,9 +102,14 @@ function buildSystemPrompt(params: {
   dataProbeCapability: string;
   deliverableCapability: string;
   completionInstruction: string;
+  evidenceRequirements: string;
+  workingMethod: string;
   chartCapability: string;
   skillCapability: string;
   externalMcpCapability: string;
+  actionCapability: string;
+  metricViewCapability: string;
+  userName?: string;
 }): string {
   const trimmed = params.loopPrompt?.trim();
   return renderPrompt("analysis-agent.loop.system", {
@@ -97,9 +118,16 @@ function buildSystemPrompt(params: {
     dataProbeCapability: params.dataProbeCapability,
     deliverableCapability: params.deliverableCapability,
     completionInstruction: params.completionInstruction,
+    evidenceRequirements: params.evidenceRequirements,
+    workingMethod: params.workingMethod,
     chartCapability: params.chartCapability,
     skillCapability: params.skillCapability,
     externalMcpCapability: params.externalMcpCapability,
+    actionCapability: params.actionCapability,
+    metricViewCapability: params.metricViewCapability,
+    currentUser: params.userName?.trim()
+      ? tApp("analysis.loop.current-user", { userName: params.userName.trim() })
+      : "",
   });
 }
 
@@ -159,6 +187,13 @@ export async function runAnalysisLoopWorkflow(
       params.onEvent?.({ ...event, requestSeq });
     };
     const loopSignal = signal || new AbortController().signal;
+    /** Ends the turn run and reports its recorded duration on the turn's event channel. */
+    const finishTurnRun = async (status: "completed" | "failed" | "cancelled") => {
+      const durationMs = turnRunDurationMs(await recordTurnRunFinish({ threadId, requestSeq, status }));
+      if (durationMs !== undefined) {
+        params.onEvent?.({ type: "turn_finished", durationMs, requestSeq });
+      }
+    };
 
     const trajectory = createDeepAnalysisArtifactStore({
       taskId,
@@ -168,6 +203,7 @@ export async function runAnalysisLoopWorkflow(
       emit: sendEvent,
     });
     let notebook: ReturnType<typeof assembleLoopNotebookCapability>["notebook"];
+    const initialEvidence = new Map<string, { question: string; entries: QueryResultDatasetEntry[] }>();
     const persistArtifacts = async (
       status: "completed" | "failed" | "cancelled",
       report: string,
@@ -175,6 +211,12 @@ export async function runAnalysisLoopWorkflow(
       error?: string
     ) => {
       harnessStatus = status;
+      if (reportDeliverableEnabled && report.trim()) {
+        report = partialReportNotice(
+          userQuestion,
+          combineResultTruncation([...initialEvidence.values()].flatMap((item) => item.entries))
+        ) + report;
+      }
       if (reportDeliverableEnabled)
         trajectory.section({
           sectionId: "report",
@@ -222,10 +264,6 @@ export async function runAnalysisLoopWorkflow(
               (previous) => previous.requestSeq < requestSeq
             )
           : [];
-      const initialEvidence = new Map<
-        string,
-        { question: string; entries: QueryResultDatasetEntry[] }
-      >();
       for (const ref of previousTurns.flatMap((previous) => previous.evidenceRefs)) {
         const query = await getQueryRunBySource(ref);
         if (!query) continue;
@@ -247,6 +285,28 @@ export async function runAnalysisLoopWorkflow(
         trajectory,
       });
 
+      // Only a regular session has a user who can confirm an Action before it runs.
+      const actionCapability = await assembleLoopActionCapability({
+        selectedActionIds: conversationTurn ? agent.enabledActionIds || [] : [],
+        token,
+        apiKey,
+        userId,
+        locale: params.locale,
+        signal: loopSignal,
+        trajectory,
+      });
+
+      // Read-only, so every run of the agent may call its metric views, unlike Actions.
+      const metricViewCapability = await assembleLoopMetricViewCapability({
+        selectedMetricViewIds: agent.enabledMetricViewIds || [],
+        token,
+        apiKey,
+        userId,
+        locale: params.locale,
+        signal: loopSignal,
+        trajectory,
+      });
+
       const notebookCapability = assembleLoopNotebookCapability({
         reportDeliverableEnabled,
         dirKey: taskId || `${threadId}-${requestSeq}`,
@@ -260,7 +320,7 @@ export async function runAnalysisLoopWorkflow(
         apiKey,
         userId,
         locale: params.locale,
-        classNames: agent.classNames,
+         classNames: params.classNames || agent.classNames,
         signal: loopSignal,
         trajectory,
         initialEvidence,
@@ -282,7 +342,7 @@ export async function runAnalysisLoopWorkflow(
         apiKey,
         userId,
         locale: params.locale,
-        classNames: agent.classNames,
+         classNames: intersectAnalysisClassNames(params.classNames || agent.classNames, params.graphScopeClassNames),
         signal: loopSignal,
         trajectory,
       });
@@ -291,7 +351,7 @@ export async function runAnalysisLoopWorkflow(
         userQuestion,
         token,
         apiKey,
-        agent.classNames
+         intersectAnalysisClassNames(params.classNames || agent.classNames, params.graphScopeClassNames)
       );
 
       const selectedSkillIds = agent.enabledSkillIds || [];
@@ -299,6 +359,29 @@ export async function runAnalysisLoopWorkflow(
         domainId,
         selectedSkillIds,
         resolveEvidence: evidenceCapability.resolveEvidence,
+        generatePpt: async (skillSignal) => {
+          const combinedSignal = skillSignal ? AbortSignal.any([loopSignal, skillSignal]) : loopSignal;
+          combinedSignal.throwIfAborted();
+          const current = trajectory.current();
+          const {sections, warnings} = collectPptConversation([...previousTurns, {
+            requestSeq, userMessage: userQuestion, messages: state?.messages || [],
+            evidenceRefs: conversationTurn?.evidenceRefs || current.activities.flatMap(activity =>
+              (activity.questions || []).map(question => ({questionId: question.questionId, question: question.question,
+                threadId, requestSeq, sourceKind: "analysis_sub_question" as const, sourceRef: question.questionId}))),
+            charts: current.charts,
+          }], evidenceCapability.resolveEvidence);
+          sections.push(...current.sections.map(section => ({id: section.sectionId, content: section.markdown})));
+          const title = previousTurns[0]?.userMessage.slice(0, 80) || userQuestion.slice(0, 80);
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(new Error("PPT generation timed out")), 590000);
+          try {
+            const generationSignal = AbortSignal.any([combinedSignal, controller.signal]);
+            const generated = await generatePpt(title, sections, {}, generationSignal);
+            generationSignal.throwIfAborted();
+            const file = await pptArtifactStore().save({domainId, userId}, title, generated.buffer);
+            return {...file, warnings: [...warnings, ...generated.warnings]};
+          } finally { clearTimeout(timeout); }
+        },
         trajectory,
       });
 
@@ -327,6 +410,7 @@ export async function runAnalysisLoopWorkflow(
         },
         workerTools: {
           evidence: evidenceCapability.createWorkerTool,
+          readEvidence: evidenceCapability.readTool,
           probe: dataProbeCapability.createWorkerTools,
           skills: skillCapability.workerTools,
           notebook: notebookCapability.createWorkerTools,
@@ -347,10 +431,13 @@ export async function runAnalysisLoopWorkflow(
 
       const tools = [
         evidenceCapability.supervisorTool,
+        evidenceCapability.readTool,
         dispatchTool,
         ...dataProbeCapability.supervisorTools,
         ...skillCapability.supervisorTools,
         ...externalMcpCapability.supervisorTools,
+        ...actionCapability.supervisorTools,
+        ...metricViewCapability.supervisorTools,
         ...notebookCapability.supervisorTools,
         ...chartCapability.supervisorTools,
       ];
@@ -362,9 +449,14 @@ export async function runAnalysisLoopWorkflow(
           dataProbeCapability: dataProbeCapability.prompt,
           deliverableCapability: notebookCapability.supervisorPrompt,
           completionInstruction: notebookCapability.completionInstruction,
+          evidenceRequirements: notebookCapability.evidenceRequirements,
+          workingMethod: notebookCapability.workingMethod,
           chartCapability: chartCapability.prompt,
           skillCapability: skillCapability.prompt,
           externalMcpCapability: externalMcpCapability.prompt,
+          actionCapability: actionCapability.prompt,
+          metricViewCapability: metricViewCapability.prompt,
+          userName: params.userName,
         }),
         messages: [],
         tools,
@@ -420,18 +512,18 @@ export async function runAnalysisLoopWorkflow(
           finalAnswerLength: finalAnswer?.length || 0,
         });
         const payload = await persistArtifacts("cancelled", report, finalAnswer);
-        await recordTurnRunFinish({ threadId, requestSeq, status: "cancelled" });
+        await finishTurnRun("cancelled");
         return payload;
       }
 
       if (reportDeliverableEnabled && !report.trim()) {
         await persistArtifacts("failed", report);
-        await recordTurnRunFinish({ threadId, requestSeq, status: "failed" });
+        await finishTurnRun("failed");
         throw new Error(tApp("analysis.loop.loop-workflow.269"));
       }
 
       const payload = await persistArtifacts("completed", report, finalAnswer);
-      await recordTurnRunFinish({ threadId, requestSeq, status: "completed" });
+      await finishTurnRun("completed");
 
       logger.info(tApp("analysis.loop.loop-workflow.270"), {
         taskId,
@@ -452,7 +544,7 @@ export async function runAnalysisLoopWorkflow(
         reportDeliverableEnabled ? undefined : lastAssistantText(state?.messages || []).text,
         message
       );
-      await recordTurnRunFinish({ threadId, requestSeq, status });
+      await finishTurnRun(status);
       if (status === "cancelled") return trajectory.current();
       throw error;
     } finally {

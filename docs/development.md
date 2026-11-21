@@ -13,49 +13,31 @@ credentials.
 
 ## Product build entry points
 
-`make` in the root directory runs `make build` by default, which builds the Node runtime,
-the Node app, the Java data-engine and the Manager in that order. `make pack` exports five
-image packs — Node runtime, Node app, Java runtime, Java app and Manager; `make pack-app`
-exports only the three application packs — Node app, Java app and Manager.
+`make build ARCH=amd64` (or `arm64`) builds three runnable images in order:
+workbench, data engine, ontology manager. Each also has its own Make target. Docker
+caches the dependency layers; application source is copied afterwards. No separate
+runtime image, compatibility lock or deployment-time build is needed.
 
-| Command | Scope |
-| --- | --- |
-| `make build` | workbench-runtime → workbench-app → data-engine → ontology-manager |
-| `make build-app` | workbench-app → data-engine-app → ontology-manager |
-| `make pack` | workbench-runtime-pack → workbench-app-pack → pack-data-engine → pack-ontology-manager |
-| `make pack-app` | workbench-app-pack → pack-data-engine-app → pack-ontology-manager |
-| `make pack-amd64` / `pack-arm64` | run `pack` for the given architecture |
-| `make pack-app-amd64` / `pack-app-arm64` | run `pack-app` for the given architecture |
+Local aliases are `ontomato:deploy-<arch>`, `datarag-opensource:deploy-<arch>` and
+`ontomato-ontology-manager:deploy-<arch>`. Versioned tags include the source revision
+and a dirty marker when any participating source tree has uncommitted changes.
 
-`build-app` and `pack-app` do not rebuild the runtime and do not require a runtime image
-to be present locally: the build script computes the compatibility fingerprint from the
-source, compares it with `runtime-lock.json` and, on a mismatch, tells you to rebuild the
-runtime first. `build-app` only builds images and exports no pack; a deployment machine
-updates day to day with `git pull` → `make build-app` → `docker compose up -d` in the
-deployment directory, and `pack-app` additionally exports the offline pack. The matching
-check runs only once, during deployment assembly. The Manager still ships as its own
-image; there is no manager runtime. The per-service targets (`workbench-runtime-pack`,
-`workbench-app-pack`, `pack-data-engine`, `pack-data-engine-app`,
-`pack-ontology-manager` and their architecture variants) can still be called on their
-own.
+The build host needs Node.js 24+, Git, Make and Docker with Buildx. `ARCH` defaults
+to the host architecture. `PROMPT_LANG=en` selects the public Java prompts. Base
+image digests and pnpm versions live in the Dockerfiles. `DEBIAN_MIRROR`,
+`DEBIAN_SECURITY_MIRROR` and `PIP_INDEX_URL` remain host-level build settings.
 
-The build host needs Node.js 24+, Git, GNU Make and Docker with the Buildx plugin; `ARCH`
-defaults to the host architecture, and `PROMPT_LANG` only controls the Java prompt
-language, which is `en` in this repository. Base images are
-always written as the official `docker.io/library/…` addresses with pinned digests, and
-pulls use each machine's own Docker mirror configuration; the build scripts do not pass
-base-image environment variables through, so the Dockerfile defaults are the only source.
-`DEBIAN_MIRROR`, `DEBIAN_SECURITY_MIRROR` and `PIP_INDEX_URL` keep environment-variable
-overrides as machine-level settings. The pnpm version is likewise declared only in the
-Dockerfile (currently 9.15.9, and the runtime install and the app build must agree); it
-takes part in the compatibility fingerprint and does not accept an environment-variable
-override. These 5 application artifacts do not contain PostgreSQL: the deployment flow
-provides PostgreSQL separately; `make bundle` packs the images already built or imported
-for one architecture, the `deploy/` templates and the assembly recipes into one offline
-full bundle. There is currently no acceptance conclusion from real private Linux hardware
-or a complete CI either, and a full-stack run on a real Windows machine is likewise
-unverified. Windows packaging is out of scope for this change; images and the offline
-packs continue to use the existing verified build environment.
+CI publishes final images. Pushes to `develop` publish the `edge` version, pushes to
+`stable` publish the `stable` version, and formal `v*` tags publish the stripped version
+plus `latest`. Pull requests run checks
+without publishing (see `.github/workflows/pr-checks.yml`).
+GitHub runners reuse the previous release's inline BuildKit
+cache through `BUILD_CACHE_REF`; this keeps unchanged dependency layers on a fresh runner.
+The enterprise GitLab runner uses its persistent local BuildKit cache.
+`make tools-bundle ARCH=amd64` prepares the offline tool kit and
+`make bundle ARCH=amd64 VERSION=<version>` exports published images with oc-mirror v2;
+later runs reuse `MIRROR_STATE`. See [deployment](../deploy/README.md) for the offline workflow,
+baseline recovery and state retention. `build` never publishes images.
 
 ## Local development (Node + main web app + Manager)
 
@@ -75,13 +57,28 @@ always use exact versions, never `^` or `~` ranges; the root `.npmrc` sets
 `save-exact=true`, so `pnpm add` writes exact versions.
 
 The Node service reads the product root `.env` (the process environment takes priority)
-and writes runtime data under the product root `data/`. The Ontology Manager's
-`DATARAG_ORIGIN` has no default in this repository, so startup fails when it is not
-configured and the DataRAG root address must be given in `.env` or the environment. The
+and writes runtime data under the product root `data/`. The Ontology Manager proxies to
+`DATARAG_ORIGIN` from the environment or `.env`, otherwise to `DATA_QUERY_BASE_URL`, so by
+default it reaches the same DataRAG as the Node service; with neither set, startup fails. The
 Java data engine, PostgreSQL and the Python MCP are prepared separately; this entry point
 starts only the three processes above and is not a full-stack start.
 
 ## Local development (Java data engine)
+
+Instance graph browsing queries PostgreSQL on demand. Startup does not scan business
+tables or build an in-memory instance graph. Overview counts instances per `inStarChart`
+object type, then reads at most 500 records in total, allocated proportionally using
+largest remainders (ties use class name order). If the total is at most 500, all records
+are shown; very small classes may receive no overview nodes and remain searchable.
+Overview reads at most 2,000 connections between sampled records; search
+returns up to 50 matches, and neighborhood expansion returns 100 connections per page.
+Queries are read-only, have a 10-second statement timeout and share a four-request
+concurrency limit. Overview refresh recounts instances; these counts are also cached
+for the statistics endpoint for 60 seconds;
+full connection counts and connectivity statistics are not calculated during browsing.
+Refresh reads current data; the legacy star-chart generation endpoint remains an
+explicit operation for its existing callers. Stable ordering makes pages reproducible
+for unchanged data, but concurrent source edits can change offset-based page boundaries.
 
 `node apps/data-engine/dev.mjs [extra Maven arguments]`: runs the platform's official
 Maven wrapper (`./mvnw` on POSIX, `mvnw.cmd` on Windows) in the foreground from this
@@ -96,10 +93,8 @@ Maven unchanged (for example `-o`).
   overwritten, new ones are added, extra ones are kept, and `application.yml` and
   `mcp-clients.yml` are copied only when missing. The prompt language is `en`; this
   repository accepts only `PROMPT_LANG=en`.
-- Prepare `apps/data-engine/.env` yourself first (the Java `POSTGRE_*`, `BACKEND_*` and so
-  on, filled in the host's own terms; it is read literally as one `KEY=value` per line and
-  overrides inherited environment variables of the same name), and a missing file is
-  reported before Maven starts. The Python virtual environment `apps/data-engine/.venv`
+- Prepare the root `.env` from `.env.example`; Node, Java and the Manager share it.
+  Process variables take priority. A missing file is reported before Maven starts. The Python virtual environment `apps/data-engine/.venv`
   needs no manual preparation: on startup, if it is missing it is created automatically
   with the local `python3` (`py -3` on Windows, Python 3.10+ required) and
   `packages/data-engine-core/requirements-py310.txt` is installed; it is reinstalled when
@@ -121,7 +116,7 @@ point uses only Node and tools the system already ships (on Windows it uses the 
 PowerShell/CIM and needs no Bash, tail or extra dependency), so it runs directly in
 PowerShell.
 
-- `dev:up`: first checks the ports, `apps/data-engine/.env` and
+- `dev:up`: first checks the ports, `.env` and
   `dev/postgres.compose.yml`, prepares the Python virtual environment as needed and then
   starts Compose. Only the three Node processes run in the foreground (with an explicit
   `PORT=3000`), and Ctrl-C stops only this group; when PG/MCP/Java are already up it reuses
@@ -152,14 +147,15 @@ can be traced with `docker volume ls --filter label=dev.stack.product=<name>`; e
 volumes are not migrated, backfilled or deleted automatically, and the database-creation
 SQL runs only on the first initialization of an empty volume.
 
-Prepare the local configuration (each is only a `cp` of the example): the root `.env`,
-`apps/data-engine/.env`, and, when needed, the local MCP entry created from the synced
+Prepare the root `.env` from `.env.example` and, when needed, the local MCP entry created from the synced
 `apps/data-engine/.dev/conf/mcp-clients.yml` — it must be the only
 `http://127.0.0.1:<port>/sse`, and remote entries may be kept alongside it.
 
-Ports: Node 3000, the main web app 5173 and the Manager 5174 are fixed; PG uses `DB_PORT`
-(default 5432), Java uses `SERVER_PORT` from `apps/data-engine/.env` (default 18087), and
+Ports: Node 3000, the main web app 5173 and the Manager 5174 are fixed; PG uses `POSTGRES_PORT`
+(default 5432), Java uses `SERVER_PORT` from `.env` (default 18087), and
 the MCP uses the local port in `mcp-clients.yml` (template 18500). When a port is taken by
 another process, `up` reports the error and exits without stopping other processes. Each
 product root needs one install in its own root, so one `pnpm install` in the enterprise
 assembly root already includes the adjacent public repository.
+
+Existing checkouts: merge the values from `apps/data-engine/.env` into the root `.env` once, resolve duplicate keys, then remove the old file. Java now follows the same process-environment priority as Node. Rename old keys and site YAML placeholders as described in [deployment configuration](../deploy/README.md#configuration).

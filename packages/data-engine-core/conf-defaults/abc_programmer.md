@@ -3,10 +3,14 @@ Use the source schema and business knowledge to understand the data. For the use
 
 ## Execution Method
 Use a short loop of "determine the next step -> call a tool -> correct based on the result".
+- Before the first execution, check two common structural mistakes against the supplied definitions: `conditions.properties` is ONE predicate object such as `{"field":"customer_id","operator":"=","value":"requested-value"}`, never an array. Multiple predicates use `{"operator":"logic","and":[...]}`. Relationship `from` and `to` are object indices in the ontology's stored source-to-target direction, even when the question walks the path in reverse; customer→order in prose can require an order→customer edge in DSL.
 - Each round, judge only the facts that are still missing at present and the next action. For questions that can be verified through tools, call the tools as soon as possible, and do not repeatedly enumerate unverified guesses.
 - Write the complete DSL and Python code directly into the workspace through the file tools; do not first draft the whole code in your reasoning or progress notes and then write it into the file again.
 - Prefer local modifications to existing files. Without new execution errors or contradicting evidence, do not re-derive query and calculation logic that has already been verified.
+- When a newly written or edited file should immediately be tested, use `runAfter="executeDslFile"` or `runAfter="test"` on that same file operation. This performs the same validation without a separate model turn. Use standalone execution when intentionally re-running an unchanged existing file.
+- A successful query through a named ontology relationship already verifies that join path. Do not additionally reconstruct joins from raw foreign-key strings or probe every intermediate class unless the result is empty, incomplete, contradictory, or misses a requested output. Use user-supplied exact identifiers directly; reserve distinct-value probing for ambiguous values or a failed match.
 - Progress notes should only briefly state the current findings and the next step, and should not repeat the whole plan.
+- Reduce redundant preparation, not necessary reasoning: complex questions may need many productive tool rounds, multiple programs, pagination and tested Python post-calculation. Continue until all requested outputs are complete or an actual unsupported capability is established. A long-running or multi-step query is not itself a failure.
 - After the query definition, calculation and output structure meet the requirements, call `outputCode` to submit. Scientific notation itself is not a JSON error, so do not repeatedly rewrite and execute the program for a purely presentational form.
 
 ## User Requirement
@@ -31,9 +35,13 @@ Use the tool `outputMessage` to explain the following: what each `sub-question` 
 {{CLASS_DEF}}
 
 ## Tools for Exploring Definitions
+Prefer `getQueryContext(classNames)` to obtain the next query's object definitions, direct relationships, DSL syntax, example and source constraints together. This satisfies the syntax/example preparation requirements below. Reuse supplied definitions within this task; request missing classes or changed definitions as needed. This preparation does not execute a query or verify its business results.
+
 You can use the following tools multiple times to obtain the attribute definitions and relationship definitions you want to know
 - Tool for obtaining object class attribute definitions: `getSchemaByClassName` (attribute definitions for the specified classes)
 - Tool for obtaining relationship definitions: `getRelationshipByClassNames` (direct relationships involving the specified classes)
+- Tool for obtaining the DSL syntax rules: `getDslSyntax` (the Ontology DSL rules that apply to the attribute types of the specified classes)
+- Tool for obtaining a complete DSL example: `getDslExample` (a full worked example scoped to the specified classes; it only uses constructs available for those classes)
 
 Use the tool `outputMessage` to explain the following: after seeing the data source schema definition, what conclusion you have drawn for this `sub-question` and what follow-up work is to be performed
 
@@ -112,121 +120,12 @@ except Exception as e:
 ```
 
 ## DSL Syntax
-The DSL syntax and the complete example below are represented in JSON, so boolean values and null are written as `true`, `false`, `null`. When writing the DSL into a Python program dictionary, they must be rewritten as Python's `True`, `False`, `None` respectively.
+The DSL syntax is represented in JSON, so boolean values and null are written as `true`, `false`, `null`. When writing the DSL into a Python program dictionary, they must be rewritten as Python's `True`, `False`, `None` respectively.
 
-{{DSL_RULE}}
+The DSL rules are not repeated in this prompt. **Before writing DSL, obtain them through `getQueryContext` or `getDslSyntax` for the object classes you are about to use**, and follow the returned rules. Do not retrieve the same rules again without a missing definition, changed scope or contradictory evidence.
 
-# Example covering the entire `DSL` syntax
-The example illustrates syntax features; select only the features allowed by the DSL rules and required by the current schema and question. It is not a query to copy and execute unchanged.
-```json
-{
-    "problem": "user question",
-    "answer": {
-      "steps": [
-        {
-          "graph": {
-            "patterns": [
-              {
-                "objects": [
-                  {
-                    "idx": 0,
-                    "variable": "class1",
-                    "class": "/class1",
-                    "conditions": {
-                      "properties": {
-                        "operator": "logic",
-                        "and": [
-                          {"field": "attr1", "operator": "=", "value": "v1"},
-                          {"field": "attr2", "operator": "between", "value": [20, 30]},
-                          {
-                            "operator": "logic",
-                            "or": [
-                              {"field": "attr3", "operator": ">", "value": 10},
-                              {"field": "attr4", "operator": "in", "value": ["v1", "v2", "v3"]}
-                            ]
-                          },
-                          {"field": "attr5", "operator": "like", "value": "%v1%"},
-                          {"field": "attr6", "operator": "is not", "value": null}
-                        ]
-                      },
-                      "timeseries": {
-                        "properties": {
-                          "operator": "logic",
-                          "and": [
-                            {
-                              "field": "attr7",
-                              "time_range": {"start": "2024-09-15 00:00:00", "end": "2025-09-15 00:00:00"},
-                              "conditions": [{"metric": "name", "operator": "=", "value": "indicator1"}],
-                              "asserts": [{"function": "avg", "operator": ">", "value": 10000000}]
-                            }
-                          ]
-                        }
-                      },
-                      "vector": {
-                        "properties": {"operator": "logic", "and": [{"field": "attr8", "query": "search term"}]}
-                      }
-                    }
-                  },
-                  {"idx": 1, "variable": "class2", "class": "/class2"},
-                  {"idx": 2, "variable": "class3", "class": "/class3"}
-                ],
-                "relationship": [
-                  {"from": 1, "to": 0, "type": ["*"], "min_hops": 1, "max_hops": -1},
-                  {"from": 1, "to": 2, "type": ["relationship1", "relationship2"], "min_hops": 1, "max_hops": 1}
-                ]
-              }
-            ],
-            "pattern_logic": "and"
-          },
-          "output": {
-            "fields": [
-              {"as": "attr1", "variable": "class1", "field": "attr1"},
-              {"as": "attr2", "variable": "class2", "field": "attr2"},
-              {"as": "attr3", "variable": "class2", "field": "attr3"},
-              {"as": "attr4", "variable": "class3", "field": "attr4"},
-              {"as": "attr5", "variable": "class3", "field": "attr5"}
-            ],
-            "to_user": false,
-            "save_table": "/temp01"
-          }
-        },
-        {
-          "graph": {
-            "patterns": [
-              {"objects": [{"class": "/temp01", "variable": "temp01"}]}
-            ],
-            "pattern_logic": "and"
-          },
-          "output": {
-            "to_user": true,
-            "fields": [
-              {"as": "attr1", "variable": "temp01", "field": "attr1", "function": "count"},
-              {"as": "attr2", "variable": "temp01", "field": "attr2", "function": "sum", "distinct": true},
-              {"as": "attr3", "variable": "temp01", "field": "attr3"},
-              {"as": "xxx_ratio", "expr": "(temp01.attr2 / temp01.attr3) * 100"},
-              {"as": "yyy_avg", "expr": "sum(temp01.attr2) / count(temp01.attr2)"},
-              {
-                "variable": "temp01",
-                "field": "attr4",
-                "time_range": {"start": "2024-01-01 00:00:00", "end": "2025-06-30 23:59:59"},
-                "conditions": [{"metric": "name", "operator": "=", "value": "indicator1"}],
-                "function": "max",
-                "as": "attr4"
-              },
-              {"variable": "temp01", "field": "attr5", "query": "search term", "as": "attr5"}
-            ],
-            "sort": {"fields": [{"variable": "temp01", "field": "attr1", "order": "desc"}, {"variable": "temp01", "field": "attr2", "order": "asc"}]},
-            "limit": {"count": 100, "offset": 0},
-            "group_by": {
-              "fields": [{"variable": "temp01", "field": "attr1"}],
-              "having": [{"variable": "temp01", "field": "attr2", "function": "count", "distinct": true, "operator": ">", "value": 5}]
-            }
-          }
-        }
-      ]
-    }
-}
-```
+# DSL Example
+A complete worked example is provided by `getQueryContext`; if not obtained there, use `getDslExample` for the classes you are about to use. The example illustrates syntax features; select only the features allowed by the DSL rules and required by the current schema and question. It is not a query to copy and execute unchanged.
 
 ### Key Notes
 - **When fully retrieving detail records that match the business filter conditions, the pagination threshold is uniformly 5000 records: if there are more than 5000 records, use a Python loop for pagination, with at most 5000 records per page; if there are no more than 5000 records, there is no need to write an extra loop for pagination.**

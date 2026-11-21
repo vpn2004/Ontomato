@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -16,6 +17,10 @@ import java.util.Map;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.springframework.context.support.GenericApplicationContext;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -65,7 +70,7 @@ class AdminControllerPrimaryKeyTest {
 		BusinessConfigService businessConfigService = mock(BusinessConfigService.class);
 		when(businessConfigService.get("d1")).thenReturn(businessConfig);
 		DataAdapterRegistry registry = mock(DataAdapterRegistry.class);
-		when(registry.create(eq(businessConfig), any())).thenReturn(mock(DataAdapter.class));
+		when(registry.create(eq(businessConfig), any())).thenReturn(mock(DataAdapter.class, CALLS_REAL_METHODS));
 		LangService langService = mock(LangService.class);
 		when(langService.get(any(), anyString())).thenAnswer(call -> call.getArgument(1));
 
@@ -118,6 +123,49 @@ class AdminControllerPrimaryKeyTest {
 		assertTrue(ret.getBooleanValue("success"), ret.toString());
 		Map<String, Object> model = ((List<Map<String, Object>>) savedClass("Device").get("attrs")).get(1);
 		assertEquals(List.of("", false), List.of(model.get("attrDesc"), model.get("enable")));
+	}
+
+	@ParameterizedTest
+	@CsvSource({
+			"false, true,  int,     false, primaryKey=true, found 0",
+			"true,  true,  varchar, true,  primaryKey=true, found 2",
+			"true,  false, int,     true,  primaryKey=true, found 2",
+			"true,  false, varchar, false, id,              enable=false",
+			"true,  false, int,     false, id,              enable=false",
+			"true,  true,  int,     false, varchar,         int"
+	})
+	void setSchemaRejectsInvalidKeysBeforeSaving(boolean primaryKey, boolean enable, String type,
+			boolean extraKey, String reason, String detail) {
+		JSONObject key = JSONObject.of("name", "id", "type", type, "primaryKey", primaryKey, "enable", enable);
+		JSONObject other = JSONObject.of("name", "code", "type", "varchar", "primaryKey", extraKey, "enable", false);
+
+		JSONObject ret = controller.setSchema(schemaWithAttrs(key, other));
+
+		assertFalse(ret.getBooleanValue("success"));
+		String message = ret.getString("message");
+		assertTrue(message.contains("campus") && message.contains(reason) && message.contains(detail), message);
+		verify(jsonRuleDao, never()).save(any(), any());
+	}
+
+	@ParameterizedTest
+	@NullSource
+	@ValueSource(booleans = true)
+	void setSchemaSavesAUniqueVarcharKeyWithExplicitOrDefaultEnable(Boolean enable) {
+		JSONObject key = JSONObject.of("name", "id", "type", "varchar", "primaryKey", true);
+		if (enable != null) key.put("enable", enable);
+
+		JSONObject ret = controller.setSchema(schemaWithAttrs(key));
+
+		assertTrue(ret.getBooleanValue("success"), ret.toString());
+		Map<String, Object> savedKey = ((List<Map<String, Object>>) savedClass("campus").get("attrs")).get(0);
+		assertEquals("id", savedKey.get("name"));
+		assertEquals(true, savedKey.get("primaryKey"));
+		assertEquals(enable, savedKey.get("enable"));
+	}
+
+	private static JSONObject schemaWithAttrs(JSONObject... attrs) {
+		return JSONObject.of("datasetDesc", "Test", "classList", List.of("campus"), "relationshipDefs", JSONObject.of(),
+				"classDefs", List.of(JSONObject.of("name", "campus", "attrs", List.of(attrs))));
 	}
 
 	private void assertRefused(String messageKey, JSONObject ret) {

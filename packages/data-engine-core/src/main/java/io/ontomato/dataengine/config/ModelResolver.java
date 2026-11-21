@@ -12,7 +12,7 @@ import io.ontomato.dataengine.service.LangService;
 /**
  * The only read/write entry point of the model registry.
  * At runtime, parameters are fetched only through {@link #resolve}, and save validation only through {@link #validateForSave},
- * when a reference does not exist an error is thrown directly, with no fallback to some default model.
+ * Missing explicit references fail; an unset optional quality-check binding inherits the query role.
  */
 public final class ModelResolver {
 
@@ -76,11 +76,15 @@ public final class ModelResolver {
     }
 
     public static ResolvedChatModel resolve(BusinessConfig config, String role, LangService langService) {
-        if (!AgentRole.ALL.contains(role)) {
+        if (!AgentRole.ALL.contains(role) && !AgentRole.OPTIONAL.contains(role)) {
             throw new IllegalArgumentException("Unknown model role: " + role);
         }
         Map<String, AgentConfig> agents = config.getAgents();
         AgentConfig agent = agents == null ? null : agents.get(role);
+        if (AgentRole.QUALITY_CHECK.equals(role)
+                && (agent == null || agent.getModel() == null || agent.getModel().isBlank())) {
+            return resolve(config, AgentRole.QUERY, langService);
+        }
         if (agent == null || agent.getModel() == null || agent.getModel().isBlank()) {
             String lang = config.getLang();
             String roleName = langService.get(lang, "AgentRole." + role);
@@ -95,7 +99,7 @@ public final class ModelResolver {
         return new ResolvedChatModel(role, model, agent);
     }
 
-    /** The only validation at the save boundary: name unique/non-empty, connections required for each model, all five roles present with existing or empty references. */
+    /** The only validation at the save boundary: name unique/non-empty, connections required for each model, required roles present and optional references valid when supplied. */
     public static void validateForSave(BusinessConfig config) {
         List<ModelConfig> models = config.getModels() == null ? List.of() : config.getModels();
         Set<String> names = new HashSet<>();
@@ -109,7 +113,12 @@ public final class ModelResolver {
         }
         requireConnections(models);
         Map<String, AgentConfig> agents = config.getAgents() == null ? Map.of() : config.getAgents();
-        for (String role : AgentRole.ALL) {
+        Set<String> roles = new HashSet<>(AgentRole.ALL);
+        roles.addAll(agents.keySet());
+        for (String role : roles) {
+            if (!AgentRole.ALL.contains(role) && !AgentRole.OPTIONAL.contains(role)) {
+                throw new IllegalArgumentException("Unknown model role: " + role);
+            }
             AgentConfig agent = agents.get(role);
             if (agent == null) {
                 throw new IllegalArgumentException("Missing role configuration: " + role);

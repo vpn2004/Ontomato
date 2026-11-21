@@ -6,6 +6,7 @@ import {
 } from "../data-query/query-fact";
 import { createHash } from "node:crypto";
 import { t } from "../../i18n";
+import { HttpError } from "../../utils/errors";
 import { getCheckpointer } from "../../infrastructure/connection";
 import type { ExtendedPostgresSaver, ThreadReadAccess } from "../../infrastructure/checkpointer";
 import { convertRowsToCsv, sanitizeDownloadName } from "./download";
@@ -20,8 +21,12 @@ import {
   listQueryRuns,
   type QueryRun,
 } from "../data-query/query-run-store";
-import { listTurnRuns } from "../turn-run/turn-run-store";
+import { listTurnRuns, turnRunDurationMs } from "../turn-run/turn-run-store";
+import { combineResultTruncation } from "../data-query/protocol";
 import { deleteThreadBusinessData, deleteThreadMetadata } from "./thread-store";
+import { getPostgresPool, qualifiedTable } from "../../infrastructure/postgres";
+import { deleteAnalysisNotebook } from "../analysis-agent/loop/notebook";
+import { listReportStates } from "./report/store";
 
 type ThreadDownloadPayload = {
   fileName: string;
@@ -35,6 +40,17 @@ function requireCheckpointer(): ExtendedPostgresSaver {
     throw new Error(t("api.checkpointerNotInitialized"));
   }
   return checkpointer as unknown as ExtendedPostgresSaver;
+}
+
+export async function deleteUserThreads(userId: string): Promise<void> {
+  const { rows } = await getPostgresPool().query(
+    `SELECT thread_id, domain_id FROM ${qualifiedTable("thread_metadata")} WHERE user_id = $1 AND domain_id <> ''`, [userId]
+  );
+  for (const row of rows) {
+    const turns = await listTurnRuns(row.thread_id);
+    for (const turn of turns) await deleteAnalysisNotebook(`${row.thread_id}-${turn.requestSeq}`);
+    await deleteThread(row.thread_id, userId, row.domain_id);
+  }
 }
 
 export async function deleteThread(
@@ -117,6 +133,9 @@ function buildHistoryReadSnapshot(input: {
         rows: dataset.rows,
         dsl: dataset.dsl,
         subQuestion: dataset.subQuestion,
+        truncated: dataset.truncated,
+        rowLimit: dataset.rowLimit,
+        truncationHint: dataset.truncationHint,
       }))
     : [];
   const graphNodeIds = Array.isArray(queryRun?.nodeIds)
@@ -153,13 +172,31 @@ export async function getThreadMessagesPayload(
   const checkpointer = requireCheckpointer();
   if (access.scope === "domain") await checkpointer.verifyThreadDomain(threadId, access.domainId);
   else await checkpointer.verifyThreadAccess(threadId, access.userId, access.domainId);
-  const [rawMessages, snapshots, queryRuns, events, turnRuns] = await Promise.all([
+  const [rawMessages, persistedSnapshots, queryRuns, events, turnRuns, reports] = await Promise.all([
     checkpointer.getThreadMessages(threadId),
     listChatRenderSnapshots(threadId),
     listQueryRuns(threadId),
     listExecutionEvents(threadId),
     listTurnRuns(threadId),
+    listReportStates(threadId),
   ]);
+  const recoverableReports = reports.filter((report) => report.resumable).map((report) => report.requestSeq);
+
+  // A cancelled query can save its execution facts before the response node ever runs.
+  // Recover its existing body for history without duplicating query data in the snapshot store.
+  const snapshots: Array<{ requestSeq: number; snapshot: PersistedChatRenderSnapshot }> = [...persistedSnapshots];
+  for (const requestSeq of recoverableReports) {
+    const query = getPrimaryQueryRun(queryRuns.filter((row) => row.requestSeq === requestSeq));
+    if (!snapshots.some((row) => row.requestSeq === requestSeq)) snapshots.push({ requestSeq,
+      snapshot: { mode: "standard", status: "failed", primaryText: query?.fullContent || "" } });
+  }
+  for (const turn of turnRuns) {
+    if (turn.source !== "chat" || turn.status !== "cancelled" || snapshots.some(row => row.requestSeq === turn.requestSeq)) continue;
+    const queryRun = getPrimaryQueryRun(queryRuns.filter(row => row.requestSeq === turn.requestSeq));
+    if (!queryRun?.fullContent || isWonByRetiredBranch(queryRun)) continue;
+    snapshots.push({ requestSeq: turn.requestSeq, snapshot: { mode: "standard", status: "completed", primaryText: queryRun.fullContent } });
+  }
+  snapshots.sort((a, b) => a.requestSeq - b.requestSeq);
 
   const snapshotsByRequest = new Map(snapshots.map((snapshot) => [snapshot.requestSeq, snapshot]));
   const queryRunsByRequest = groupByRequestSeq(queryRuns);
@@ -178,6 +215,10 @@ export async function getThreadMessagesPayload(
     if (!turn?.displayMessage || seenUserRequests.has(requestSeq)) return;
     messages.push({ role: "user", content: turn.displayMessage, requestSeq });
     seenUserRequests.add(requestSeq);
+  };
+  const turnDuration = (requestSeq: number) => {
+    const durationMs = turnRunDurationMs(turnsByRequest.get(requestSeq));
+    return durationMs === undefined ? {} : { durationMs };
   };
   let requestCounter = 0;
 
@@ -208,6 +249,7 @@ export async function getThreadMessagesPayload(
       role: "assistant",
       content: msg.content,
       requestSeq,
+      ...turnDuration(requestSeq),
       snapshot: buildHistoryReadSnapshot({
         persisted: snapshot,
         fallbackContent: msg.content,
@@ -216,6 +258,13 @@ export async function getThreadMessagesPayload(
       }),
     });
   }
+
+  const insertHistoryMessage = (message: ThreadMessagesPayload["messages"][number]) => {
+    const nextTurn = messages.findIndex(existing => existing.requestSeq !== undefined
+      && message.requestSeq !== undefined && existing.requestSeq > message.requestSeq);
+    if (nextTurn < 0) messages.push(message);
+    else messages.splice(nextTurn, 0, message);
+  };
 
   for (const snapshot of snapshots) {
     if (snapshot.requestSeq === activeRequestSeq) {
@@ -227,17 +276,18 @@ export async function getThreadMessagesPayload(
     const content = snapshot.snapshot?.primaryText || "";
     if (snapshot.snapshot?.mode === "follow-up") {
       if (snapshot.snapshot.followUpUserMessage && !seenUserRequests.has(snapshot.requestSeq)) {
-        messages.push({
+        insertHistoryMessage({
           role: "user",
           content: snapshot.snapshot.followUpUserMessage,
           requestSeq: snapshot.requestSeq,
         });
         seenUserRequests.add(snapshot.requestSeq);
       }
-      messages.push({
+      insertHistoryMessage({
         role: "assistant",
         content,
         requestSeq: snapshot.requestSeq,
+        ...turnDuration(snapshot.requestSeq),
         snapshot: {
           mode: "standard",
           status: snapshot.snapshot.status || "completed",
@@ -249,12 +299,13 @@ export async function getThreadMessagesPayload(
     }
 
     const primaryQueryRun = getPrimaryQueryRun(queryRunsByRequest.get(snapshot.requestSeq) || []);
-    if (content && !isWonByRetiredBranch(primaryQueryRun)) {
+    if ((content || snapshot.snapshot.analysisText || recoverableReports.includes(snapshot.requestSeq)) && !isWonByRetiredBranch(primaryQueryRun)) {
       const requestEvents = eventsByRequest.get(snapshot.requestSeq) || [];
-      messages.push({
+      insertHistoryMessage({
         role: "assistant",
         content,
         requestSeq: snapshot.requestSeq,
+        ...turnDuration(snapshot.requestSeq),
         snapshot: buildHistoryReadSnapshot({
           persisted: snapshot.snapshot,
           fallbackContent: content,
@@ -268,12 +319,22 @@ export async function getThreadMessagesPayload(
   for (const turn of turnRuns) appendTurnQuestion(turn.requestSeq);
 
   return {
-    messages,
+    messages: messages.map(message => {
+      if (message.role === "assistant" && reports.some((report) => report.requestSeq === message.requestSeq)) {
+        message = { ...message, snapshot: { ...(message.snapshot as object || {}), reportEvidenceRequestSeq: message.requestSeq } };
+      }
+      if (message.role === "assistant" && message.requestSeq !== undefined && recoverableReports.includes(message.requestSeq)) {
+        message = { ...message, snapshot: { ...(message.snapshot as object || {}), reportRecoveryRequestSeq: message.requestSeq } };
+      }
+      if (message.role !== "assistant" || message.requestSeq === undefined || turnsByRequest.get(message.requestSeq)?.status !== "cancelled") return message;
+      const snapshot = message.snapshot && typeof message.snapshot === "object" ? message.snapshot : {};
+      return { ...message, snapshot: { ...snapshot, status: "completed", stoppedByUser: true } };
+    }),
     ...(activeTurn ? { activeTurn: { requestSeq: activeTurn.requestSeq } } : {}),
   };
 }
 
-export async function getThreadDataCsvDownload(
+export async function getThreadDataDownload(
   threadId: string,
   requestSeq: number,
   userId: string,
@@ -284,9 +345,10 @@ export async function getThreadDataCsvDownload(
   const queryRun = await getStoredPrimaryQueryRun(threadId, requestSeq);
   const datasets = queryRun ? extractDatasetsFromQueryRun(queryRun) : [];
   const rows = datasets.flatMap((dataset) => dataset.rows);
+  const truncation = combineResultTruncation(datasets);
 
-  if (!rows.length) {
-    throw new Error(t("api.threadNoDataDownload"));
+  if (!rows.length && !truncation) {
+    throw new HttpError(404, t("api.threadNoDataDownload"));
   }
 
   const baseName = await getQuestionBaseName(
@@ -296,6 +358,14 @@ export async function getThreadDataCsvDownload(
     `data_${requestSeq}`
   );
 
+  // The download route chooses its actual MIME type and filename; partial data needs an envelope.
+  if (truncation) {
+    return {
+      fileName: `${baseName} (partial).json`,
+      contentType: "application/json; charset=utf-8",
+      body: JSON.stringify({ answer: rows, ...truncation }, null, 2),
+    };
+  }
   return {
     fileName: `${baseName}.csv`,
     contentType: "text/csv; charset=utf-8",
@@ -315,7 +385,7 @@ export async function getThreadDslDownload(
   const dsl = queryRun ? extractDslTextFromQueryRun(queryRun) : "";
 
   if (!dsl) {
-    throw new Error(t("api.threadNoDslDownload"));
+    throw new HttpError(404, t("api.threadNoDslDownload"));
   }
 
   const baseName = await getQuestionBaseName(

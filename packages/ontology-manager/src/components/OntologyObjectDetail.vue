@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from "vue";
-import { ArrowLeft, Plus, Save, Table2, Trash2 } from "lucide-vue-next";
+import { ArrowLeft, ChevronDown, ChevronUp, Plus, Save, Settings2, Table2, Trash2 } from "lucide-vue-next";
 import { ElAlert, ElButton, ElEmpty, ElForm, ElFormItem, ElInput, vLoading } from "element-plus";
 import { useManagerFeedback } from "../feedback";
 import type { OntologyObject, OntologyRelation } from "../api";
 import OntologyAttributeCreateDialog from "./OntologyAttributeCreateDialog.vue";
-import { useManagerClient, useOntologyText } from "../context";
+import OntologyAttributeEditor from "./OntologyAttributeEditor.vue";
+import { useManagerAdapter, useManagerClient, useOntologyText } from "../context";
 
 const { ot } = useOntologyText();
+const { capabilities } = useManagerAdapter();
 const { message, confirm } = useManagerFeedback();
 const { deleteOntologyObject, loadOntology, updateOntologyObject } = useManagerClient();
 
@@ -16,8 +18,8 @@ const emit = defineEmits<{
   back: [];
   updated: [];
   browse: [className: string];
-  attribute: [className: string, attributeName: string];
   relation: [relationship: string];
+  view: [className: string];
 }>();
 
 const loading = ref(false);
@@ -27,6 +29,7 @@ const object = ref<OntologyObject | null>(null);
 const relatedRelations = ref<OntologyRelation[]>([]);
 const objectLabels = ref<Record<string, string>>({});
 const attributeCreateVisible = ref(false);
+const expandedAttributeName = ref("");
 const form = reactive({ showName: "", classDesc: "" });
 
 const businessKeyCount = computed(
@@ -48,7 +51,7 @@ const primaryKeyStatus = computed(() => {
     return { type: "warning" as const, message: ot("primaryKeyDisabled") };
   }
   return {
-    type: "success" as const,
+    type: "info" as const,
     message: ot("primaryKeyLabel", { name: primaryKeys[0].showName }),
   };
 });
@@ -126,10 +129,14 @@ async function remove() {
   }
 }
 
+function toggleAttribute(attributeName: string) {
+  expandedAttributeName.value = expandedAttributeName.value === attributeName ? "" : attributeName;
+}
+
 async function handleAttributeCreated(className: string, attributeName: string) {
   await loadDetail();
+  expandedAttributeName.value = attributeName;
   emit("updated");
-  emit("attribute", className, attributeName);
 }
 
 watch(
@@ -152,7 +159,7 @@ onMounted(() => void loadDetail());
       </span>
       <span class="title-spacer"></span>
       <el-button
-        v-if="object"
+        v-if="object && capabilities.schemaWrite"
         type="danger"
         plain
         :icon="Trash2"
@@ -161,9 +168,10 @@ onMounted(() => void loadDetail());
       >
         {{ ot("delete") }}
       </el-button>
-      <el-button v-if="object" :icon="Table2" @click="emit('browse', object.className)">
+      <el-button v-if="object" text :icon="Table2" @click="emit('browse', object.className)">
         {{ ot("browseData") }}
       </el-button>
+      <el-button v-if="object" type="primary" plain :icon="Settings2" @click="emit('view', object.className)">{{ ot('ovConfigureObject') }}</el-button>
       <el-button type="primary" :icon="Save" :loading="saving" @click="save">
         {{ ot("saveChanges") }}
       </el-button>
@@ -226,7 +234,7 @@ onMounted(() => void loadDetail());
           <div>
             <h2>{{ ot("attributes") }}</h2>
           </div>
-          <el-button type="primary" :icon="Plus" @click="attributeCreateVisible = true">
+          <el-button v-if="capabilities.schemaWrite" type="primary" :icon="Plus" @click="attributeCreateVisible = true">
             {{ ot("createAttribute") }}
           </el-button>
         </div>
@@ -237,22 +245,38 @@ onMounted(() => void loadDetail());
             <span>{{ ot("businessKey") }}</span>
             <span>{{ ot("primaryKey") }}</span>
             <span>{{ ot("description") }}</span>
+            <span></span>
           </div>
-          <button
+          <div
             v-for="attribute in object.attrs"
             :key="attribute.name"
-            class="detail-table-row"
-            @click="emit('attribute', object.className, attribute.name)"
+            class="detail-table-row-group"
+            :class="{ expanded: expandedAttributeName === attribute.name }"
           >
-            <span>
-              <strong>{{ attribute.showName }}</strong>
-              <small>{{ attribute.name }}</small>
-            </span>
-            <span>{{ attribute.type }}</span>
-            <span>{{ attribute.bizzkeyBool ? ot("yes") : "-" }}</span>
-            <span>{{ attribute.primaryKey ? ot("yes") : "-" }}</span>
-            <span>{{ attribute.attrDesc || "-" }}</span>
-          </button>
+            <button
+              class="detail-table-row"
+              :aria-expanded="expandedAttributeName === attribute.name"
+              @click="toggleAttribute(attribute.name)"
+            >
+              <span>
+                <strong>{{ attribute.showName }}</strong>
+                <small>{{ attribute.name }}</small>
+              </span>
+              <span>{{ attribute.type }}</span>
+              <span>{{ attribute.bizzkeyBool ? ot("yes") : "-" }}</span>
+              <span>{{ attribute.primaryKey ? ot("yes") : "-" }}</span>
+              <span>{{ attribute.attrDesc || "-" }}</span>
+              <ChevronUp v-if="expandedAttributeName === attribute.name" :size="16" class="row-chevron" />
+              <ChevronDown v-else :size="16" class="row-chevron" />
+            </button>
+            <OntologyAttributeEditor
+              v-if="expandedAttributeName === attribute.name"
+              :class-name="object.className"
+              :attribute="attribute"
+              @saved="loadDetail"
+              @deleted="loadDetail"
+            />
+          </div>
         </div>
       </section>
 
@@ -303,9 +327,11 @@ onMounted(() => void loadDetail());
 }
 .detail-titlebar {
   display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
   min-height: 64px;
   align-items: center;
-  padding: 0 var(--spacing-2xl);
+  padding: var(--spacing-sm) var(--spacing-2xl);
   border-bottom: 1px solid var(--el-border-color);
   background: var(--el-bg-color);
 }
@@ -358,6 +384,7 @@ onMounted(() => void loadDetail());
 }
 .section-title {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--spacing-md);
@@ -421,7 +448,7 @@ h2 {
 }
 .attribute-table .detail-table-head,
 .attribute-table .detail-table-row {
-  grid-template-columns: minmax(150px, 1.2fr) 90px 70px 70px minmax(140px, 1.3fr);
+  grid-template-columns: minmax(150px, 1.2fr) 90px 90px 90px minmax(140px, 1.3fr) 20px;
 }
 .relation-table .detail-table-head,
 .relation-table .detail-table-row {
@@ -431,15 +458,19 @@ h2 {
     );
 }
 .detail-table-head {
-  min-height: 36px;
+  min-height: 40px;
   padding: 0 var(--spacing-md);
   border-bottom: 1px solid var(--el-border-color-dark);
   color: var(--el-text-color-secondary);
   background: var(--el-fill-color-light);
   font-size: var(--text-xs);
   font-weight: var(--font-semibold);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
 }
 .detail-table-row {
+  width: 100%;
   min-height: 50px;
   padding: 7px var(--spacing-md);
   border: 0;
@@ -455,6 +486,18 @@ h2 {
   border-bottom: 0;
 }
 .detail-table-row:hover {
+  background: var(--el-fill-color-light);
+}
+.detail-table-row-group {
+  border-bottom: 1px solid var(--el-border-color-light);
+}
+.detail-table-row-group:last-child {
+  border-bottom: 0;
+}
+.detail-table-row-group .detail-table-row {
+  border-bottom: 0;
+}
+.detail-table-row-group.expanded .detail-table-row {
   background: var(--el-fill-color-light);
 }
 .detail-table-row > span {
@@ -479,6 +522,9 @@ h2 {
   color: var(--el-text-color-secondary);
   font-size: var(--text-xs);
 }
+.row-chevron {
+  color: var(--el-text-color-tertiary);
+}
 @container ontology-manager (max-width: 1050px) {
   .detail-body {
     grid-template-columns: 1fr;
@@ -500,10 +546,12 @@ h2 {
     display: none;
   }
   .attribute-table .detail-table-head,
-  .attribute-table .detail-table-row,
+  .attribute-table .detail-table-row {
+    grid-template-columns: minmax(0, 1fr) 80px 20px;
+  }
   .relation-table .detail-table-head,
   .relation-table .detail-table-row {
-    grid-template-columns: minmax(150px, 1fr) 80px;
+    grid-template-columns: minmax(0, 1fr) 80px;
   }
   .detail-table-head span:nth-child(3),
   .detail-table-head span:nth-child(4),

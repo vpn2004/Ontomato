@@ -1,0 +1,1 @@
+Update the previous checkpoint using the new conversation. Preserve all unresolved requirements and exact evidence/statistic IDs. Record which reviewer issues were fixed and which remain. Never mark a task complete just because it was summarized.

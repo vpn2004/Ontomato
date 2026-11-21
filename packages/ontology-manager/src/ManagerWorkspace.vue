@@ -2,23 +2,25 @@
 import { computed, onMounted, ref, watch } from "vue";
 import type { ManagerAuthFailureStatus } from "./api";
 import { provideManagerContext, type ManagerHostContext } from "./context";
-import { sharedText, type SharedKey } from "./i18n";
 import { provideManagerFeedback } from "./feedback";
 import ManagerConfirmDialog from "./ManagerConfirmDialog.vue";
 import BusinessKnowledge from "./components/BusinessKnowledge.vue";
 import DataBrowser from "./data-browser/DataBrowser.vue";
+import InstanceGraph from "./data-browser/InstanceGraph.vue";
+import ObjectViewBuilder from "./object-views/ObjectViewBuilder.vue";
+import ObjectViewPage from "./object-views/ObjectViewPage.vue";
+import type { ObjectReference } from "@ontomato/contracts/object-views";
 import VisualModeling from "./visual-modeling/VisualModeling.vue";
 import OntologyAssetCatalog from "./components/OntologyAssetCatalog.vue";
 import OntologyAssetDetail from "./components/OntologyAssetDetail.vue";
-import OntologyContentHeader from "./components/OntologyContentHeader.vue";
 import OntologyModelCatalog from "./components/OntologyModelCatalog.vue";
 import OntologyPlayground from "./components/OntologyPlayground.vue";
 import OntologyObjectCreateDialog from "./components/OntologyObjectCreateDialog.vue";
 import OntologyObjectDetail from "./components/OntologyObjectDetail.vue";
-import OntologyAttributeDetail from "./components/OntologyAttributeDetail.vue";
 import OntologyRelationDetail from "./components/OntologyRelationDetail.vue";
 import OntologyResourceSidebar from "./components/OntologyResourceSidebar.vue";
 import OntologyWorkspaceHeader from "./components/OntologyWorkspaceHeader.vue";
+import AdapterOntologyImport from "./components/AdapterOntologyImport.vue";
 import {
   emptyOntologyResourceCounts,
   type AssetTab,
@@ -38,12 +40,12 @@ const emit = defineEmits<{
  * when the host changes API entry or credential; on unmount the client stops sending, confirmations end as cancelled and messages close.
  */
 const context = props.context;
-const { loadOntology, loadSmartAssets } = provideManagerContext(context, (status) =>
+const { loadOntology, loadSmartAssets, reloadAdapter } = provideManagerContext(context, (status) =>
   emit("auth-failure", status)
 );
 const shell = ref<HTMLElement>();
+const graphSummaryTarget = ref<HTMLElement | null>(null);
 provideManagerFeedback(shell);
-const t = (key: SharedKey) => sharedText(context.messages, key);
 /** The host-supplied view replaces the original hash routing: the path locates the workspace and resource, the query carries from/focus/id/back. */
 const route = computed(() => {
   const [path, query = ""] = context.view.split("?");
@@ -56,11 +58,26 @@ const resourceCounts = ref<OntologyResourceCounts>(emptyOntologyResourceCounts()
 const selectedAsset = ref<SmartAsset | null>(null);
 const isAssetCreating = ref(false);
 const selectedObjectClass = ref("");
-const selectedAttribute = ref<{ className: string; attributeName: string } | null>(null);
 const selectedRelation = ref("");
 const objectCreateVisible = ref(false);
 const browserObjectClass = ref("");
+const viewClass = ref("");
+const viewPrimaryKey = ref("");
+const viewEditing = ref(false);
+const viewBuilder = ref<InstanceType<typeof ObjectViewBuilder>>();
+function openInstance(reference: ObjectReference) {
+  navigate(`/views/${encodeURIComponent(reference.className)}?key=${encodeURIComponent(reference.primaryKey)}`);
+}
+function configureView(className: string, primaryKey = "") {
+  navigate(`/views/${encodeURIComponent(className)}?${new URLSearchParams({ edit: "true", ...(primaryKey ? { key: primaryKey } : {}) })}`);
+}
 const objectLabels = ref<Record<string, string>>({});
+const ontologyRevision = ref(0);
+
+async function handleOntologyImported() {
+  ontologyRevision.value++;
+  await loadResourceCounts();
+}
 
 function queryString(params: Record<string, string>) {
   const query = new URLSearchParams(params);
@@ -73,11 +90,16 @@ function resourcePath(resource: ModelResource) {
   return "/objects";
 }
 
-function navigate(path: string) {
+async function navigate(path: string) {
+  if (viewBuilder.value && !await viewBuilder.value.canLeave()) return;
   emit("navigate", path);
 }
 
 function changeWorkspace(workspace: Workspace) {
+  if (workspace === "instance-graph") {
+    navigate("/instance-graph");
+    return;
+  }
   if (workspace === "browser") {
     navigate(
       browserObjectClass.value ? `/data/${encodeURIComponent(browserObjectClass.value)}` : "/data"
@@ -104,10 +126,20 @@ function applyRouteState() {
   const [section, first, second] = segments;
 
   selectedObjectClass.value = "";
-  selectedAttribute.value = null;
   selectedRelation.value = "";
   selectedAsset.value = null;
   isAssetCreating.value = false;
+  viewClass.value = "";
+  viewPrimaryKey.value = "";
+  viewEditing.value = false;
+
+  if (section === "views" && first) {
+    activeWorkspace.value = "browser";
+    viewClass.value = first;
+    viewPrimaryKey.value = route.value.query.get("key") || "";
+    viewEditing.value = route.value.query.get("edit") === "true";
+    return;
+  }
 
   if (section === "objects") {
     activeWorkspace.value = "model";
@@ -118,7 +150,6 @@ function applyRouteState() {
   if (section === "attributes") {
     activeWorkspace.value = "model";
     activeModelResource.value = "attributes";
-    if (first && second) selectedAttribute.value = { className: first, attributeName: second };
     return;
   }
   if (section === "relations") {
@@ -144,6 +175,10 @@ function applyRouteState() {
   if (section === "data") {
     activeWorkspace.value = "browser";
     browserObjectClass.value = first || "";
+    return;
+  }
+  if (section === "instance-graph") {
+    activeWorkspace.value = "instance-graph";
     return;
   }
   if (section === "playground") {
@@ -179,18 +214,6 @@ function editObjectType(className: string) {
   navigate(`/objects/${encodeURIComponent(className)}`);
 }
 
-function editAttribute(
-  className: string,
-  attributeName: string,
-  source: "catalog" | "object" = "catalog"
-) {
-  navigate(
-    `/attributes/${encodeURIComponent(className)}/${encodeURIComponent(attributeName)}${queryString(
-      { from: source }
-    )}`
-  );
-}
-
 function editRelation(relationship: string, source: "catalog" | "object" = "catalog") {
   navigate(`/relations/${encodeURIComponent(relationship)}${queryString({ from: source })}`);
 }
@@ -204,11 +227,6 @@ function openObjectData(className: string) {
 }
 
 function returnToModelCatalog() {
-  if (route.value.query.get("from") === "object" && selectedAttribute.value) {
-    navigate(`/objects/${encodeURIComponent(selectedAttribute.value.className)}`);
-    void loadResourceCounts();
-    return;
-  }
   if (route.value.query.get("from") === "object" && selectedRelation.value) {
     void loadOntology().then((ontology) => {
       const relation = ontology.relations.find(
@@ -222,10 +240,6 @@ function returnToModelCatalog() {
   }
   navigate(resourcePath(activeModelResource.value));
   void loadResourceCounts();
-}
-
-function editObjectAttribute(className: string, attributeName: string) {
-  editAttribute(className, attributeName, "object");
 }
 
 function editObjectRelation(relationship: string) {
@@ -306,34 +320,9 @@ async function loadResourceCounts() {
   if (tasks.status === "fulfilled") resourceCounts.value.tasks = tasks.value.length;
 }
 
-const workspaceTitle = computed(() => {
-  if (activeWorkspace.value === "browser") {
-    const objectLabel = objectLabels.value[browserObjectClass.value];
-    return {
-      title: objectLabel ? `${t("nav.dataBrowser")} / ${objectLabel}` : t("nav.dataBrowser"),
-      description: context.presentation.dataBrowserDescription(objectLabel),
-    };
-  }
-  if (activeWorkspace.value === "assets") {
-    return {
-      title: t("nav.intelligenceAssets"),
-      description: "",
-    };
-  }
-  if (activeWorkspace.value === "playground") {
-    return { title: t("nav.ontologyGraph"), description: "" };
-  }
-  if (activeWorkspace.value === "visual-modeling") {
-    return { title: t("nav.visualModeling"), description: "" };
-  }
-  if (activeWorkspace.value === "knowledge") {
-    return { title: t("nav.businessKnowledge"), description: "" };
-  }
-  return { title: t("nav.ontologyModeling"), description: "" };
-});
-
 onMounted(() => {
   void loadResourceCounts();
+  void reloadAdapter().catch(() => { /* The server still enforces capabilities when a source is unavailable. */ });
 });
 </script>
 
@@ -356,20 +345,14 @@ onMounted(() => {
       />
 
       <section class="content-area">
-        <OntologyContentHeader
-          v-if="activeWorkspace === 'browser'"
-          :workspace="activeWorkspace"
-          :title="workspaceTitle.title"
-          :description="workspaceTitle.description"
-          @browse="changeWorkspace('browser')"
-        />
-        <section v-if="activeWorkspace === 'model'" class="model-surface">
+        <ObjectViewBuilder v-if="viewClass && viewEditing" ref="viewBuilder" :key="viewClass" :class-name="viewClass" :initial-primary-key="viewPrimaryKey" @open="openInstance" @back="emit('navigate', viewPrimaryKey ? `/views/${encodeURIComponent(viewClass)}?key=${encodeURIComponent(viewPrimaryKey)}` : `/data/${encodeURIComponent(viewClass)}`)" />
+        <ObjectViewPage v-else-if="viewClass" :reference="{ className: viewClass, primaryKey: viewPrimaryKey }" @open="openInstance" @edit="configureView(viewClass, viewPrimaryKey)" @back="openObjectData(viewClass)" />
+        <section v-else-if="activeWorkspace === 'model'" class="model-surface">
           <OntologyModelCatalog
-            v-if="!selectedObjectClass && !selectedAttribute && !selectedRelation"
+            v-if="!selectedObjectClass && !selectedRelation"
             :resource="activeModelResource"
             @create-object="createObjectType"
             @edit-object="editObjectType"
-            @edit-attribute="editAttribute"
             @edit-relation="editRelation"
           />
           <OntologyObjectDetail
@@ -378,16 +361,8 @@ onMounted(() => {
             @back="returnToModelCatalog"
             @updated="loadResourceCounts"
             @browse="openObjectData"
-            @attribute="editObjectAttribute"
             @relation="editObjectRelation"
-          />
-          <OntologyAttributeDetail
-            v-else-if="selectedAttribute"
-            :class-name="selectedAttribute.className"
-            :attribute-name="selectedAttribute.attributeName"
-            @back="returnToModelCatalog"
-            @updated="loadResourceCounts"
-            @object="openObjectDetail"
+            @view="configureView"
           />
           <OntologyRelationDetail
             v-else-if="selectedRelation"
@@ -397,8 +372,12 @@ onMounted(() => {
             @object="openObjectDetail"
           />
         </section>
-        <section v-else-if="activeWorkspace === 'browser'" class="legacy-surface">
-          <DataBrowser :initial-class="browserObjectClass" />
+        <section v-else-if="activeWorkspace === 'browser'" :key="`browser-${ontologyRevision}`" class="legacy-surface">
+          <DataBrowser :initial-class="browserObjectClass" @open="openInstance" @configure="configureView" />
+        </section>
+        <section v-else-if="activeWorkspace === 'instance-graph'" class="legacy-surface graph-surface">
+          <div ref="graphSummaryTarget" class="graph-summary-slot" />
+          <InstanceGraph :summary-target="graphSummaryTarget" @open="openInstance" @configure="configureView" />
         </section>
         <section v-else-if="activeWorkspace === 'assets'" class="asset-surface">
           <OntologyAssetCatalog
@@ -417,7 +396,7 @@ onMounted(() => {
             @created="loadResourceCounts"
           />
         </section>
-        <section v-else-if="activeWorkspace === 'visual-modeling'" class="visual-content">
+        <section v-else-if="activeWorkspace === 'visual-modeling'" :key="`visual-${ontologyRevision}`" class="visual-content">
           <VisualModeling
             :focus="route.query.get('focus') || ''"
             :focus-id="route.query.get('id') || ''"
@@ -428,7 +407,7 @@ onMounted(() => {
         <section v-else-if="activeWorkspace === 'knowledge'" class="knowledge-surface">
           <BusinessKnowledge />
         </section>
-        <OntologyPlayground v-else class="playground-surface" @open-modeling="openModelingFocus" />
+        <OntologyPlayground v-else :key="`playground-${ontologyRevision}`" class="playground-surface" @open-modeling="openModelingFocus" />
       </section>
     </div>
     <OntologyObjectCreateDialog v-model="objectCreateVisible" @created="handleObjectCreated" />
@@ -490,6 +469,18 @@ onMounted(() => {
 }
 .legacy-surface :deep(.data-browser) {
   min-height: 100%;
+}
+.graph-surface {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.graph-summary-slot:not(:empty) {
+  margin-bottom: var(--spacing-lg);
+}
+.graph-surface :deep(.instance-graph) {
+  min-height: 0;
+  flex: 1;
 }
 .assets-content {
   display: flex;

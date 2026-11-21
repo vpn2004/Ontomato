@@ -31,6 +31,7 @@ export function buildResultDatasets(
     const outKeyRefs = facts?.abcOutKeyRefs;
     return datasets.map((dataset, index) => ({
       id: `dataset-${index}`,
+      datasetId: dataset?.id,
       title:
         dataset?.subQuestion ||
         dataset?.name ||
@@ -41,6 +42,10 @@ export function buildResultDatasets(
       subQuestion: dataset?.subQuestion,
       code: codes?.[index] || undefined,
       outKeyRefs: outKeyRefs?.[index],
+      truncated: dataset?.truncated,
+      rowLimit: dataset?.rowLimit,
+      truncationHint: dataset?.truncationHint,
+      sourceWindows: dataset?.sourceWindows,
     }));
   }
   // Persisted legacy rows may have only flattened data rows without a structured dataset: same

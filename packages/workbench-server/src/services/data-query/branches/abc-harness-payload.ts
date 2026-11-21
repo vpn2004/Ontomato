@@ -1,3 +1,7 @@
+import type { ResultSourceWindows } from "@ontomato/contracts/result-window";
+import { parseResultSourceWindows } from "../protocol";
+import type { ResultTruncation } from "@ontomato/contracts/query-execution";
+import { parseResultTruncation } from "../protocol";
 import type { OutKeyRef } from "./types";
 
 export type HarnessEvent = {
@@ -8,12 +12,14 @@ export type HarnessEvent = {
   error?: string;
 };
 
-export type HarnessDataContent = {
+export type HarnessDataContent = ResultSourceWindows & {
   question?: string;
+  dsl?: unknown;
   data?: unknown;
   code?: string;
   outputKeyDescriptionMDTable?: string;
   outKeyRefs?: OutKeyRef[];
+  truncation?: ResultTruncation;
 };
 
 const DATA_PAYLOAD_KEYS = ["data", "result", "answer", "rows", "output"];
@@ -60,11 +66,14 @@ export function normalizeHarnessDataContent(content: unknown): HarnessDataConten
 
   return {
     question: typeof question === "string" ? question : undefined,
+    dsl: parsed.dsl,
     data: parseMaybeJSON(rawData ?? parsed),
     code: typeof code === "string" ? code : undefined,
     outputKeyDescriptionMDTable:
       typeof outputKeyDescriptionMDTable === "string" ? outputKeyDescriptionMDTable : undefined,
     outKeyRefs: Array.isArray(outKeyRefs) ? (outKeyRefs as OutKeyRef[]) : undefined,
+    truncation: parseResultTruncation(parsed, "ABC Harness DATA_TYPE"),
+    sourceWindows: parseResultSourceWindows(parsed),
   };
 }
 export function extractHarnessMessage(content: unknown): string {

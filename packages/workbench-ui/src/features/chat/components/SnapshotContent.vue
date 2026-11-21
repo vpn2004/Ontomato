@@ -12,6 +12,7 @@ import {
 } from "../../query-view";
 import { DeepAnalysisResult } from "../../analysis";
 import type { ClarificationOption } from "@ontomato/contracts/chat";
+import { answerBodyText } from "@ontomato/contracts/query-execution";
 import type { ResponseSnapshot } from "../../../types/chat";
 import { analysisReportApi } from "../../analysis";
 import {
@@ -115,7 +116,7 @@ const canExportDeepAnalysisPdf = computed(
 );
 
 const getStandardReportMarkdown = () => {
-  const sections = [props.snapshot.primaryText, props.snapshot.analysisText]
+  const sections = [answerBodyText(props.snapshot.primaryText), props.snapshot.analysisText]
     .map((item) => String(item || "").trim())
     .filter(Boolean);
   return sections.join("\n\n---\n\n");
@@ -238,6 +239,13 @@ const shouldExpandThinkingPanel = () => {
 
 <template>
   <div class="snapshot-content">
+    <div
+      v-if="snapshot.reportRecoveryRequestSeq !== undefined && snapshot.status !== 'streaming'"
+      class="report-verification-notice"
+      role="status"
+    >
+      {{ t("chat.reportNotVerified") }}
+    </div>
     <!-- Execution display view: shared with report tracing; the Q&A body is only shown by it once -->
     <QueryExecutionView
       v-if="snapshot.mode === 'standard' && snapshot.execution"
@@ -289,6 +297,7 @@ const shouldExpandThinkingPanel = () => {
       :activities="snapshot.deepAnalysis.activities"
       :run-state="snapshot.deepAnalysis.runState"
       :archived="archived"
+      :execution-scope="snapshot.taskId ? { taskId: snapshot.taskId } : undefined"
     />
 
     <div v-if="shouldShowStandardPending" class="standard-thinking-pending">
@@ -434,6 +443,17 @@ const shouldExpandThinkingPanel = () => {
 <style scoped>
 .snapshot-content {
   width: 100%;
+}
+
+.report-verification-notice {
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--el-color-warning-light-5);
+  background: var(--el-color-warning-light-9);
+  color: var(--el-text-color-primary);
+  font-size: 14px;
+  line-height: 1.7;
 }
 
 .assistant-content {

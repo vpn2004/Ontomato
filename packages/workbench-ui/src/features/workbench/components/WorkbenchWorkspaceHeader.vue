@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { storeToRefs } from "pinia";
+import { ref } from "vue";
+import PptGenerationDialog from "../../analysis/components/PptGenerationDialog.vue";
 import { useChatStore } from "../../chat";
 import { useDashboardStore } from "../../dashboard";
 import { Download, LayoutDashboard, Loader2, Presentation, Timer } from "lucide-vue-next";
@@ -16,6 +18,7 @@ const emit = defineEmits<{
 }>();
 
 const analysisStore = useAnalysisStore();
+const pptDialog = ref<InstanceType<typeof PptGenerationDialog>>();
 const dashboardStore = useDashboardStore();
 const { currentThreadTitle } = storeToRefs(useChatStore());
 const {
@@ -112,7 +115,7 @@ function taskStatusLabel(status?: string): string {
           class="action-btn"
           :title="isCreatingAnalysisPpt ? t('common.generating') : t('analysis.generatePpt')"
           :disabled="isCreatingAnalysisPpt"
-          @click="analysisStore.createPpt()"
+          @click="pptDialog?.open()"
         >
           <Loader2 v-if="isCreatingAnalysisPpt" :size="14" class="spin-icon" />
           <Presentation v-else :size="14" />
@@ -141,6 +144,7 @@ function taskStatusLabel(status?: string): string {
       </template>
     </div>
   </div>
+  <PptGenerationDialog ref="pptDialog" />
 </template>
 
 <style scoped>

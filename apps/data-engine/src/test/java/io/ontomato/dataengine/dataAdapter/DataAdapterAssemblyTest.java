@@ -1,6 +1,7 @@
 package io.ontomato.dataengine.dataAdapter;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 import java.util.List;
 import java.util.Map;
@@ -14,15 +15,16 @@ import io.ontomato.dataengine.config.DataRagConfig;
 class DataAdapterAssemblyTest {
 
 	@Test
-	void theOpenSourceEditionInstallsPostgresqlOnly() {
+	void theOpenSourceEditionInstallsItsAdapters() {
 		try (AnnotationConfigApplicationContext ctx = new AnnotationConfigApplicationContext()) {
 			ctx.register(DataRagConfig.class);
 			ctx.scan("io.ontomato.dataengine.dataAdapter");
 			ctx.refresh();
 			List<DataAdapterProvider> installed = ctx.getBean(DataAdapterRegistry.class).installed();
-			assertEquals(List.of("postgresql"), installed.stream().map(DataAdapterProvider::type).sorted().toList());
+			assertEquals(List.of("arangodb", "clickhouse", "duckdb", "elasticsearch", "mongodb", "multi", "mysql", "neo4j", "onn-core", "opensearch", "postgresql", "sqlserver"),
+					installed.stream().map(DataAdapterProvider::type).sorted().toList());
 			assertEquals(Map.of("url", "jdbc:postgresql://host:port/db", "user", "postgres"),
-					installed.get(0).connectionExamples());
+					installed.stream().filter(p -> "postgresql".equals(p.type())).findFirst().orElseThrow().connectionExamples());
 		}
 	}
 }

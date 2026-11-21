@@ -2,23 +2,50 @@
 import { computed } from "vue";
 import { Link2 } from "lucide-vue-next";
 import { useI18n } from "vue-i18n";
-import type { DataAdapterConnection, DataAdapterInfo, SystemSettings } from "../../types";
+import {
+  multiDataSourceType,
+  type DataAdapterConnection,
+  type DataAdapterInfo,
+} from "@ontomato/contracts/data-adapters";
+import type {
+  DataAdapterTestOutcome,
+  MultiDataSourceDraft,
+  MultiDataSourceSaveFailure,
+  OntologyOutline,
+  SystemSettings,
+  TestConnection,
+} from "../../types";
 import type { BusinessConfigAdapterDisplay } from "../../business-config";
+import DataAdapterConnectionFields from "./DataAdapterConnectionFields.vue";
+import DataAdapterTestReport from "./DataAdapterTestReport.vue";
+import MultiDataSourceEditor from "./MultiDataSourceEditor.vue";
 
 const { t } = useI18n();
 
 const props = defineProps<{
   saving: boolean;
+  testing: boolean;
+  /** Outcome of the last connection test; null when none is shown. */
+  test: DataAdapterTestOutcome | null;
   disabled: boolean;
   adapters: DataAdapterInfo[];
   adapterDisplay: BusinessConfigAdapterDisplay;
+  /** The current ontology for the multi-source editor; null until it has been read. */
+  ontology: OntologyOutline | null;
+  ontologyLoadError: string;
+  testConnection: TestConnection;
+  /** Why the last multi-source save failed; null when it has not failed. */
+  multiSaveFailure: MultiDataSourceSaveFailure | null;
 }>();
 
 const config = defineModel<SystemSettings>("config", { required: true });
 const mode = defineModel<string>("mode", { required: true });
+const multiDraft = defineModel<MultiDataSourceDraft>("multiDraft", { required: true });
 
 const emit = defineEmits<{
   save: [];
+  test: [];
+  retryOntology: [];
 }>();
 
 const selected = computed(() => props.adapters.find(({ type }) => type === mode.value));
@@ -51,51 +78,61 @@ function connection(type: string): DataAdapterConnection {
           </el-radio-group>
         </el-form-item>
 
-        <template v-if="selected">
-          <el-row v-if="selected.fields.includes('url')" :gutter="24">
-            <el-col :span="adapterDisplay.urlSpan">
-              <el-form-item :label="t('admin.connectionUrl')">
-                <el-input
-                  v-model="connection(selected.type).url"
-                  :placeholder="selected.examples.url"
-                />
-              </el-form-item>
-            </el-col>
-          </el-row>
-          <el-row
-            v-if="selected.fields.includes('user') || selected.fields.includes('password')"
-            :gutter="24"
-          >
-            <el-col v-if="selected.fields.includes('user')" :span="adapterDisplay.credentialSpan">
-              <el-form-item :label="t('common.username')">
-                <el-input
-                  v-model="connection(selected.type).user"
-                  :placeholder="selected.examples.user"
-                />
-              </el-form-item>
-            </el-col>
-            <el-col
-              v-if="selected.fields.includes('password')"
-              :span="adapterDisplay.credentialSpan"
-            >
-              <el-form-item :label="t('common.password')">
-                <el-input
-                  v-model="connection(selected.type).password"
-                  type="password"
-                  placeholder="******"
-                  show-password
-                />
-              </el-form-item>
-            </el-col>
-          </el-row>
-        </template>
+        <MultiDataSourceEditor
+          v-if="mode === multiDataSourceType"
+          v-model:draft="multiDraft"
+          :adapters="adapters"
+          :adapter-display="adapterDisplay"
+          :ontology="ontology"
+          :ontology-load-error="ontologyLoadError"
+          :test-connection="testConnection"
+          @retry-ontology="emit('retryOntology')"
+        />
+        <DataAdapterConnectionFields
+          v-else-if="selected"
+          :connection="connection(selected.type)"
+          :adapter="selected"
+          :adapter-display="adapterDisplay"
+        />
 
         <el-form-item class="form-actions">
-          <el-button type="primary" :loading="saving" :disabled="disabled" @click="emit('save')">
+          <el-button
+            v-if="selected && mode !== multiDataSourceType"
+            :loading="testing"
+            :disabled="disabled"
+            @click="emit('test')"
+          >
+            {{ t("common.testConnection") }}
+          </el-button>
+          <!-- The multi-source definition is saved with the routes of the current ontology, so it waits for the ontology. -->
+          <el-button
+            type="primary"
+            :loading="saving"
+            :disabled="disabled || (mode === multiDataSourceType && !ontology)"
+            @click="emit('save')"
+          >
             {{ t("common.saveAdapterConfig") }}
           </el-button>
         </el-form-item>
       </el-form>
+
+      <DataAdapterTestReport v-if="test" :test="test" />
+      <el-alert
+        v-if="mode === multiDataSourceType && multiSaveFailure"
+        class="multi-source-failure"
+        type="error"
+        :title="t('admin.multiSourceSaveRejected')"
+        :closable="false"
+        show-icon
+      >
+        <ul v-if="multiSaveFailure.problems.length > 0" class="multi-source-problems">
+          <li v-for="(problem, index) in multiSaveFailure.problems" :key="index">
+            <code>{{ problem.path }}</code>
+            <span>{{ problem.detail }}</span>
+          </li>
+        </ul>
+        <pre v-else class="adapter-test-message">{{ multiSaveFailure.message }}</pre>
+      </el-alert>
     </div>
   </div>
 </template>

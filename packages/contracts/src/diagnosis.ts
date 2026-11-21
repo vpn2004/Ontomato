@@ -1,29 +1,4 @@
-import type { SseErrorEvent } from "./errors";
-export type DiagnosisResponseTerminalStatus = "completed" | "failed" | "cancelled";
-
-export type DiagnosisStreamEvent =
-  | { type: "response_started"; message: string }
-  | { type: "token"; content: string }
-  | { type: "thinking"; content: string }
-  | {
-      type: "tool_start";
-      toolCallId: string;
-      tool: string;
-      args: Record<string, unknown>;
-    }
-  | {
-      type: "tool_end";
-      toolCallId: string;
-      tool: string;
-      result: unknown;
-      isError: boolean;
-    }
-  | {
-      type: "response_end";
-      status: Exclude<DiagnosisResponseTerminalStatus, "failed">;
-    }
-  | { type: "response_unavailable" }
-  | SseErrorEvent;
+import type { AgentChatMessage } from "./agent-chat";
 
 export type SessionContextPage = "observe" | "autotest" | "general";
 
@@ -43,29 +18,9 @@ export interface SessionInfo {
 }
 
 export interface SessionHistorySnapshot {
-  messages: SessionHistoryMessage[];
+  messages: AgentChatMessage[];
   responseStatus: "idle" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
 }
-
-export type SessionHistoryToolSegment = {
-  type: "tool_call";
-  toolCallId: string;
-  tool: string;
-  args: string;
-  result?: unknown;
-  isError?: boolean;
-  status: "running" | "done";
-};
-
-export type SessionHistoryMessage = {
-  role: "user" | "assistant";
-  content: string;
-  segments?: (
-    | { type: "text"; content: string }
-    | { type: "thinking"; content: string }
-    | SessionHistoryToolSegment
-  )[];
-};
 
 export type KnowledgeNodeType = "directory" | "file";
 
@@ -94,5 +49,3 @@ export interface KnowledgeTreeResponse {
 export interface SessionStopResult {
   cancelled: boolean;
 }
-
-export type SessionHistorySegment = NonNullable<SessionHistoryMessage["segments"]>[number];

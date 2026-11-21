@@ -107,8 +107,8 @@ public class ABCProgramDashboardServiceImpl implements ABCProgramDashboardServic
 		
 		// Test
 		int timeoutMinutes = 10;
-		JSONArray dashboardResult = abcProgramService.execute(UUID.randomUUID().toString(), dashboard, "admin", new UserDataPermission(), lang, timeoutMinutes, domainId);
-		JSONArray originResult = abcProgramService.execute(UUID.randomUUID().toString(), program, "admin", new UserDataPermission(), lang, timeoutMinutes, domainId);
+		JSONArray dashboardResult = (JSONArray)abcProgramService.execute(UUID.randomUUID().toString(), dashboard, "admin", new UserDataPermission(), lang, timeoutMinutes, domainId)[0];
+		JSONArray originResult = (JSONArray)abcProgramService.execute(UUID.randomUUID().toString(), program, "admin", new UserDataPermission(), lang, timeoutMinutes, domainId)[0];
 		if (dashboardResult.toString(Feature.MapSortField).equals(originResult.toString(Feature.MapSortField))) {
 			return dashboard;
 		}

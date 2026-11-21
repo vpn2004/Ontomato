@@ -2,6 +2,15 @@ package io.ontomato.dataengine.controller;
 
 import java.util.UUID;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
+import java.util.Objects;
+import java.util.BitSet;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
@@ -18,7 +27,9 @@ import io.ontomato.dataengine.service.BackendSessionEntrance;
 import io.ontomato.dataengine.service.CheckService;
 import io.ontomato.dataengine.service.CheckServiceV2;
 import io.ontomato.dataengine.util.SseEmitterUtil;
+import lombok.extern.slf4j.Slf4j;
 
+@Slf4j
 @RestController
 public class CheckController {
 
@@ -45,37 +56,107 @@ public class CheckController {
 		String sseId = UUID.randomUUID().toString();
     	SseEmitter sseEmitter = SseEmitterUtil.createSseEmitter(sseId);
 
-    	String sessionId = param.getString("sessionId");
-        Executors.newSingleThreadExecutor().execute(() -> {
-        	ABCHarnessCheck check = null;
-        	while (true) {
-        		if (BackendSessionEntrance.isCancelled(sessionId)) {
-        			break;
-        		}
-        		check = checkServiceV2.queryBySessionId(sessionId);
-        		if (check == null || check.getFinished()) {
-        			break;
-        		}
-        	}
-        	if (check != null) {
-        		if (check.getProgramDescriptions() != null) {
-        			for (ABCHarnessProgramDescription programDescription : check.getProgramDescriptions()) {
-        				JSONObject toSseContent = new JSONObject();
-						toSseContent.put("summary", programDescription.getSummary());
-						toSseContent.put("meaning", programDescription.getMeaning());
-						SseEmitterUtil.sendSseEmitter(sseId, JSON.toJSONString(toSseContent));
-        			}
-        			JSONObject toSseContent = new JSONObject();
-					toSseContent.put("conclusion", check.getConclusion());
-					toSseContent.put("score", check.getScore());
-					toSseContent.put("fittedQuestion", check.getFittedQuestion());
-					SseEmitterUtil.sendSseEmitter(sseId, JSON.toJSONString(toSseContent));
-        		}
-        	}
-        	
-            SseEmitterUtil.closeSseEmitter(sseId);
+        String sessionId = param.getString("sessionId");
+        AtomicBoolean disconnected = new AtomicBoolean();
+        sseEmitter.onCompletion(() -> disconnected.set(true));
+        sseEmitter.onTimeout(() -> disconnected.set(true));
+        sseEmitter.onError(error -> disconnected.set(true));
+        AtomicLong nextHeartbeat = new AtomicLong();
+        // One virtual thread per reader, with bounded polling and no leaked executor.
+        Thread.startVirtualThread(() -> {
+            try {
+                ABCHarnessCheck check = awaitCheck(sessionId, () -> {
+                    if (disconnected.get() || BackendSessionEntrance.isCancelled(sessionId)) return false;
+                    long now = System.nanoTime();
+                    if (now >= nextHeartbeat.get()) {
+                        nextHeartbeat.set(now + TimeUnit.SECONDS.toNanos(5));
+                        if (!SseEmitterUtil.sendHeartbeat(sseId)) return false;
+                    }
+                    return true;
+                }, 60_000, 250, (index, description) -> {
+                    JSONObject step = JSONObject.of("label", "program-" + index,
+                            "summary", description.getSummary(), "meaning", description.getMeaning());
+                    if (!SseEmitterUtil.sendSseEmitter(sseId, JSON.toJSONString(step))) disconnected.set(true);
+                }, progress -> {
+                    long done = progress.getProgramDescriptions() == null ? 0 : progress.getProgramDescriptions().stream().filter(Objects::nonNull).count();
+                    JSONObject phase = JSONObject.of("phase", progress.getPhase(), "completedPrograms", done,
+                            "totalPrograms", Math.max(done, progress.getTotalPrograms() == null ? 0 : progress.getTotalPrograms()));
+                    if (!SseEmitterUtil.sendSseEmitter(sseId, JSON.toJSONString(phase))) disconnected.set(true);
+                }, 300_000, 1_800_000);
+                if (check == null || disconnected.get()) return;
+                if (check.getScore() == null || !Double.isFinite(check.getScore())
+                        || check.getScore() < 0 || check.getScore() > 100
+                        || check.getConclusion() == null || check.getConclusion().isBlank()
+                        || check.getFittedQuestion() == null || check.getFittedQuestion().isBlank()) {
+                    throw new IllegalStateException("No valid quality assessment");
+                }
+                JSONObject result = new JSONObject();
+                result.put("conclusion", check.getConclusion());
+                result.put("score", check.getScore());
+                result.put("fittedQuestion", check.getFittedQuestion());
+                SseEmitterUtil.sendSseEmitter(sseId, JSON.toJSONString(result));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (Exception e) {
+                log.warn("Quality check reader failed for session {}", sessionId, e);
+                if (!disconnected.get()) {
+                    SseEmitterUtil.sendSseEmitter(sseId, JSON.toJSONString(
+                        JSONObject.of("error", "Quality check did not complete; no final assessment is available")));
+                }
+            } finally {
+                SseEmitterUtil.closeSseEmitter(sseId);
+            }
         });
         return sseEmitter;
-	}
-	
+    }
+
+    ABCHarnessCheck awaitCheck(String sessionId, BooleanSupplier keepWaiting,
+            long timeoutMs, long pollMs) throws InterruptedException, TimeoutException {
+        return awaitCheck(sessionId, keepWaiting, timeoutMs, pollMs, (index, description) -> {});
+    }
+
+    ABCHarnessCheck awaitCheck(String sessionId, BooleanSupplier keepWaiting,
+            long timeoutMs, long pollMs, BiConsumer<Integer, ABCHarnessProgramDescription> onProgress)
+            throws InterruptedException, TimeoutException {
+        return awaitCheck(sessionId, keepWaiting, timeoutMs, pollMs, onProgress, check -> {}, timeoutMs, 1_800_000);
+    }
+
+    ABCHarnessCheck awaitCheck(String sessionId, BooleanSupplier keepWaiting,
+            long timeoutMs, long pollMs, BiConsumer<Integer, ABCHarnessProgramDescription> onProgress,
+            Consumer<ABCHarnessCheck> onPhase, long phaseTimeoutMs, long totalTimeoutMs)
+            throws InterruptedException, TimeoutException {
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+        long totalDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(totalTimeoutMs);
+        String phase = null;
+        long completedPrograms = -1;
+        BitSet delivered = new BitSet();
+        while (keepWaiting.getAsBoolean()) {
+            long remaining = Math.min(deadline, totalDeadline) - System.nanoTime();
+            if (remaining <= 0) throw new TimeoutException("Quality check wait expired");
+            ABCHarnessCheck check = checkServiceV2.queryBySessionId(sessionId);
+            if (check == null) throw new IllegalStateException("Quality check not found");
+            long completed = check.getProgramDescriptions() == null ? 0
+                    : check.getProgramDescriptions().stream().filter(Objects::nonNull).count();
+            if (("describing".equals(check.getPhase()) || "assessing".equals(check.getPhase()))
+                    && (!"assessing".equals(phase) || "assessing".equals(check.getPhase()))
+                    && (!Objects.equals(phase, check.getPhase()) || completed > completedPrograms)) {
+                phase = check.getPhase();
+                completedPrograms = Math.max(completedPrograms, completed);
+                deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(phaseTimeoutMs);
+                onPhase.accept(check);
+            }
+            if (check.getProgramDescriptions() != null) {
+                for (int i = 0; i < check.getProgramDescriptions().size(); i++) {
+                    var description = check.getProgramDescriptions().get(i);
+                    if (description == null || delivered.get(i)) continue;
+                    delivered.set(i);
+                    onProgress.accept(i, description);
+                    deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(phase == null ? timeoutMs : phaseTimeoutMs);
+                }
+            }
+            if (Boolean.TRUE.equals(check.getFinished())) return check;
+            TimeUnit.NANOSECONDS.sleep(Math.min(TimeUnit.MILLISECONDS.toNanos(pollMs), remaining));
+        }
+        return null;
+    }
 }

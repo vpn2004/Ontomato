@@ -1,5 +1,5 @@
 import type { QueryThinkingState, ThinkingBranchCard } from "@ontomato/contracts/query-thinking";
-import type { QueryFactDatasetPreview } from "@ontomato/contracts/query-execution";
+import { answerBodyText, type QueryFactDatasetPreview } from "@ontomato/contracts/query-execution";
 import { startQualityCheckSettlement } from "../../data-query/late-fact";
 import type { QueryRunIdentity } from "../../data-query/query-fact";
 import { getAbcQuestionMode } from "../../data-query/data-query-policy";
@@ -12,7 +12,7 @@ import {
   convertChunkToDataset,
   rowsFromQueryAnswerPayloads,
 } from "../../data-query/adapter";
-import { parseQueryAnswerPayloads } from "../../data-query/protocol";
+import { combineResultTruncation, combineResultSourceWindows, parseQueryAnswerPayloads } from "../../data-query/protocol";
 import type { AnalysisQueryFact, DimensionQueryResult } from "./evidence-types";
 import { buildQueryResultDataFromDatasets, buildQueryResultDslFromDatasets } from "./query-result";
 import { executeDslViaBackend } from "../../data-query/dsl-executor";
@@ -83,9 +83,11 @@ export async function executeDslDirectly(params: {
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
       throw new Error(tApp("analysis.runtime.deep-analysis-tool.399"));
     }
-    const rawData = rowsFromQueryAnswerPayloads(
-      parseQueryAnswerPayloads((payload as Record<string, unknown>).data, tApp("analysis.runtime.deep-analysis-tool.400"))
+    const answerPayloads = parseQueryAnswerPayloads(
+      (payload as Record<string, unknown>).data,
+      tApp("analysis.runtime.deep-analysis-tool.400")
     );
+    const rawData = rowsFromQueryAnswerPayloads(answerPayloads);
 
     const outputKeyDescriptionMDTable =
       payload &&
@@ -100,12 +102,19 @@ export async function executeDslDirectly(params: {
       outputKeyDescriptionMDTable,
       locale,
     });
+    const truncation = combineResultTruncation(answerPayloads);
+    const sourceWindows = combineResultSourceWindows(answerPayloads);
     const tableMarkdown = renderDataAsTable(rawData, fieldDisplayPlan, {
       maxRows: 20,
       locale,
+      truncation,
     });
 
-    const dataset = convertChunkToDataset({ data: rawData, dsl }, 0, locale);
+    const dataset = convertChunkToDataset(
+      { data: rawData, dsl, truncation, sourceWindows },
+      0,
+      locale
+    );
     dataset.fieldDisplayPlan = fieldDisplayPlan;
     const datasets = [dataset];
 
@@ -138,7 +147,7 @@ function applyBaseQueryOutput(target: SubQuestionBranchResult, output: BaseQuery
   target.dsl = datasets.length > 0 ? buildQueryResultDslFromDatasets(datasets) : undefined;
   target.datasets = datasets.length > 0 ? datasets : undefined;
   target.fullContent = output.content;
-  target.markdownTable = output.content;
+  target.markdownTable = answerBodyText(output.content);
   target.dataCount = datasets.reduce((sum, dataset) => sum + (dataset.data?.length || 0), 0);
   // Deep analysis enables only the abc branch, so the winning output already carries that branch's backend session.
   target.backendSessions = output.sessionId
@@ -269,13 +278,14 @@ export async function executeSubQuestionWithBranches(
             markdownTable: renderDataAsTable(dataset.data || [], dataset.fieldDisplayPlan, {
               maxRows: 20,
               locale,
+              truncation: dataset,
             }),
             dataCount: Array.isArray(dataset.data) ? dataset.data.length : 0,
           });
         } catch {
           datasetPreviews.push({
             title,
-            markdownTable: ret.content || "",
+            markdownTable: answerBodyText(ret.content),
             dataCount: Array.isArray(dataset.data) ? dataset.data.length : 0,
           });
         }
@@ -292,13 +302,14 @@ export async function executeSubQuestionWithBranches(
           {
             maxRows: 20,
             locale,
+            truncation: ret.datasets[0],
           }
         );
       } catch {
-        baseResult.markdownTable = ret.content || "";
+        baseResult.markdownTable = answerBodyText(ret.content);
       }
     } else {
-      baseResult.markdownTable = ret.content || "";
+      baseResult.markdownTable = answerBodyText(ret.content);
     }
 
     logger.info("[DeepAnalysis] query display fields built", {

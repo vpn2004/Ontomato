@@ -1,5 +1,7 @@
 package io.ontomato.dataengine.service.impl;
 
+import io.ontomato.dataengine.dataAdapter.DataAdapter;
+import io.ontomato.dataengine.dataAdapter.DslExecutionMode;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
@@ -354,6 +356,8 @@ public class ChatServiceImpl implements ChatService {
 		BusinessConfig businessConfig = businessConfigService.get(domainId);
 		String dslCookerExample = adminService.getDslCookerExample(domainId);
 		List<Map<String, Object>> classDefs = (List<Map<String, Object>>)jsonRule.get("classDef");
+		// The target adapter decides how a time condition travels: literal pass-through by default, epoch millis for M3.
+		DataAdapter timeConditionAdapter = dataAdapterRegistry.create(businessConfig, jsonRule);
 		// One workspace per try session; cleaned up uniformly after the run ends (including on exception), and the second follow-up reuses the same workspace
 		for (int i = 0; i < businessConfig.getDslCookerTries(); i++) {
 			try {
@@ -377,7 +381,7 @@ public class ChatServiceImpl implements ChatService {
 				public void run() {
 					try {
 						String trySessionId = BackendSessionEntrance.derive(sessionId, "try-" + ii);
-						String[] userMessageArray = UserMessageUtil.getQuestionUserMessage(trySessionId, knowledgeDao,bussinessExampleDao, q, classes, subQuery, dataAdapterRegistry.create(businessConfig, null), businessConfigService, jsonRule, dslCookerExample, domainId);
+						String[] userMessageArray = UserMessageUtil.getQuestionUserMessage(trySessionId, knowledgeDao,bussinessExampleDao, q, classes, subQuery, dataAdapterRegistry.create(businessConfig, jsonRule), businessConfigService, jsonRule, dslCookerExample, domainId);
 						String userMessage = userMessageArray[0];
 						String userMessageWithoutExample = userMessageArray[1];
 						String queryJson = multiThreadAIChatService.chat(
@@ -528,7 +532,7 @@ public class ChatServiceImpl implements ChatService {
         		JSONCheckUtil.Result checkResult = legalCheckResultMap.get(legalTrySessionId);
         		String finalDsl = DslUtil.setConditionTextColumnToEmptyArray(checkResult.getQueryJson());
             	String finalDslWithoutTimeConvert = finalDsl + "";
-            	finalDsl = DslUtil.setConditionTimeColumnToCorrectFormat(finalDsl, dataRagConfig.getDslMightTimeFormats(), classDefs);
+            	finalDsl = DslUtil.setConditionTimeColumnToCorrectFormat(finalDsl, dataRagConfig.getDslMightTimeFormats(), classDefs, timeConditionAdapter.timeConditionsAsEpochMillis(), timeConditionAdapter.timeConditionZone());
             	finalDsl = DslUtil.setLastStepToUserAndSaveTable(finalDsl);
             	finalDslWithoutTimeConvert = DslUtil.setLastStepToUserAndSaveTable(finalDslWithoutTimeConvert);
             	finalDsl = DslUtil.enrichShouldReturnAttr(finalDsl, classDefs);
@@ -550,7 +554,7 @@ public class ChatServiceImpl implements ChatService {
         		JSONCheckUtil.Result checkResult = illegalCheckResultMap.get(illegalTrySessionId);
         		String strCheckResult = subQuery.getString("subQuestion") + "\n\n" + abcStep + "\n\nPay special attention to the following points:\n" + checkResult.toIllegalContent();
                 log.warn("[" + originSessionId + "] " + strCheckResult);
-			String[] userMessageRetryArray = UserMessageUtil.getQuestionUserMessage(illegalTrySessionId, knowledgeDao,bussinessExampleDao, strCheckResult, classes, subQuery, dataAdapterRegistry.create(businessConfig, null), businessConfigService, jsonRule, dslCookerExample, domainId);
+			String[] userMessageRetryArray = UserMessageUtil.getQuestionUserMessage(illegalTrySessionId, knowledgeDao,bussinessExampleDao, strCheckResult, classes, subQuery, dataAdapterRegistry.create(businessConfig, jsonRule), businessConfigService, jsonRule, dslCookerExample, domainId);
     			String userMessageRetry = userMessageRetryArray[0];
     			String userMessageRetryWithoutExample = userMessageRetryArray[1];
     			evaluation.setUserMessage(userMessageRetry);
@@ -596,7 +600,7 @@ public class ChatServiceImpl implements ChatService {
                 if(secondCheckResult.isLegal()){
                 	String finalDsl = DslUtil.setConditionTextColumnToEmptyArray(secondCheckResult.getQueryJson());
                 	String finalDslWithoutTimeConvert = finalDsl + "";
-                	finalDsl = DslUtil.setConditionTimeColumnToCorrectFormat(finalDsl, dataRagConfig.getDslMightTimeFormats(), classDefs);
+                	finalDsl = DslUtil.setConditionTimeColumnToCorrectFormat(finalDsl, dataRagConfig.getDslMightTimeFormats(), classDefs, timeConditionAdapter.timeConditionsAsEpochMillis(), timeConditionAdapter.timeConditionZone());
                 	finalDsl = DslUtil.setLastStepToUserAndSaveTable(finalDsl);
                 	finalDslWithoutTimeConvert = DslUtil.setLastStepToUserAndSaveTable(finalDslWithoutTimeConvert);
                 	finalDsl = DslUtil.enrichShouldReturnAttr(finalDsl, classDefs);
@@ -978,14 +982,6 @@ public class ChatServiceImpl implements ChatService {
     }
     
     @Override
-    public Map<String,Object> getM3Data(String queryJson, UserDataPermission permission, String domainId) {
-    	Map<String, Object> jsonRule = adminService.getJSONRule(domainId);
-    	BusinessConfig businessConfig = businessConfigService.get(domainId);
-		DslExecutionResult[] results = HttpRequestUtil.getM3Data(dataRagConfig, dataAdapterRegistry.create(businessConfig, jsonRule), queryJson, null, true, jsonRule, vectorResourceDao, permission, HttpRequestUtil.M3Mode.V1, domainId);
-		return results[1].rawResponse();
-    }
-    
-    @Override
     public JSONArray getMidSet(JSONObject dsl, UserDataPermission permission, String domainId) {
     	try {
     		JSONArray steps = dsl.getJSONObject("answer").getJSONArray("steps");
@@ -1055,7 +1051,7 @@ public class ChatServiceImpl implements ChatService {
     		JSONArray dsls = new JSONArray();
     		dsls.add(dsl);
     		BusinessConfig businessConfig = businessConfigService.get(domainId);
-			DslExecutionResult[] results = HttpRequestUtil.getM3Data(dataRagConfig, dataAdapterRegistry.create(businessConfig, jsonRule), JSON.toJSONString(dsls, Feature.WriteMapNullValue), null, true, jsonRule, vectorResourceDao, permission, HttpRequestUtil.M3Mode.V1, domainId);
+			DslExecutionResult[] results = HttpRequestUtil.executeDsl(dataRagConfig, dataAdapterRegistry.create(businessConfig, jsonRule), JSON.toJSONString(dsls, Feature.WriteMapNullValue), null, true, jsonRule, vectorResourceDao, permission, DslExecutionMode.OPTIMIZED, domainId);
 			Map<String, Object> rowPermissionDataMap = results[1].rawResponse();
     		JSONObject rowPermissionDataMapJson = JSONObject.parseObject(JSON.toJSONString(rowPermissionDataMap, Feature.WriteMapNullValue));
     		JSONObject rowColPermissionDataMap = DslPermissionUtil.dealDslAnswerWithPermission(rowPermissionDataMapJson, permission, classDefs);

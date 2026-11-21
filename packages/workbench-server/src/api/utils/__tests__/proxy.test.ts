@@ -85,6 +85,21 @@ describe("proxyResponse", () => {
     expect(response.headers.get("content-type")).toBe("application/json; charset=utf-8");
     expect(await response.json()).toEqual({ ok: true });
   });
+
+  it("forwards a binary body byte-for-byte", async () => {
+    // Includes invalid UTF-8 byte sequences: decoding the body as text would replace them and corrupt the zip.
+    const bytes = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0xff, 0xfe, 0x80, 0x81, 0xc3, 0x28, 0x00]);
+    const upstream = new Response(bytes, {
+      headers: {
+        "content-type": "application/octet-stream",
+        "content-disposition": 'attachment; filename="actions.zip"',
+      },
+    });
+    const response = await fetch(await listen("/binary", upstream));
+    expect(response.headers.get("content-type")).toBe("application/octet-stream");
+    expect(response.headers.get("content-disposition")).toBe('attachment; filename="actions.zip"');
+    expect(Buffer.from(await response.arrayBuffer())).toEqual(bytes);
+  });
 });
 
 describe("proxyUpstream", () => {

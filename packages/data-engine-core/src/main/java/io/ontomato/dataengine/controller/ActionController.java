@@ -9,6 +9,10 @@ import java.util.List;
 import java.util.UUID;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
@@ -82,6 +86,10 @@ public class ActionController {
 			User user = SystemUtils.getCurUser();
 			Action action = param.to(Action.class);
 			action.setDomainId(user.getDomainId());
+			// The saved Function belongs to the caller's domain whatever the request says; the DAO keys the vector write by it.
+			if (action.getFunction() != null) {
+				action.getFunction().setDomainId(user.getDomainId());
+			}
 			actionService.save(action, lang);
 			ret.put("success", true);
 		} catch (Exception e) {
@@ -136,6 +144,60 @@ public class ActionController {
 			List<Action> actions = actionService.queryList(status, null, className, user.getDomainId());
 			ret.put("success", true);
 			ret.put("data", actions);
+		} catch (Exception e) {
+			log.error(e.getMessage(), e);
+			ret.put("success", false);
+			ret.put("message", e.getMessage());
+		}
+		return ret;
+	}
+
+	@PostMapping("/action/re-explain")
+	@ResponseBody
+	public JSONObject reExplainActions(@RequestHeader(value = ControllerConst.LANG_HEADER_KEY, required = false) String lang,
+			@RequestBody(required = false) JSONObject param) {
+		JSONObject ret = new JSONObject();
+		try {
+			List<String> ids = new ArrayList<String>();
+			JSONArray array = param == null ? null : param.getJSONArray("ids");
+			if (array != null) {
+				for (int i = 0; i < array.size(); i++) {
+					ids.add(array.getString(i));
+				}
+			}
+			Boolean missingOnly = param == null ? null : param.getBoolean("missingOnly");
+			ret.put("success", true);
+			ret.put("data", actionService.reExplainActions(ids, missingOnly == null || missingOnly, lang));
+		} catch (Exception e) {
+			log.error(e.getMessage(), e);
+			ret.put("success", false);
+			ret.put("message", e.getMessage());
+		}
+		return ret;
+	}
+
+	@GetMapping("/action/export")
+	public ResponseEntity<byte[]> exportActions(@RequestHeader(value = ControllerConst.LANG_HEADER_KEY, required = false) String lang) {
+		try {
+			byte[] data = actionService.exportActions(lang);
+			return ResponseEntity.ok()
+					.header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"actions.zip\"")
+					.contentType(MediaType.APPLICATION_OCTET_STREAM)
+					.body(data);
+		} catch (Exception e) {
+			log.error(e.getMessage(), e);
+			return ResponseEntity.internalServerError().build();
+		}
+	}
+
+	@PostMapping("/action/import")
+	@ResponseBody
+	public JSONObject importActions(@RequestHeader(value = ControllerConst.LANG_HEADER_KEY, required = false) String lang,
+			@RequestParam("file") MultipartFile file,
+			@RequestParam(value = "allowMissingExplanation", required = false, defaultValue = "false") boolean allowMissingExplanation) {
+		JSONObject ret = new JSONObject();
+		try {
+			ret = actionService.importActions(file.getBytes(), lang, allowMissingExplanation);
 		} catch (Exception e) {
 			log.error(e.getMessage(), e);
 			ret.put("success", false);

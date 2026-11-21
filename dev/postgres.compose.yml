@@ -5,11 +5,11 @@ services:
     image: pgvector/pgvector:pg18
     restart: unless-stopped
     ports:
-      - "127.0.0.1:${DB_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     environment:
       POSTGRES_DB: postgres
-      POSTGRES_USER: ontomato
-      POSTGRES_PASSWORD: ontomato
+      POSTGRES_USER: ${POSTGRES_USER:-ontomato}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ontomato}
       TZ: Asia/Shanghai
     volumes:
       - pgdata:/var/lib/postgresql
@@ -22,7 +22,7 @@ services:
     # TCP: the image init server does not listen on 127.0.0.1, so this stays down until
     # initdb, including the database-creation script, has finished.
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ontomato -d datarag"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER:-ontomato} -d datarag"]
       interval: 5s
       timeout: 5s
       retries: 10

@@ -1,4 +1,8 @@
+import type { DataAdaptersData } from "@ontomato/contracts/data-adapters";
+import type { ControlledActionCatalog, ControlledActionDecision } from "@ontomato/contracts/controlled-actions";
+import type { ObjectViewDocument, ObjectViewState } from "@ontomato/contracts/object-views";
 import { ontologyText, type ManagerMessages } from "./i18n";
+import type { AdapterOntologyPreview, DataAdapterInfo } from "@ontomato/contracts/data-adapters";
 
 export type ManagerCredential =
   | { type: "token"; token: string }
@@ -80,6 +84,9 @@ export interface OntologyAttribute {
   bizzkeyBool?: boolean;
   primaryKey?: boolean;
   enable?: boolean;
+  sourceName?: string;
+  required?: boolean;
+  enumValues?: Array<string | number | boolean>;
 }
 
 export interface OntologyObject {
@@ -95,7 +102,63 @@ export interface OntologyRelation {
   fromclass: string;
   toclass: string;
   desc: string;
+  fromField?: string;
+  toField?: string;
+  attributes?: OntologyAttribute[];
 }
+
+/** A data instance node in the star-chart instance graph. */
+export interface InstanceGraphNode {
+  id: string;
+  name: string;
+  class: string;
+  isCenter?: boolean;
+}
+
+/** A directed relation between two instance nodes. */
+export interface InstanceGraphEdge {
+  source: string;
+  target: string;
+  type?: string;
+  label?: string;
+}
+
+export interface InstanceGraphData {
+  nodes: InstanceGraphNode[];
+  edges: InstanceGraphEdge[];
+}
+
+export interface InstanceGraphSummary {
+  classes: Array<{ class: string; instanceCount: number | null; sampleCount?: number }>;
+  relationships: Array<{ source: string; target: string; count: number; type?: string; types?: string[] }>;
+  nodeCount: number | null;
+  edgeCount: number | null;
+  componentCount: number;
+  isolatedNodeCount: number;
+  largestComponentSize: number;
+  complete?: boolean;
+  failures?: string[];
+  relationTypes?: string[];
+  overviewNodes?: InstanceGraphNode[];
+  overviewEdges?: InstanceGraphEdge[];
+  overviewEdgesTruncated?: boolean;
+  version: string;
+  generatedAt: string;
+}
+
+export interface InstanceNeighborhood extends InstanceGraphData {
+   total: number | null;
+  nextOffset: number | null;
+  version: string;
+}
+
+/**
+ * Star-chart data state reported by the data engine. Only READY carries data; GENERATING and NOT_GENERATED mean the
+ * domain has never been generated, with or without a build currently running.
+ */
+export type InstanceGraphResult =
+  | { status: "READY"; graph: InstanceGraphData }
+  | { status: "GENERATING" | "NOT_GENERATED" };
 
 export interface CreateOntologyObjectInput {
   className: string;
@@ -167,7 +230,7 @@ export function createManagerClient(
   const stale = () =>
     new DOMException(ontologyText(context.messages, "staleResponseDropped"), "AbortError");
 
-  async function send(path: string, init: { method: "GET" | "POST"; body?: string }) {
+  async function send(path: string, init: { method: "GET" | "POST"; body?: string }, service = "/data-query") {
     if (disposed) throw stale();
     const credential = context.credential;
     if (!credential) throw new Error(ontologyText(context.messages, "credentialMissing"));
@@ -176,7 +239,7 @@ export function createManagerClient(
       if (disposed || hostSource(context) !== source) throw stale();
     };
 
-    const response = await fetch(`${context.apiBase}/data-query${path}`, {
+    const response = await fetch(`${context.apiBase}${service}${path}`, {
       ...init,
       headers: {
         ...(init.method === "POST" ? { "Content-Type": "application/json" } : {}),
@@ -188,14 +251,16 @@ export function createManagerClient(
     assertCurrent();
     if (response.status === 401 || response.status === 402) onAuthFailure(response.status);
     if (!response.ok) {
+      const detail = await response.json().catch(() => null);
+      assertCurrent();
       throw new Error(
-        ontologyText(context.messages, "requestFailedStatus", { status: response.status })
+        response.status === 409 && path.startsWith('/objectView/') ? ontologyText(context.messages, 'ovConflict') : detail?.message || ontologyText(context.messages, "requestFailedStatus", { status: response.status })
       );
     }
     const json = await response.json();
     assertCurrent();
     if (json?.success === false) {
-      throw new Error(json.message || json.error || ontologyText(context.messages, "requestFailed"));
+      throw Object.assign(new Error(json.message || json.error || ontologyText(context.messages, "requestFailed")), { code: json.code });
     }
     return json;
   }
@@ -262,6 +327,20 @@ export function createManagerClient(
       fromclass: item.fromclass,
       toclass: item.toclass,
       desc: item.desc || item.relationship,
+      fromField: item.fromField,
+      toField: item.toField,
+      ...(Array.isArray(item.attrs || item.attributes)
+        ? { attributes: (item.attrs || item.attributes).map((attr: Record<string, any>) => ({
+            name: attr.name,
+            showName: attr.showName || attr.name,
+            type: attr.type || "string",
+            attrDesc: attr.attrDesc || "",
+            enable: attr.enable !== false && String(attr.enable || "").toLowerCase() !== "false",
+            required: attr.required === true || String(attr.required || "").toLowerCase() === "true",
+            sourceName: attr.sourceName || attr.name,
+            ...(Array.isArray(attr.enumValues) ? { enumValues: attr.enumValues } : {}),
+          })) }
+        : {}),
     })) as OntologyRelation[];
     return { objects, relations };
   }
@@ -328,7 +407,7 @@ export function createManagerClient(
         })
       );
     }
-    if (changes.primaryKey) {
+    if (changes.primaryKey && !attr.primaryKey) {
       requests.push(post("/admin/editClassAttrPrimaryKey", { className, attr: attr.name }));
     }
     await Promise.all(requests);
@@ -357,8 +436,8 @@ export function createManagerClient(
     return post("/admin/delClassAttr", { className, attrName });
   }
 
-  function updateOntologyRelation(relationship: string, desc: string) {
-    return post("/admin/editRelationshipDesc", { relationship, desc });
+  function updateOntologyRelation(relationship: string, changes: { desc: string; fromField: string; toField: string }) {
+    return post("/admin/editRelationshipDesc", { relationship, ...changes });
   }
 
   function createOntologyRelation(input: CreateOntologyRelationInput) {
@@ -395,6 +474,148 @@ export function createManagerClient(
     };
   }
 
+  function normalizeInstanceGraph(data: unknown): InstanceGraphData {
+    const graph = (data ?? {}) as Record<string, unknown>;
+    const rawNodes = Array.isArray(graph.nodes) ? (graph.nodes as InstanceGraphNode[]) : [];
+    const rawEdges = Array.isArray(graph.edges) ? (graph.edges as InstanceGraphEdge[]) : [];
+    // The star chart injects a synthetic center ("virtual_root") when there is no single center; drop it and its edges.
+    const virtualIds = new Set(
+      rawNodes.filter((node) => node.class === "virtual_root" || node.id === "root").map((node) => node.id)
+    );
+    return {
+      nodes: rawNodes.filter((node) => !virtualIds.has(node.id)),
+      edges: rawEdges.filter((edge) => !virtualIds.has(edge.source) && !virtualIds.has(edge.target)),
+    };
+  }
+
+  /** Pre-built star-chart instance graph (all inStarChart classes); nodes are data instances, edges their relations. */
+  async function loadInstanceGraph(): Promise<InstanceGraphResult> {
+    const response = await send("/data/queryWholeDataMode0", { method: "GET" });
+    if (response.status !== "READY") return { status: response.status };
+    return { status: "READY", graph: normalizeInstanceGraph(response.data) };
+  }
+
+  async function loadInstanceGraphSummary(): Promise<
+    { status: "READY"; summary: InstanceGraphSummary } | { status: "GENERATING" | "NOT_GENERATED" }
+  > {
+    const response = await send("/data/instanceGraph/summary", { method: "GET" });
+    return response.status === "READY"
+      ? { status: "READY", summary: response.data as InstanceGraphSummary }
+      : { status: response.status };
+  }
+
+  async function loadInstanceGraphStatistics() {
+    return (await send("/data/instanceGraph/statistics", { method: "GET" })).data as { nodeCount: number; classes: Array<{ class: string; instanceCount: number }> };
+  }
+
+  async function searchInstanceGraph(term: string, version: string, className?: string) {
+    const response = await post("/data/instanceGraph/search", { term, version, class: className, limit: 50 });
+    if (response.status !== "READY") throw new Error(ontologyText(context.messages, "instanceGraphNotGenerated"));
+    return response.data as { nodes: InstanceGraphNode[]; hasMore: boolean; version: string };
+  }
+
+  async function loadInstanceNeighborhood(id: string, version: string, offset = 0, filters?: { relationType?: string; neighborClass?: string; direction?: string }) {
+    const response = await post("/data/instanceGraph/neighborhood", { id, version, offset, limit: 100, ...filters });
+    if (response.status !== "READY") throw new Error(ontologyText(context.messages, "instanceGraphNotGenerated"));
+    return response.data as InstanceNeighborhood;
+  }
+
+  /**
+   * Rebuilds the star-chart data from the current Ontology and returns once it is done; GENERATING means a build for
+   * this domain was already running.
+   */
+  async function refreshStarChartData(): Promise<"GENERATED" | "GENERATING"> {
+    return (await send("/data/refreshStarChartData", { method: "POST" })).status;
+  }
+
+  /** One instance's full record; the data engine returns classDef plus a flat attribute map. */
+  async function queryInstanceInfo(id: string, className: string) {
+    const response = await post("/data/queryInfoByNode", { id, class: className });
+    const info = (response.data ?? {}) as Record<string, any>;
+    const key = info.classDef?.attrs?.find((attr: Record<string, unknown>) => attr.primaryKey === true || attr.primary_key === true)?.name;
+    if (key && info.data && typeof info.data === "object" && id.startsWith(`${className}:`)) {
+      info.data = { ...info.data, [key]: id.slice(className.length + 1) };
+    }
+    return info as Record<string, unknown>;
+  }
+
+  async function objectViewRequest(operation: "read" | "edit" | "save" | "publish", className: string, form: "full" | "panel", values: Record<string, unknown> = {}): Promise<ObjectViewState> {
+    return (await post(`/objectView/${operation}`, { className, form, ...values })).data;
+  }
+
+  function saveObjectView(document: ObjectViewDocument, form: "full" | "panel", expectedRevision: number, description: string) {
+    return objectViewRequest("save", document.className, form, { document, expectedRevision, description });
+  }
+
+  async function executeViewMetric(id: string, param: Record<string, unknown>) {
+    const response = await post("/metricView/execute", { id, param });
+    if (response.truncated === true || response.partial === true || response.complete === false) throw new Error(response.truncationHint || ontologyText(context.messages, "ovIncompleteResults"));
+    return response.data;
+  }
+
+  async function loadViewSkills() {
+    const response = await send("/skills", { method: "GET" }, "");
+    return (response.skills as Array<{ id: string; title?: string; enabled?: boolean; type: string; category: string }>).filter(skill => skill.enabled !== false && skill.type === "executable" && skill.category === "visualization");
+  }
+  async function renderViewSkill(id: string, input: Record<string, unknown>) {
+    const response = await send(`/skills/${encodeURIComponent(id)}/render`, { method: "POST", body: JSON.stringify({ input }) }, "");
+    return String(response.result.html);
+  }
+  function viewSkillHtml(html: string) {
+    return html.replace(/(["'])(\/api\/(?:skills\/resources|echart)\/[^"'<>\s]+)\1/g, (_match, quote: string, resource: string) => {
+      const url = new URL(resource, "http://skill.local");
+      if (url.pathname.endsWith("/echarts/scripts/echarts.min.js")) return `${quote}${context.apiBase}/echart/echarts.min.js${quote}`;
+      url.searchParams.delete("tk"); url.searchParams.delete("apiKey");
+      if (context.credential?.type === "token") url.searchParams.set("tk", context.credential.token);
+      if (context.credential?.type === "apiKey") url.searchParams.set("apiKey", context.credential.apiKey);
+      return `${quote}${context.apiBase}${url.pathname.slice(4)}${url.search}${quote}`;
+    });
+  }
+
+  async function executeViewAction(id: string, param: Record<string, unknown>) {
+    if (disposed || !context.credential) throw stale();
+    const source = hostSource(context);
+    const body = new FormData();
+    body.set("id", id);
+    body.set("param", JSON.stringify(param));
+    const response = await fetch(`${context.apiBase}/data-query/action/execute`, {
+      method: "POST", body,
+      headers: { ...credentialHeaders(context.credential), "Accept-Language": context.locale, "X-Requested-With": "XMLHttpRequest" },
+    });
+    if (response.status === 401 || response.status === 402) onAuthFailure(response.status);
+    const result = await response.json().catch(() => null);
+    if (disposed || source !== hostSource(context)) throw stale();
+    if (!response.ok || !result || result.success === false) throw new Error(result?.message || ontologyText(context.messages, "requestFailedStatus", { status: response.status }));
+    return result.data;
+  }
+
+  async function loadViewLinks(className: string, primaryKey: string, relationship: string, direction: "incoming" | "outgoing", offset: number) {
+    const ontology = await loadOntology();
+    const relation = ontology.relations.find(item => item.relationship === relationship);
+    if (!relation || (direction === "outgoing" ? relation.fromclass : relation.toclass) !== className) throw new Error(ontologyText(context.messages, "ovInvalidRelation"));
+    const targetClass = direction === "outgoing" ? relation.toclass : relation.fromclass;
+    const source = ontology.objects.find(item => item.className === className);
+    const target = ontology.objects.find(item => item.className === targetClass);
+    const sourcePk = source?.attrs.find(attr => attr.primaryKey)?.name;
+    const targetPk = target?.attrs.find(attr => attr.primaryKey)?.name;
+    if (!sourcePk || !targetPk || !target) throw new Error(ontologyText(context.messages, "ovPrimaryKeyRequired"));
+    const response = await post("/dsl/executeV1", { problem: "", answer: { steps: [{
+      graph: { pattern_logic: "and", patterns: [{
+        objects: [
+          { idx: 0, variable: "source", class: className, conditions: { properties: { field: sourcePk, operator: "=", value: primaryKey } } },
+          { idx: 1, variable: "target", class: targetClass },
+        ],
+        relationship: [{ from: direction === "outgoing" ? 0 : 1, to: direction === "outgoing" ? 1 : 0, type: [relationship] }],
+      }] },
+      output: { to_user: true, fields: target.attrs.filter(attr => attr.enable !== false).map(attr => ({ variable: "target", field: attr.name, as: attr.name })),
+        sort: { fields: [{ variable: "target", field: targetPk, order: "asc" }] }, limit: { count: 51, offset } },
+    }] } });
+    if (response.error) throw new Error(String(response.error));
+    const result = response.data?.[0]?.answer;
+    if (!Array.isArray(result)) throw new Error(ontologyText(context.messages, "ovUnexpectedResponse"));
+    return { rows: result.slice(0, 50) as Record<string, unknown>[], hasMore: result.length > 50, targetClass, targetPk };
+  }
+
   async function loadSmartAssets(kind: SmartAssetKind) {
     const response = await post(`${smartAssetPaths[kind]}/queryList`, {});
     const source = Array.isArray(response.data)
@@ -415,14 +636,18 @@ export function createManagerClient(
     })) as SmartAsset[];
   }
 
-  /** Visual modeling reads data.dataAdapter (the current adapter type). */
-  function getBusinessConfig() {
-    return send("/businessConfig/getConfig", { method: "GET" });
+  /** The current domain's adapter type and this edition's installed adapters; visual modeling uses the current type's requiresJoinFields to decide whether relations take join fields. */
+  async function listDataAdapters(): Promise<DataAdaptersData> {
+    return (await send("/businessConfig/dataAdapters", { method: "GET" })).data;
   }
 
-  /** Data adapters installed in this edition; visual modeling uses the current type's sql flag to decide whether to show join fields. */
-  function listDataAdapters() {
-    return send("/businessConfig/dataAdapters", { method: "GET" });
+  async function previewAdapterOntology(): Promise<AdapterOntologyPreview> {
+    const response = await send("/businessConfig/adapterOntology", { method: "GET" });
+    return response.data;
+  }
+
+  function importAdapterOntology(preview: AdapterOntologyPreview) {
+    return post("/businessConfig/importAdapterOntology", { ...preview });
   }
 
   /** Business knowledge list: the data engine returns an object keyed by knowledgeID; older entries may have no tags. */
@@ -454,6 +679,27 @@ export function createManagerClient(
   }
 
   return {
+    async loadControlledActions(): Promise<ControlledActionCatalog> {
+      return (await post("/action/controlled/catalog", {})).data;
+    },
+    async prepareControlledAction(actionId: string, objectId: string, values: Record<string, string>): Promise<ControlledActionDecision> {
+      return (await post("/action/controlled/prepare", { actionId, objectId, values })).data;
+    },
+    async executeControlledAction(decisionId: string): Promise<ControlledActionDecision> {
+      return (await post("/action/controlled/execute", { decisionId })).data;
+    },
+    async controlledActionStatus(decisionId: string): Promise<ControlledActionDecision> {
+      return (await post("/action/controlled/status", { decisionId })).data;
+    },
+    objectViewRequest,
+    saveObjectView,
+    executeViewMetric,
+    loadViewSkills,
+    renderViewSkill,
+    viewSkillHtml,
+    executeViewAction,
+    loadViewLinks,
+    loadInstanceGraphStatistics,
     dispose: () => {
       disposed = true;
     },
@@ -471,8 +717,15 @@ export function createManagerClient(
     deleteOntologyRelation,
     loadObjectData,
     loadSmartAssets,
-    getBusinessConfig,
+    loadInstanceGraph,
+    loadInstanceGraphSummary,
+    searchInstanceGraph,
+    loadInstanceNeighborhood,
+    refreshStarChartData,
+    queryInstanceInfo,
     listDataAdapters,
+    previewAdapterOntology,
+    importAdapterOntology,
     listKnowledge,
     saveKnowledge,
     deleteKnowledge,

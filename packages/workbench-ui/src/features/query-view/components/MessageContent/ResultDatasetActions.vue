@@ -1,7 +1,9 @@
 <script setup lang="ts">
 /**
- * The name, row count, and actions of one result dataset: data/DSL download, the dashboard entry,
- * and the on-demand-expanded DSL view, post-calculation program, and field lineage details.
+ * The actions of one result dataset, named when the body does not name it: data/DSL download, the
+ * dashboard entry, and the on-demand-expanded DSL view, post-calculation program, and field lineage
+ * details. A partial dataset shows its one completeness notice here, and its data downloads as JSON
+ * that carries the truncation marker beside the rows, so the saved file stays marked as partial.
  *
  * Download and detail dialogs belong to this component itself; both the standalone body card and
  * the shared execution view that use it get the full set of actions, and the caller only needs to
@@ -19,13 +21,16 @@ import {
   FileText,
   LayoutDashboard,
   List,
+  TriangleAlert,
 } from "lucide-vue-next";
 import ResultDetailDialogs from "./ResultDetailDialogs.vue";
-import { downloadCsvFromData, downloadDsl } from "../../utils/downloadUtils";
+import { downloadCsvFromData, downloadJson } from "../../utils/downloadUtils";
 import type { ResultDataset, ResultDetailRequest } from "./types";
 
 const props = defineProps<{
   dataset: ResultDataset;
+  /** False where the body places this dataset: the body already names it right above. */
+  showTitle: boolean;
   showDashboardAction: boolean;
 }>();
 
@@ -50,18 +55,28 @@ function sanitizeFilename(name: string) {
   return clean || "data";
 }
 
+function downloadFilename() {
+  return sanitizeFilename(props.dataset.subQuestion || props.dataset.title);
+}
+
 function downloadData() {
-  downloadCsvFromData(
-    props.dataset.rows,
-    sanitizeFilename(props.dataset.subQuestion || props.dataset.title)
-  );
+  const { rows, truncated, rowLimit, truncationHint, sourceWindows } = props.dataset;
+  if (sourceWindows?.length) {
+    downloadJson({ answer: rows, sourceWindows, ...(truncated ? { truncated, rowLimit, truncationHint } : {}) }, downloadFilename());
+    return;
+  }
+  if (truncated) {
+    downloadJson(
+      { answer: rows, truncated, rowLimit, truncationHint },
+      `${downloadFilename()} (${t("chat.partialFileSuffix")})`
+    );
+    return;
+  }
+  downloadCsvFromData(rows, downloadFilename());
 }
 
 function downloadDatasetDsl() {
-  downloadDsl(
-    props.dataset.dsl,
-    sanitizeFilename(props.dataset.subQuestion || props.dataset.title)
-  );
+  downloadJson(props.dataset.dsl, downloadFilename());
 }
 
 function openDetail(kind: ResultDetailRequest["kind"]) {
@@ -77,11 +92,19 @@ function openDetail(kind: ResultDetailRequest["kind"]) {
 
 <template>
   <div class="result-dataset">
-    <div class="result-dataset-head">
+    <div v-if="showTitle" class="result-dataset-head">
       <span class="result-dataset-title">{{ dataset.title }}</span>
-      <span class="result-dataset-count">
-        {{ t("analysis.rowCountHint", { n: dataset.rows.length }) }}
-      </span>
+    </div>
+    <div v-for="(window, index) in dataset.sourceWindows || []" :key="index" class="result-dataset-window" role="note">
+      <List :size="14" aria-hidden="true" />
+      <span>{{ t("chat.resultWindow", { total: window.matchingTotal, start: window.returnedRows ? window.offset + 1 : 0, end: window.returnedRows ? window.offset + window.returnedRows : 0 }) }}</span>
+    </div>
+    <div v-if="dataset.truncated" class="result-dataset-partial" role="note">
+      <TriangleAlert :size="14" class="result-dataset-partial-icon" />
+      <div>
+        <div>{{ t("chat.partialResult", { rowLimit: dataset.rowLimit }) }}</div>
+        <div class="result-dataset-partial-hint">{{ dataset.truncationHint }}</div>
+      </div>
     </div>
     <div class="result-dataset-buttons">
       <button
@@ -91,7 +114,7 @@ function openDetail(kind: ResultDetailRequest["kind"]) {
         @click="downloadData"
       >
         <Download :size="14" />
-        <span>{{ t("chat.downloadData") }}</span>
+        <span>{{ dataset.truncated ? t("chat.downloadPartialJson") : t("chat.downloadData") }}</span>
       </button>
       <button
         v-if="hasRows && dataset.dsl"
@@ -164,10 +187,7 @@ function openDetail(kind: ResultDetailRequest["kind"]) {
   border: 1px solid var(--el-border-color-lighter);
 }
 .result-dataset-head {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 6px;
+  margin-bottom: 8px;
   font-size: 12px;
 }
 .result-dataset-title {
@@ -175,21 +195,50 @@ function openDetail(kind: ResultDetailRequest["kind"]) {
   font-weight: 600;
   word-break: break-word;
 }
-.result-dataset-count {
-  color: var(--el-text-color-secondary);
-}
 .result-dataset-buttons,
 .result-dataset-details {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-top: 8px;
 }
 .result-dataset-details {
+  margin-top: 8px;
   padding-top: 8px;
   border-top: 1px dashed var(--el-border-color-lighter);
 }
 .result-dataset-btn {
   font-size: 12px;
+}
+.result-dataset-window {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-bottom: 8px;
+  padding: 7px 9px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: var(--radius-md);
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.result-dataset-window svg { flex-shrink: 0; margin-top: 2px; }
+.result-dataset-partial {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-md);
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.result-dataset-partial-icon {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.result-dataset-partial-hint {
+  color: var(--el-text-color-secondary);
 }
 </style>

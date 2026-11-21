@@ -16,6 +16,9 @@ import { buildChartMarker } from "../report/chart-marker";
 import { applyFieldDisplayPlan } from "../../data-query/adapter";
 import { buildModelDataView } from "../../../utils/model-data-view";
 import { tApp } from "../../../i18n";
+import { combineResultTruncation } from "../../data-query/protocol";
+import { sourceWindowNotice } from "../report/source-window-notice";
+import { partialReportNotice } from "../report/partial-result-notice";
 
 
 const logger = createLogger("report-generator");
@@ -166,7 +169,10 @@ export class ReportGenerator {
       };
 
       logger.info(tApp("analysis.dimension.report-generator.168"));
-      return { report: report as string, provenance };
+      return {
+        report: sourceWindowNotice(evidence) + partialReportNotice(dimensionName, combineResultTruncation(evidence)) + (report as string),
+        provenance,
+      };
     } catch (error) {
       logger.error(tApp("analysis.dimension.report-generator.169"), error);
       throw error;
@@ -210,7 +216,10 @@ export class ReportGenerator {
       };
 
       logger.info(tApp("analysis.dimension.report-generator.172"));
-      return { summary: summary as string, provenance };
+      return {
+        summary: partialReportNotice(originalQuestion, params.truncation) + (summary as string),
+        provenance,
+      };
     } catch (error) {
       logger.error(tApp("analysis.dimension.report-generator.173"), error);
       throw error;
@@ -242,12 +251,12 @@ export class ReportGenerator {
 
         if (e.status === "failed") {
           parts.push(tApp("analysis.dimension.report-generator.175", { value: e.error || tApp("analysis.dimension.report-generator.176") }));
-        } else if (e.data && e.data.length > 0) {
+        } else if ((e.data && e.data.length > 0) || e.truncated) {
           const displayRows = e.fieldDisplayPlan
             ? applyFieldDisplayPlan(e.data, e.fieldDisplayPlan, locale)
             : e.data;
           parts.push(
-            tApp("analysis.dimension.report-generator.177", { value: e.dataCount || e.data.length, value2: e.fieldDisplayPlan ? `fieldDisplayPlan=${JSON.stringify(e.fieldDisplayPlan)}\n` : "", stringify: JSON.stringify(buildModelDataView(displayRows)) })
+            tApp("analysis.dimension.report-generator.177", { value: e.dataCount || e.data.length, value2: e.fieldDisplayPlan ? `fieldDisplayPlan=${JSON.stringify(e.fieldDisplayPlan)}\n` : "", stringify: JSON.stringify(buildModelDataView(displayRows, { truncation: e })) })
           );
         } else if (e.markdownTable) {
           parts.push(tApp("analysis.dimension.report-generator.178", { truncateText: truncateText(e.markdownTable, 1500) }));
@@ -349,6 +358,9 @@ export class ReportGenerator {
       locale,
     } = params;
 
+    const notice = sourceWindowNotice(evidence) + partialReportNotice(dimensionName, combineResultTruncation(evidence));
+    if (notice) yield notice;
+
     const prompt = this.buildDimensionReportPrompt(
       dimensionName,
       dimensionValue,
@@ -389,6 +401,9 @@ export class ReportGenerator {
       charts,
       signal,
     } = params;
+
+    const notice = partialReportNotice(originalQuestion, params.truncation);
+    if (notice) yield notice;
 
     const prompt = this.buildMultiDimensionSummaryPrompt(
       dimensionReports,

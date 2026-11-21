@@ -153,50 +153,6 @@ async function distinctValues(api, backendPath, rest) {
   printData(await requestJson(api, "POST", backendPath, body));
 }
 
-async function importTestData(api, file) {
-  const form = new FormData();
-  form.append("file", new Blob([fs.readFileSync(file)], { type: "application/json" }), path.basename(file));
-  const res = await fetch(`${api.envUrl}/api/data-query/testEnv/importData`, {
-    method: "POST",
-    headers: headers(api),
-    body: form,
-  });
-  await readJson(res);
-  console.log("ok");
-}
-
-async function vectorUpload(api, argv) {
-  const file = takeOption(argv, "--file");
-  const text = takeOption(argv, "--text");
-  if (text == null) die("vector-upload requires --text <content|@file>");
-  if (argv.length !== 3) die("vector-upload requires <class> <attribute> <objectId>");
-  const [className, attrName, objectId] = argv;
-  const content = readInput(text);
-  const form = new FormData();
-  form.append("className", className);
-  form.append("attrName", attrName);
-  form.append("objectId", objectId);
-  form.append("content", content);
-  if (file != null) {
-    const ext = path.extname(file).replace(/^\./, "").toLowerCase();
-    form.append("suffix", ext);
-    form.append("file", new Blob([fs.readFileSync(file)]), path.basename(file));
-  }
-  const res = await fetch(`${api.envUrl}/api/data-query/vectorResource/upload`, {
-    method: "POST",
-    headers: headers(api),
-    body: form,
-  });
-  printData(await readJson(res));
-}
-
-async function vectorDelete(api, argv) {
-  if (argv.length !== 4) die("vector-delete requires <class> <attribute> <objectId> <path>");
-  const [className, attrName, objectId, path] = argv;
-  await requestJson(api, "POST", "/vectorResource/delete", { className, attrName, objectId, path });
-  console.log("ok");
-}
-
 // MetricView (read interface) and Action (write interface) share the same seven endpoints under their own prefix.
 async function assetCommand(api, prefix, argv) {
   const sub = argv[0];
@@ -261,19 +217,40 @@ async function assetCommand(api, prefix, argv) {
   usage();
 }
 
+async function syncProduction(api, rest) {
+  const actionIds = [];
+  for (let v = takeOption(rest, "--action"); v != null; v = takeOption(rest, "--action")) actionIds.push(v);
+  const metricViewIds = [];
+  for (let v = takeOption(rest, "--metric-view"); v != null; v = takeOption(rest, "--metric-view")) metricViewIds.push(v);
+  const confirm = takeFlag(rest, "--confirm");
+  if (rest.length) die(`unknown arguments: ${rest.join(" ")}`);
+  if (actionIds.length === 0 && metricViewIds.length === 0) {
+    die("sync-production requires at least one --action <id> or --metric-view <id>");
+  }
+  const json = await requestJson(api, "POST", "/productionEnv/sync", {
+    actionIds,
+    metricViewIds,
+    dryRun: !confirm,
+  });
+  console.log(JSON.stringify(json, null, 2));
+  if (!confirm) {
+    console.error("DRY RUN ONLY: production was not changed.");
+    console.error("Show this plan to the user and ask for explicit confirmation. Run again with --confirm only after the user approves.");
+    process.exit(2);
+  }
+}
+
 function usage() {
   die(`usage: ontomato.mjs [--lang <tag>] <command>
   dataset-desc
   classes
   schema <class> [<class> ...]
   relationships <class> [<class> ...]
+  env-mode
   import-schema
   prod-distinct-values <class> <attribute> [--like <pattern>] [--limit <n>]
   prod-query <json|@file>
   prod-knowledge [--max <n>] <question>
-  import-test-data <file>
-  vector-upload <class> <attribute> <objectId> [--file <path>] --text <text|@file>
-  vector-delete <class> <attribute> <objectId> <path>
   distinct-values <class> <attribute> [--like <pattern>] [--limit <n>]
   execute-dsl <json|@file>
   metric-view generate [--save] <description>
@@ -283,7 +260,9 @@ function usage() {
   metric-view save <json|@file>
   metric-view delete <id>
   action generate|execute|find|get|save|delete ...   (same arguments as metric-view)
+  action re-explain [--missing] [--id <id> ...]
   action execute <id> [<param json|@file>] [--file <path> ...]
+  sync-production --action <id> [--action <id> ...] --metric-view <id> [--metric-view <id> ...] [--confirm]
   ask <question>`);
 }
 
@@ -307,6 +286,14 @@ async function main() {
     if (classNames.length === 0) die(`${cmd} requires at least one class name`);
     const backendPath = cmd === "schema" ? "/admin/getSchemaByClassName" : "/admin/getRelationshipByClassNames";
     printData(await requestJson(api, "POST", backendPath, { classNames }));
+    return;
+  }
+  if (cmd === "env-mode") {
+    printData(await requestJson(api, "GET", "/testEnv/mode"));
+    return;
+  }
+  if (cmd === "sync-production") {
+    await syncProduction(api, argv.slice(1));
     return;
   }
   if (cmd === "import-schema") {
@@ -333,19 +320,6 @@ async function main() {
     printData(await requestJson(api, "POST", "/productionEnv/queryBusinessKnowledge", body));
     return;
   }
-  if (cmd === "import-test-data") {
-    if (argv[1] == null) die("import-test-data requires a file");
-    await importTestData(api, argv[1]);
-    return;
-  }
-  if (cmd === "vector-upload") {
-    await vectorUpload(api, argv.slice(1));
-    return;
-  }
-  if (cmd === "vector-delete") {
-    await vectorDelete(api, argv.slice(1));
-    return;
-  }
   if (cmd === "distinct-values") {
     await distinctValues(api, "/admin/queryDistinctAttrValue", argv.slice(1));
     return;
@@ -353,6 +327,14 @@ async function main() {
   if (cmd === "execute-dsl") {
     if (argv[1] == null) die("execute-dsl requires a DSL JSON");
     await printDslResult(await send(api, "POST", "/dsl/executeV1", JSON.parse(readInput(argv[1]))));
+    return;
+  }
+  if (cmd === "action" && argv[1] === "re-explain") {
+    const rest = argv.slice(2);
+    const missing = takeFlag(rest, "--missing");
+    const ids = [];
+    for (let v = takeOption(rest, "--id"); v != null; v = takeOption(rest, "--id")) ids.push(v);
+    printData(await requestJson(api, "POST", "/action/re-explain", { ids, missingOnly: missing }));
     return;
   }
   if (cmd === "metric-view") {

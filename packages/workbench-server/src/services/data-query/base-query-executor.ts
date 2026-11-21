@@ -1,9 +1,12 @@
+import { measureStage, startStage } from "../../logging/stage-timing";
 import type { AbcQuestionMode } from "@ontomato/contracts/system-model";
 import type { BranchKey } from "@ontomato/contracts/query-thinking";
+import type { AbcContentEvent } from "@ontomato/contracts/chat";
 import type { QueryBackendSession } from "@ontomato/contracts/query-execution";
 import type { QueryThinkingState, ThinkingStep } from "@ontomato/contracts/query-thinking";
 import { getApiConfig } from "../../config/data-query-api";
 import { getAbcQuestionMode, getQueryTimeoutMs } from "./data-query-policy";
+import { createProgressBudget } from "./progress-budget";
 
 import { tForLocale, tApp } from "../../i18n";
 import { AuthFailedError } from "../../utils/backend-client";
@@ -49,6 +52,7 @@ export type BaseQueryExecutionResult = BaseQueryThinkingResult &
 
 export interface BaseQueryExecutionOptions {
   queryQuestion: string;
+  answerMode?: "answer" | "evidence";
   token: string;
   apiKey: string;
   userId: string;
@@ -104,6 +108,7 @@ export async function executeBaseQuery(
   let lastThinkingSummary = "";
   let lastThinkingStateJson = "";
   let settled = false;
+  let productiveProgress: (key: string) => void = () => {};
 
   const buildThinkingState = (): QueryThinkingState => {
     const state = thinking.snapshot();
@@ -123,6 +128,19 @@ export async function executeBaseQuery(
 
   const thinking = new ThinkingBuffer(enabledBranches, notifyThinking);
 
+  // Body text last put on the wire. Branches run concurrently and each reports its whole body, so
+  // text continuing what was sent goes out as an append, and anything else (first frame, another
+  // branch, rewritten earlier text) as a full replace.
+  let sentContent: string | undefined;
+  const sendContent = (content: string, loading: boolean) => {
+    const event: AbcContentEvent =
+      sentContent !== undefined && content.startsWith(sentContent)
+        ? { type: "abc_content", mode: "append", delta: content.slice(sentContent.length), loading }
+        : { type: "abc_content", mode: "replace", content, loading };
+    sentContent = content;
+    options.onEvent?.({ type: "abc_content", node: "query", content: event, timestamp: Date.now() });
+  };
+
   const isBranchActive = (branch: BranchKey) => {
     const controller = controllers.get(branch);
     return !settled && !!controller && !controller.signal.aborted;
@@ -134,6 +152,8 @@ export async function executeBaseQuery(
 
     return {
       queryQuestion: options.queryQuestion,
+      answerMode: options.answerMode,
+      reportProductiveProgress: (key) => { if (isBranchActive(branch)) productiveProgress(`${branch}:${key}`); },
       token: options.token,
       apiKey: options.apiKey,
       userId: options.userId,
@@ -142,6 +162,9 @@ export async function executeBaseQuery(
       classNames: options.classNames,
       pushEvent: (event) => {
         if (isBranchActive(branch)) options.onEvent?.(event);
+      },
+      pushContent: (content, loading) => {
+        if (isBranchActive(branch)) sendContent(content, loading);
       },
       thinking: thinking.createBranchView(branch),
       signal: controller.signal,
@@ -176,14 +199,15 @@ export async function executeBaseQuery(
     }
   };
 
+  const finishSelection = startStage("query.branch.selection");
   return new Promise<BaseQueryExecutionResult>((resolve) => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let budget: ReturnType<typeof createProgressBudget> | undefined;
     let doneCount = 0;
     let hasAuthFailure = false;
     const branchFailures: Partial<Record<BranchKey, string>> = {};
 
     const cleanup = () => {
-      if (timer) clearTimeout(timer);
+      budget?.dispose();
       options.signal?.removeEventListener("abort", onExternalAbort);
     };
 
@@ -202,6 +226,7 @@ export async function executeBaseQuery(
       settled = true;
       cleanup();
       const winner = "winner" in outcome ? outcome.winner : undefined;
+      finishSelection(options.signal?.aborted ? "cancelled" : winner ? "completed" : "failed", { winner });
       thinking.finish(winner);
       abortBranches(winner);
       const thinkingState = buildThinkingState();
@@ -280,10 +305,11 @@ export async function executeBaseQuery(
     }
 
     options.signal?.addEventListener("abort", onExternalAbort, { once: true });
-    timer = setTimeout(
-      () => stop(tForLocale(options.locale, "api.backendExecutionTimeout")),
-      queryTimeoutMs
-    );
+    const configuredTotal = Number(process.env.QUERY_TOTAL_TIMEOUT_SECONDS) * 1000;
+    budget = createProgressBudget(queryTimeoutMs,
+      Number.isFinite(configuredTotal) && configuredTotal > 0 ? configuredTotal : 1_800_000,
+      () => stop(tForLocale(options.locale, "api.backendExecutionTimeout")));
+    productiveProgress = budget.progress;
 
     logger.debug(tApp("queryFixed.201"), {
       enabledBranches,
@@ -292,7 +318,10 @@ export async function executeBaseQuery(
     });
 
     for (const branch of enabledBranches) {
-      runBranch(branch).then(
+      measureStage(`query.branch.${branch}`, () => runBranch(branch), {
+        signal: controllers.get(branch)?.signal,
+        classify: (output) => output ? output.errors?.length ? "fallback" : "completed" : "empty",
+      }).then(
         (output) => onDone(branch, output),
         (error) => onError(branch, error)
       );

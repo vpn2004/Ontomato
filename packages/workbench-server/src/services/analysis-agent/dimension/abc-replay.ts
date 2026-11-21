@@ -1,5 +1,11 @@
+import type { ResultSourceWindows, SourceResultWindow } from "@ontomato/contracts/result-window";
 import type { OutKeyRef } from "../../data-query/replay-plan";
 import type { QueryExecutionFact } from "../../data-query/query-fact";
+import {
+  answerBodyText,
+  datasetPlacement,
+  type ResultTruncation,
+} from "@ontomato/contracts/query-execution";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -7,7 +13,14 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { normalizeAnswerRows, type Dataset } from "../../data-query/adapter";
-import { parseQueryAnswerPayload } from "../../data-query/protocol";
+import {
+  combineResultTruncation,
+  combineResultSourceWindows,
+  parseResultSourceWindows,
+  parseQueryAnswerPayload,
+  parseResultTruncation,
+  type QueryAnswerPayload,
+} from "../../data-query/protocol";
 import type { HotReportReplayPathBinding, HotReportReplayPlan } from "../../data-query/replay-plan";
 import type { DimensionalizedQuestion } from "./dimension-types";
 import type { AnalysisQueryFact, DimensionQueryResult } from "../runtime/evidence-types";
@@ -23,7 +36,7 @@ import { environment } from "../../../config/environment";
 import { runtimeDataDir } from "../../../content/layout";
 import { backendPost, BackendUnavailableError } from "../../../utils/backend-client";
 import { createLogger } from "../../../logging/logger";
-import { tApp } from "../../../i18n";
+import { t, tApp } from "../../../i18n";
 
 
 const logger = createLogger("abc-replay");
@@ -84,21 +97,22 @@ export interface ExecuteSavedAbcReplayParams extends Omit<ExecuteAbcReplayPlanPa
   >;
 }
 
-type ReplayItem = {
+type ReplayItem = ResultSourceWindows & {
   title: string;
   status: "completed" | "failed" | "skipped";
   rows?: QueryResultRow[];
   dsl?: unknown;
   code?: string;
   error?: string;
+  truncation?: ResultTruncation;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-function answerRows(data: unknown): QueryResultRow[] {
-  return normalizeAnswerRows(parseQueryAnswerPayload(data, tApp("analysis.dimension.abc-replay.31")).answer);
+function answerPayload(data: unknown): QueryAnswerPayload {
+  return parseQueryAnswerPayload(data, tApp("analysis.dimension.abc-replay.31"));
 }
 
 function safeSessionId(sessionId: string | undefined): string {
@@ -155,7 +169,12 @@ export const defaultPythonRunner: PythonRunner = async ({ code, scriptPath, cwd,
   }
 };
 
-function parsePythonAnswer(stdout: string): { rows: QueryResultRow[]; error?: string } {
+function parsePythonAnswer(stdout: string): {
+  rows: QueryResultRow[];
+  truncation?: ResultTruncation;
+  error?: string;
+  sourceWindows?: SourceResultWindow[];
+} {
   const line = stdout
     .split(/\r?\n/)
     .map((item) => item.trim())
@@ -165,25 +184,39 @@ function parsePythonAnswer(stdout: string): { rows: QueryResultRow[]; error?: st
 
   try {
     const parsed = JSON.parse(line);
-    const rows = answerRows(parsed);
+    const payload = answerPayload(parsed);
     const error =
       isRecord(parsed) && typeof parsed.error === "string" && parsed.error
         ? parsed.error
         : undefined;
-    return { rows, error };
+    return {
+      rows: normalizeAnswerRows(payload.answer),
+      truncation: combineResultTruncation([payload]),
+      sourceWindows: payload.sourceWindows,
+      error,
+    };
   } catch {
     return { rows: [], error: tApp("analysis.dimension.abc-replay.35") };
   }
 }
 
-function dataset(title: string, rows: QueryResultRow[], dsl?: unknown): Dataset {
+function dataset(
+  title: string,
+  rows: QueryResultRow[],
+  dsl?: unknown,
+  truncation?: ResultTruncation,
+  sourceWindows?: SourceResultWindow[]
+): Dataset {
   return {
+    id: randomUUID(),
     name: title.replace(/[^\u4e00-\u9fa5a-zA-Z0-9_-]/g, "_").slice(0, 50) || "hot_report",
     description: title,
     columns: [...new Set(rows.flatMap((row) => Object.keys(row)))],
     data: rows,
     dsl,
     subQuestion: title,
+    ...truncation,
+    sourceWindows,
   };
 }
 
@@ -195,21 +228,31 @@ function table(title: string, rows: QueryResultRow[] | undefined, error?: string
 
 function toResult(items: ReplayItem[], plan: HotReportReplayPlan): AbcReplayExecutionResult {
   const completed = items.filter((item) => item.status === "completed" && item.rows);
-  const datasets = completed.map((item) => dataset(item.title, item.rows || [], item.dsl));
+  const datasetByItem = new Map(
+    completed.map((item) => [
+      item,
+      dataset(item.title, item.rows || [], item.dsl, item.truncation, item.sourceWindows),
+    ])
+  );
+  const datasets = [...datasetByItem.values()];
   const errors = items
     .filter((item) => item.status !== "completed" && item.error)
     .map((item) => item.error as string);
-  // Display body and result table are one and the same: a replay result's body is each dataset's title and row-count description.
-  const markdownTable = items
-    .map((item) => `### ${item.title}\n\n${table(item.title, item.rows, item.error)}`)
+  // A replay result's body is each dataset's title and row-count description; the result table is the same text without placements.
+  const fullContent = items
+    .map((item) => {
+      const section = `### ${item.title}\n\n${table(item.title, item.rows, item.error)}`;
+      const itemDataset = datasetByItem.get(item);
+      return itemDataset ? `${section}\n\n${datasetPlacement(itemDataset.id)}` : section;
+    })
     .join("\n\n");
 
   return {
     status: completed.length > 0 ? "completed" : "failed",
     data: buildQueryResultDataFromDatasets(datasets),
     dsl: buildQueryResultDslFromDatasets(datasets),
-    fullContent: markdownTable,
-    markdownTable,
+    fullContent,
+    markdownTable: answerBodyText(fullContent),
     datasets,
     datasetPreviews: completed.map((item) => ({
       title: item.title,
@@ -329,20 +372,27 @@ function mergeDirectDslReplayResults(
     datasets.length > 0
       ? datasets.reduce((sum, dataset) => sum + (dataset.data?.length || 0), 0)
       : completedResults.reduce((sum, result) => sum + getQueryResultDataCount(result.data), 0);
-  const markdownTable =
+  // Each result's own datasets are placed right after its table, keeping the ids they were created with.
+  const withPlacements = (result: DimensionQueryResult, section: string) =>
+    result.status === "completed"
+      ? [section, ...(result.datasets || []).map((item) => datasetPlacement(item.id))].join("\n\n")
+      : section;
+  const fullContent =
     results.length > 1
       ? buildDirectDslDatasetPreviews(results)
-          .map((preview) => `### ${preview.title}\n\n${preview.markdownTable}`)
+          .map((preview, index) =>
+            withPlacements(results[index]!, `### ${preview.title}\n\n${preview.markdownTable}`)
+          )
           .join("\n\n")
-      : completedResults[0]?.markdownTable || "";
+      : withPlacements(completedResults[0]!, completedResults[0]!.markdownTable || "");
 
   return {
     status: "completed",
     data,
     dsl,
-    // Display body and result table are one and the same.
-    fullContent: markdownTable,
-    markdownTable,
+    // The result table is the body without placements.
+    fullContent,
+    markdownTable: answerBodyText(fullContent),
     datasets,
     datasetPreviews,
     abcSubQuestions,
@@ -439,6 +489,10 @@ export async function executeAbcProgram(params: {
     const rawData = Array.isArray((payload as Record<string, unknown>).data)
       ? ((payload as Record<string, unknown>).data as Record<string, unknown>[])
       : [];
+    const truncation = parseResultTruncation(
+      payload as Record<string, unknown>,
+      ABC_PROGRAM_EXECUTE_ENDPOINT
+    );
 
     baseResult.status = "completed";
     baseResult.data = rawData;
@@ -446,6 +500,7 @@ export async function executeAbcProgram(params: {
 
     const columns = rawData.length > 0 ? Object.keys(rawData[0]) : [];
     const dataset: Dataset = {
+      id: randomUUID(),
       name:
         subQuestion.replace(/[^\u4e00-\u9fa5a-zA-Z0-9_-]/g, "_").slice(0, 50) ||
         "abc_program_result",
@@ -453,6 +508,8 @@ export async function executeAbcProgram(params: {
       columns,
       data: rawData,
       subQuestion,
+      ...truncation,
+      sourceWindows: parseResultSourceWindows(payload as Record<string, unknown>),
     };
     baseResult.datasets = [dataset];
     baseResult.abcCodes = [code];
@@ -469,7 +526,9 @@ export async function executeAbcProgram(params: {
         baseResult.markdownTable = `${headerRow}\n${separatorRow}\n${dataRows}`;
     } else {
       // Display body and result table are one and the same.
-      baseResult.fullContent = baseResult.markdownTable = tApp("analysis.dimension.abc-replay.45", { subQuestion: subQuestion });
+      baseResult.fullContent = baseResult.markdownTable = truncation
+        ? `_${subQuestion}_\n\n${t("query.display.emptyPartial")}`
+        : tApp("analysis.dimension.abc-replay.45", { subQuestion: subQuestion });
     }
 
     return baseResult;
@@ -591,6 +650,8 @@ export async function executeAbcReplayPlan({
 
   const items: ReplayItem[] = [];
   const localPathByIndex = new Map<number, string>();
+  const truncationByIndex = new Map<number, ResultTruncation>();
+  const windowsByIndex = new Map<number, SourceResultWindow[]>();
 
   for (const step of plan.steps) {
     if (!step.dsl) continue;
@@ -617,8 +678,11 @@ export async function executeAbcReplayPlan({
       signal,
     });
     const rows = result.status === "completed" ? flattenQueryResultData(result.data) : [];
+    const truncation =
+      result.status === "completed" ? combineResultTruncation(result.datasets || []) : undefined;
 
-    if (rows.length === 0) {
+    // Zero rows of a partial result are not "no data": the step completes and stays marked.
+    if (rows.length === 0 && !truncation) {
       items.push({
         title,
         status: "failed",
@@ -632,7 +696,10 @@ export async function executeAbcReplayPlan({
       step.index,
       await writeAnswerFile(replayDir, plan.sessionId, step.index, rows)
     );
-    items.push({ title, status: "completed", rows, dsl: step.dsl });
+    if (truncation) truncationByIndex.set(step.index, truncation);
+    const sourceWindows = combineResultSourceWindows(result.datasets || []);
+    windowsByIndex.set(step.index, sourceWindows);
+    items.push({ title, status: "completed", rows, dsl: step.dsl, truncation, sourceWindows });
   }
 
   for (const afterCalculation of plan.afterCalculations) {
@@ -676,11 +743,19 @@ export async function executeAbcReplayPlan({
     }
 
     const parsed = parsePythonAnswer(py.stdout);
-    if (parsed.error || parsed.rows.length === 0) {
+    // An after-calculation over a partial input is partial too, however few rows it outputs.
+    const truncation = combineResultTruncation(
+      [
+        ...afterCalculation.dependencySubQueryIndexes.map((index) => truncationByIndex.get(index)),
+        parsed.truncation,
+      ].filter((marker): marker is ResultTruncation => marker !== undefined)
+    );
+    if (parsed.error || (parsed.rows.length === 0 && !truncation)) {
       items.push({ title, status: "failed", error: parsed.error || tApp("analysis.dimension.abc-replay.57") });
       continue;
     }
-    items.push({ title, status: "completed", rows: parsed.rows, code: rewritten.code });
+    const sourceWindows = [...afterCalculation.dependencySubQueryIndexes.flatMap(index => windowsByIndex.get(index) || []), ...(parsed.sourceWindows || [])];
+    items.push({ title, status: "completed", rows: parsed.rows, code: rewritten.code, truncation, sourceWindows });
   }
 
   return toResult(items, plan);

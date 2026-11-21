@@ -4,26 +4,35 @@ import { buildJavaApp, JAVA_FLAGS, parseJavaArgs } from "../../scripts/data-engi
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)));
 const repoRoot = resolve(appRoot, "../..");
-// Every public adapter module is in the reactor (the root pom lists them all); this app installs postgresql only.
-const PUBLIC_ADAPTERS = ["postgresql", "mysql", "oracle", "sqlserver", "db2", "gaussdb", "duckdb"];
+// Every public adapter module is in the reactor (the root pom lists them all); this app installs every entry of PUBLIC_ADAPTERS below.
+const PUBLIC_ADAPTERS = ["postgresql", "onn-core", "mysql", "sqlserver", "gaussdb", "duckdb", "clickhouse", "neo4j", "arangodb", "elasticsearch", "mongodb"];
 const HELP =
-  "Use make data-engine [ARCH=amd64|arm64] [PROMPT_LANG=en], make data-engine-app, make pack-data-engine, or make pack-data-engine-app.\ndata-engine-app and pack-data-engine-app compare the sources with the runtime lock and never build a runtime.";
+  "Use make data-engine [ARCH=amd64|arm64] [PROMPT_LANG=en].\nBuilds the final datarag-opensource image, which runs as it is.";
 
 export const app = {
   repoRoot,
-  lockRoot: appRoot,
-  lockExclude: "apps/data-engine/runtime-lock.json",
   versionPom: resolve(repoRoot, "pom.xml"),
   sources: [{ id: "ontomato", root: repoRoot }],
   component: "datarag-opensource",
-  family: "java-app",
-  interfaceVersion: 3,
   promptLang: "en",
   supportedPromptLangs: ["en"],
   reactorDir: "ontomato",
   appModule: "apps/data-engine",
-  appLibModules: ["packages/data-engine-core", "packages/data-adapters/postgresql", "apps/data-engine"],
-  excludeArtifactIds: "data-engine-core,data-adapter-postgresql,data-engine-app",
+  appLibModules: [
+    "packages/data-engine-core",
+    "packages/data-adapters/postgresql",
+    "packages/data-adapters/onn-core",
+    "packages/data-adapters/mysql",
+    "packages/data-adapters/sqlserver",
+    "packages/data-adapters/duckdb",
+    "packages/data-adapters/clickhouse",
+    "packages/data-adapters/neo4j",
+    "packages/data-adapters/arangodb",
+    "packages/data-adapters/elasticsearch",
+    "packages/data-adapters/mongodb",
+    "apps/data-engine",
+  ],
+  excludeArtifactIds: "data-engine-core,data-adapter-postgresql,data-adapter-onn-core,data-adapter-mysql,data-adapter-sqlserver,data-adapter-duckdb,data-adapter-clickhouse,data-adapter-neo4j,data-adapter-arangodb,data-adapter-elasticsearch,data-adapter-mongodb,data-engine-app",
   contextTrees: [
     {
       dest: "ontomato",
@@ -35,31 +44,31 @@ export const app = {
         ".mvn",
         "packages/data-engine-core/pom.xml",
         "packages/data-engine-core/src/main",
+        // Every adapter depends on the shared contract tests in test scope, so Maven resolves it even with tests skipped.
+        "packages/data-adapter-test-support/pom.xml",
+        "packages/data-adapter-test-support/src/main",
         ...PUBLIC_ADAPTERS.flatMap((type) => [`packages/data-adapters/${type}/pom.xml`, `packages/data-adapters/${type}/src/main`]),
         "apps/data-engine/pom.xml",
         "apps/data-engine/src/main",
       ],
     },
   ],
-  // Central export: no settings, native library, license profile or artifact check.
+  // No private export inputs: this component consumes the recipe's central export.
   secretExport: null,
   requirements: { root: repoRoot, path: "packages/data-engine-core/requirements-py310.txt" },
   mcp: { root: repoRoot, path: "packages/data-engine-core/mcp/mcpserver.py" },
+  // Product startup files ride the payload at their fixed /app layout.
   bin: [
-    [repoRoot, "scripts/data-engine/container-entrypoint.sh", "bin/container-entrypoint.sh"],
-    [repoRoot, "scripts/data-engine/runtime-contract.py", "bin/runtime-contract.py"],
-    [repoRoot, "scripts/data-engine/sync-product-files.py", "bin/sync-product-files.py"],
+    [repoRoot, "scripts/data-engine/container-entrypoint.sh", "payload/bin/container-entrypoint.sh"],
+    [repoRoot, "scripts/data-engine/sync-product-files.py", "payload/bin/sync-product-files.py"],
   ],
-  pairContract: "/opt/datarag/bin/runtime-contract.py",
-  runtimeTarget: "runtime",
   resources: [
     [repoRoot, "packages/data-engine-core/conf-defaults", "payload/conf-defaults"],
     [repoRoot, "packages/data-engine-core/skills", "payload/skills"],
   ],
   requiredSkill: "payload/skills/aftercalculate/trend-forecaster/SKILL.md",
-  payloadFiles: {},
-  appLabels: {},
-  appTagSuffix: "",
+  labels: {},
+  tagSuffix: "",
 };
 
 async function main(args) {

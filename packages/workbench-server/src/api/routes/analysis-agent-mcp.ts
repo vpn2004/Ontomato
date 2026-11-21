@@ -86,7 +86,10 @@ function createAnalysisAgentMcpServer(req: Request) {
     },
     async ({ taskId }) =>
       withMcpIdentity(req, async (identity) => {
-        const task = await getAnalysisTaskService().getTask(taskId, identity.domainId);
+        const task = await getAnalysisTaskService().getTask(taskId, identity.domainId, {
+          payload: "report",
+          runs: "none",
+        });
         if (
           !task ||
           !requireOwner(task.userId, identity.userId) ||
@@ -111,7 +114,10 @@ function createAnalysisAgentMcpServer(req: Request) {
     },
     async ({ taskId }) =>
       withMcpIdentity(req, async (identity) => {
-        const task = await getAnalysisTaskService().getTask(taskId, identity.domainId);
+        const task = await getAnalysisTaskService().getTask(taskId, identity.domainId, {
+          payload: "report",
+          runs: "none",
+        });
         if (
           !task ||
           !requireOwner(task.userId, identity.userId) ||
@@ -172,6 +178,8 @@ function createAnalysisAgentMcpServer(req: Request) {
         const taskService = getAnalysisTaskService();
         const task = await taskService.createTask({
           reportDeliverableEnabled: agent.reportDeliverableEnabled,
+          graphScopeSnapshot: agent.graphScope,
+          classNamesSnapshot: agent.classNames,
           agentId: normalizedAgentId,
           userId: identity.userId,
           domainId: identity.domainId,
@@ -188,7 +196,7 @@ function createAnalysisAgentMcpServer(req: Request) {
             task.id,
             identity.domainId,
             normalizedQuestion,
-            { token: identity.token, apiKey: identity.apiKey }
+            { token: identity.token, apiKey: identity.apiKey, userName: identity.userName }
           );
           if (requestSeq === null) {
             return textJson({ success: false, error: "Analysis session is already running" });
@@ -238,4 +246,3 @@ export async function getAnalysisAgentMcpToolCatalog() {
 }
 
 export default createStreamableMcpRouter(createAnalysisAgentMcpServer, logger);
-

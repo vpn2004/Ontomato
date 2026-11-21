@@ -23,6 +23,8 @@ export interface AgentLoopHooks {
    * for their own prompt refresh. Context compaction is not a hook.
    */
   beforeTurn?: (state: AgentState) => Promise<void>;
+  /** A task owner may reject premature completion with specific, persisted feedback. */
+  onStop?: (state: AgentState) => Promise<string | undefined>;
   /** Present for every production agent. Persistence and the 80% check run inside the loop. */
   session?: HarnessRun;
 }
@@ -157,6 +159,17 @@ export async function runAgentLoop(
           message: assistantMsg,
           toolResults: [],
         });
+        if (toolCalls.length === 0 && assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "aborted" && !signal?.aborted) {
+          const feedback = await hooks?.onStop?.(state);
+          if (feedback) {
+            const correction: AgentMessage = { role: "user", content: [{ type: "text", text: feedback }], timestamp: Date.now() };
+            state.messages.push(correction);
+            newMessages.push(correction);
+            if (session) seqs.push(await session.journal.appendMessage(correction));
+            emit({ type: "turn_start" });
+            continue;
+          }
+        }
         break;
       }
 

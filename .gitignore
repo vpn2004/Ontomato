@@ -12,7 +12,7 @@ __pycache__/
 # Workbench runtime data (apps/workbench uses the repository root as its product runtime root)
 /data/
 # Java data engine local development: the runtime data root and the MCP/skill Python
-# environment (apps/data-engine/.env is ignored by the .env rules above)
+# environment (.env is ignored by the .env rules above)
 apps/data-engine/.dev/
 apps/data-engine/.venv/
 packages/data-engine-core/.classpath

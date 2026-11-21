@@ -1,6 +1,6 @@
 import { tApp } from "../../i18n";
 import type { AbcQuestionMode } from "@ontomato/contracts/system-model";
-import type { QcStepEvent, QcResult } from "@ontomato/contracts/query-thinking";
+import type { QcStepEvent, QcResult, QcPhaseEvent } from "@ontomato/contracts/query-thinking";
 import { getApiConfig, buildHeaders, buildUrl } from "../../config/data-query-api";
 import { streamBackendSSE } from "./sse-transport";
 
@@ -17,6 +17,7 @@ export interface StreamSelfCheckOptions {
   abcQuestionMode: AbcQuestionMode;
   signal?: AbortSignal;
   onStep?: (step: QcStepEvent) => void;
+  onPhase?: (phase: QcPhaseEvent) => void;
   onFinish?: (result: QcResult) => void;
   onError?: (error: Error) => void;
 }
@@ -45,7 +46,14 @@ export async function streamSelfCheckSSE(
   const result: QcResult = { steps: [] };
 
   const consumeEvent = (parsed: any) => {
+    if (signal?.aborted || finishedPushed) return;
     if (!parsed || typeof parsed !== "object") return;
+    if (parsed.error) throw new Error(String(parsed.error));
+    if ((parsed.phase === "describing" || parsed.phase === "assessing") &&
+        Number.isSafeInteger(parsed.completedPrograms) && Number.isSafeInteger(parsed.totalPrograms) &&
+        parsed.completedPrograms >= 0 && parsed.totalPrograms >= parsed.completedPrograms) {
+      options.onPhase?.({ phase: parsed.phase, completedPrograms: parsed.completedPrograms, totalPrograms: parsed.totalPrograms });
+    }
 
     // Step events
     const hasSummary = typeof parsed.summary === "string" && parsed.summary.trim().length > 0;
@@ -54,6 +62,7 @@ export async function streamSelfCheckSSE(
     if (hasSummary || hasMeaning) {
       sawAnyStep = true;
       const step: QcStepEvent = {};
+      if (typeof parsed.label === "string") step.label = parsed.label;
       if (hasSummary) step.summary = parsed.summary.trim();
       if (hasMeaning) step.meaning = parsed.meaning.trim();
       result.steps.push(step);
@@ -63,15 +72,16 @@ export async function streamSelfCheckSSE(
     // Conclusion events
     const hasConclusion =
       typeof parsed.conclusion === "string" && parsed.conclusion.trim().length > 0;
-    const hasScore = typeof parsed.score !== "undefined" && parsed.score !== null;
+    const score = typeof parsed.score === "number" || (typeof parsed.score === "string" && parsed.score.trim())
+      ? Number(parsed.score) : NaN;
+    const hasScore = Number.isFinite(score) && score >= 0 && score <= 100;
     const hasFittedQuestion =
       typeof parsed.fittedQuestion === "string" && parsed.fittedQuestion.trim().length > 0;
 
-    if (hasConclusion || hasScore || hasFittedQuestion) {
-      if (hasScore) result.score = Number(parsed.score);
-      if (hasFittedQuestion) result.fittedQuestion = String(parsed.fittedQuestion).trim();
-      if (hasConclusion) result.conclusion = String(parsed.conclusion).trim();
-
+    if (hasScore) result.score = score;
+    if (hasFittedQuestion) result.fittedQuestion = String(parsed.fittedQuestion).trim();
+    if (hasConclusion) result.conclusion = String(parsed.conclusion).trim();
+    if (result.conclusion && result.score !== undefined && result.fittedQuestion) {
       finishedPushed = true;
       onFinish?.(result);
     }
@@ -97,6 +107,7 @@ export async function streamSelfCheckSSE(
     const error = err instanceof Error ? err : new Error(String(err));
     logger.error(opened ? tApp("queryFixed.268") : tApp("queryFixed.269"), error);
     onError?.(error);
+    return null;
   }
 
   // Has progress but no conclusion
@@ -104,5 +115,5 @@ export async function streamSelfCheckSSE(
     logger.warn(tApp("queryFixed.270"));
   }
 
-  return opened ? result : null;
+  return finishedPushed ? result : null;
 }

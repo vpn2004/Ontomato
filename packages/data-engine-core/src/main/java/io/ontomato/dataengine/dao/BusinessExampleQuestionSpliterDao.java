@@ -9,6 +9,7 @@ import org.springframework.stereotype.Component;
 
 import com.pgvector.PGvector;
 import io.ontomato.dataengine.service.ai.EmbeddingService;
+import io.ontomato.dataengine.service.vector.VectorRetrievalGate;
 
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.model.output.Response;
@@ -24,6 +25,9 @@ public class BusinessExampleQuestionSpliterDao extends BaseDao {
 
 	@Autowired
 	private EmbeddingService embeddingService;
+
+	@Autowired
+	private VectorRetrievalGate retrievalGate;
 
 	private static final String TABLE_NAME = "business_example_question_spliter";
 
@@ -45,20 +49,14 @@ public class BusinessExampleQuestionSpliterDao extends BaseDao {
 						+ "create_timestamp BIGINT, "
 						+ "modify_timestamp BIGINT, "
 						+ "domain_id VARCHAR(64), "
-						+ "example_vector vector(" + embeddingModelProperties.getDimensions() + ")"
+						+ "example_vector vector"
 						+ ")");
 		jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_" + TABLE_NAME + "_domain_id ON " + TABLE_NAME + "(domain_id)");
 	}
 
 	public void insertBussinessExample(BusinessExampleQuestionSpliterEntity bussinessExampleEntity, String domainId) {
 		String exampleID = bussinessExampleEntity.getId();
-		StringBuilder sbBussinessExampleText = new StringBuilder();
-		sbBussinessExampleText.append("Question: ").append(bussinessExampleEntity.getQuestion()).append("\n");
-		sbBussinessExampleText.append("Business logic: ").append(bussinessExampleEntity.getContent()).append("\n");
-
-		Response<Embedding> embeddingResponse = embeddingService.embedding(sbBussinessExampleText.toString(), domainId);
-		float[] embededVector = embeddingResponse.content().vector();
-		PGvector pgVector = new PGvector(embededVector);
+		String embeddedText = embeddingText(bussinessExampleEntity.getQuestion(), bussinessExampleEntity.getContent());
 
 		if (bussinessExampleEntity.getCreateTimestamp() == null) {
 			bussinessExampleEntity.setCreateTimestamp(System.currentTimeMillis());
@@ -67,7 +65,9 @@ public class BusinessExampleQuestionSpliterDao extends BaseDao {
 			bussinessExampleEntity.setModifyTimestamp(System.currentTimeMillis());
 		}
 
-		jdbcTemplate.update(
+		retrievalGate.write(domainId, () -> {
+			PGvector pgVector = new PGvector(embeddingService.embedding(embeddedText, domainId).content().vector());
+			return jdbcTemplate.update(
 				"INSERT INTO " + TABLE_NAME + " (" + COLUMNS + ", example_vector) VALUES (?, ?, ?, ?, ?, ?, ?, ?::vector) "
 						+ "ON CONFLICT (id) DO UPDATE SET question = EXCLUDED.question, content = EXCLUDED.content, "
 						+ "status = EXCLUDED.status, create_timestamp = EXCLUDED.create_timestamp, "
@@ -76,13 +76,56 @@ public class BusinessExampleQuestionSpliterDao extends BaseDao {
 				exampleID, bussinessExampleEntity.getQuestion(), bussinessExampleEntity.getContent(),
 				bussinessExampleEntity.getStatus(), bussinessExampleEntity.getCreateTimestamp(),
 				bussinessExampleEntity.getModifyTimestamp(), domainId, pgVector);
+		});
 	}
 
 	public void deleteKnowledge(String exampleID) {
 		jdbcTemplate.update("DELETE FROM " + TABLE_NAME + " WHERE id = ?", exampleID);
 	}
 
+	/** The single source of the embedded text, shared by the write path and the vector rebuild. */
+	private static String embeddingText(String question, String content) {
+		StringBuilder sbBussinessExampleText = new StringBuilder();
+		sbBussinessExampleText.append("Question: ").append(question).append("\n");
+		sbBussinessExampleText.append("Business logic: ").append(content).append("\n");
+		return sbBussinessExampleText.toString();
+	}
+
+	public int countDomainRows(String domainId) {
+		return jdbcTemplate.queryForObject(
+				"SELECT COUNT(*) FROM " + TABLE_NAME + " WHERE domain_id = ?", Integer.class, domainId);
+	}
+
+	public int countDomainPending(String domainId) {
+		return jdbcTemplate.queryForObject(
+				"SELECT COUNT(*) FROM " + TABLE_NAME + " WHERE domain_id = ? AND example_vector IS NULL",
+				Integer.class, domainId);
+	}
+
+	public List<VectorRebuildItem> listDomainPending(String domainId) {
+		return jdbcTemplate.query(
+				"SELECT id, question, content FROM " + TABLE_NAME + " WHERE domain_id = ? AND example_vector IS NULL",
+				(rs, rowNum) -> new VectorRebuildItem(rs.getString("id"),
+						embeddingText(rs.getString("question"), rs.getString("content"))),
+				domainId);
+	}
+
+	public void clearDomainVectors(String domainId) {
+		jdbcTemplate.update("UPDATE " + TABLE_NAME + " SET example_vector = NULL WHERE domain_id = ?", domainId);
+	}
+
+	/** Fill a pending row only: a row written meanwhile keeps the vector of its newer content. */
+	public void fillDomainVector(String exampleId, float[] vector) {
+		jdbcTemplate.update("UPDATE " + TABLE_NAME + " SET example_vector = ?::vector WHERE id = ? AND example_vector IS NULL",
+				new PGvector(vector), exampleId);
+	}
+
 	public List<BusinessExampleQuestionSpliterEntity> findBussinessExample(String question, int maxResult, String domainId) {
+		return retrievalGate.read(domainId, () -> searchBussinessExample(question, maxResult, domainId));
+	}
+
+	/** Runs inside the read boundary: the query vector and the rows belong to one generation. */
+	private List<BusinessExampleQuestionSpliterEntity> searchBussinessExample(String question, int maxResult, String domainId) {
 		List<BusinessExampleQuestionSpliterEntity> bussinessExampleEntities = new ArrayList<>();
 		float[] findVector = null;
 		String queryString = "";
@@ -91,7 +134,7 @@ public class BusinessExampleQuestionSpliterDao extends BaseDao {
 			findVector = embeddingResponse.content().vector();
 
 			queryString = "SELECT " + COLUMNS + " FROM " + TABLE_NAME
-					+ " WHERE status = 1 AND domain_id = ? ORDER BY example_vector <-> ?::vector LIMIT ?";
+					+ " WHERE status = 1 AND domain_id = ? AND example_vector IS NOT NULL ORDER BY example_vector <-> ?::vector LIMIT ?";
 			PGvector pgVector = new PGvector(findVector);
 
 			bussinessExampleEntities = jdbcTemplate.query(queryString,

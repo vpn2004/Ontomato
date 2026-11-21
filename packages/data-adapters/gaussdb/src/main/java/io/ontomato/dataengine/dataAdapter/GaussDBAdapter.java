@@ -5,7 +5,14 @@ import java.sql.Date;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
+import java.sql.SQLException;
 import java.sql.Timestamp;
+import java.sql.Types;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.OffsetDateTime;
+import java.time.format.DateTimeFormatter;
 import java.text.SimpleDateFormat;
 import org.springframework.jdbc.datasource.SimpleDriverDataSource;
 import java.util.ArrayList;
@@ -22,7 +29,6 @@ import com.alibaba.fastjson2.JSONWriter.Feature;
 import io.ontomato.dataengine.config.DataRagConfig;
 import io.ontomato.dataengine.dao.VectorResourceDao;
 import io.ontomato.dataengine.util.DslUtil;
-import io.ontomato.dataengine.util.HttpRequestUtil.M3Mode;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -38,22 +44,39 @@ public class GaussDBAdapter implements DataAdapter {
 	}
 
 	@Override
-	public String executeDsl(String queryJson, String sessionId, M3Mode m3Mode, List<String> generatedMqls) throws Exception {
-		log.info("[" + sessionId + "] DSL to query GaussDB: " + queryJson);
+	public Connection openConnection() throws SQLException {
+		return createDataSource(connection).getConnection();
+	}
+
+	@Override
+	public String executeDsl(String queryJson, String sessionId, DslExecutionMode mode, List<String> generatedMqls) throws Exception {
+		log.debug("[{}] DSL to query GaussDB: {}", sessionId, queryJson);
 		JSONArray dsls = JSONArray.parseArray(queryJson);
-		String sql = toSql(dsls.getJSONObject(0), jsonRule);
+		DslRowLimit.Tracker rowLimit = new DslRowLimit.Tracker();
+		String sql = toSql(dsls.getJSONObject(0), jsonRule, rowLimit);
 		generatedMqls.add(sql);
-		log.info("[" + sessionId + "] Converted GaussDB sql: " + sql);
-		JSONArray data = executeSql(connection, sql);
+		log.debug("[{}] Converted GaussDB sql: {}", sessionId, sql);
+		JSONArray data = executeSql(sql);
+		boolean truncated = rowLimit.defaulted() && data.size() > rowLimit.effectiveLimit();
+		if (truncated) {
+			data.remove(rowLimit.effectiveLimit()); // drop the truncation probe row
+		}
 		JSONArray answers = new JSONArray();
 		JSONObject answer = new JSONObject();
 		answer.put("answer", data);
 		answer.put("mqls", generatedMqls);
+		if (truncated) {
+			answer.put(DslRowLimit.TRUNCATED, true);
+			answer.put(DslRowLimit.ROW_LIMIT, rowLimit.effectiveLimit());
+			answer.put(DslRowLimit.TRUNCATION_HINT, DslRowLimit.truncationHint(rowLimit.effectiveLimit()));
+			log.warn("[" + sessionId + "] DSL result truncated at the default row limit of "
+					+ rowLimit.effectiveLimit());
+		}
 		answers.add(answer);
 		return JSON.toJSONString(answers, Feature.WriteMapNullValue);
 	}
 
-	private String toSql(JSONObject dsl, Map<String, Object> jsonRule) throws Exception {
+	private String toSql(JSONObject dsl, Map<String, Object> jsonRule, DslRowLimit.Tracker rowLimit) throws Exception {
 		try {
 			@SuppressWarnings("unchecked")
 			List<Map<String, Object>> classDefs = (List<Map<String, Object>>) jsonRule.get("classDef");
@@ -86,6 +109,12 @@ public class GaussDBAdapter implements DataAdapter {
 				String objWhere = "";
 				if (object.getJSONObject("conditions") != null) {
 					JSONObject conditions = object.getJSONObject("conditions");
+						if (conditions.getJSONObject("timeseries") != null) {
+							throw new DslContractViolationException(
+									DslContractViolationException.Code.UNSUPPORTED_CONSTRUCT,
+									"conditions.timeseries",
+									"the timeseries condition is not implemented by " + getClass().getSimpleName());
+						}
 					if (conditions.getJSONObject("properties") != null) {
 						JSONObject properties = conditions.getJSONObject("properties");
 						List<Object[]> queue = new ArrayList<>();
@@ -124,6 +153,13 @@ public class GaussDBAdapter implements DataAdapter {
 								newQueue.add(new Object[] { null, ")" });
 								newQueue.addAll(queue);
 								queue = newQueue;
+							} else if (cond.getJSONArray("not") != null && cond.getJSONArray("not").size() > 0) {
+								objWhere += "(not (";
+								List<Object[]> newQueue = new ArrayList<>();
+								newQueue.add(new Object[] { DslGrammarValidator.negated(cond), null });
+								newQueue.add(new Object[] { null, "))" });
+								newQueue.addAll(queue);
+								queue = newQueue;
 							} else {
 								String attr = cond.getString("field");
 								String type = attrTypeMap.get(attr);
@@ -138,7 +174,12 @@ public class GaussDBAdapter implements DataAdapter {
 												+ " " + cond.get("value");
 									} else if ("date".equals(type) || "timestamp".equals(type)) {
 										sqlCond = "\"" + alias + "\".\"" + attr + "\" " + cond.getString("operator")
-												+ " TO_TIMESTAMP(" + cond.getLong("value") + ")";
+												+ " " + timeLiteral(cond.get("value"));
+									}
+								} else if ("like".equals(cond.getString("operator")) && LikePattern.escaped(cond)) {
+									if ("varchar".equals(type)) {
+										String pattern = LikePattern.of(cond, true).sql("").replace("'", "''");
+										sqlCond = "\"" + alias + "\".\"" + attr + "\"" + " like '" + pattern + "' escape '!'";
 									}
 								} else if ("like".equals(cond.getString("operator"))
 										|| "not like".equals(cond.getString("operator"))) {
@@ -159,7 +200,7 @@ public class GaussDBAdapter implements DataAdapter {
 												+ " " + cond.get("value");
 									} else if ("date".equals(type) || "timestamp".equals(type)) {
 										sqlCond = "\"" + alias + "\".\"" + attr + "\" " + cond.getString("operator")
-												+ " TO_TIMESTAMP(" + cond.getLong("value") + ")";
+												+ " " + timeLiteral(cond.get("value"));
 									}
 								} else if ("between".equals(cond.getString("operator"))) {
 									JSONArray value = cond.getJSONArray("value");
@@ -167,9 +208,9 @@ public class GaussDBAdapter implements DataAdapter {
 										sqlCond = "(\"" + alias + "\".\"" + attr + "\" >= " + value.get(0)
 												+ " and \"" + alias + "\".\"" + attr + "\" <= " + value.get(1) + ")";
 									} else if ("date".equals(type) || "timestamp".equals(type)) {
-										sqlCond = "(\"" + alias + "\".\"" + attr + "\" >= TO_TIMESTAMP("
-												+ value.getLong(0) + ") and \"" + alias + "\".\"" + attr
-												+ "\" <= TO_TIMESTAMP(" + value.getLong(1) + "))";
+										sqlCond = "(\"" + alias + "\".\"" + attr + "\" >= " + timeLiteral(value.get(0))
+												+ " and \"" + alias + "\".\"" + attr
+												+ "\" <= " + timeLiteral(value.get(1)) + ")";
 									}
 								} else if ("in".equals(cond.getString("operator"))) {
 									JSONArray value = cond.getJSONArray("value");
@@ -190,7 +231,7 @@ public class GaussDBAdapter implements DataAdapter {
 									} else if ("date".equals(type) || "timestamp".equals(type)) {
 										String in = "";
 										for (int j = 0; j < value.size(); j++) {
-											in += "TO_TIMESTAMP(" + value.getLong(j) + "),";
+											in += timeLiteral(value.get(j)) + ",";
 										}
 										in = "(" + in.substring(0, in.length() - 1) + ")";
 										sqlCond = "\"" + alias + "\".\"" + attr + "\" in " + in;
@@ -199,9 +240,15 @@ public class GaussDBAdapter implements DataAdapter {
 										|| "is not".equals(cond.getString("operator"))) {
 									sqlCond = "\"" + alias + "\".\"" + attr + "\" " + cond.getString("operator") + " null";
 								}
-								if (sqlCond != null) {
-									objWhere += sqlCond;
+								if (sqlCond == null) {
+									throw new DslContractViolationException(
+											DslContractViolationException.Code.UNSUPPORTED_OPERATOR_FOR_TYPE,
+											"conditions.properties",
+											"operator '" + cond.getString("operator") + "' on field '" + attr
+													+ "' of type '" + type + "' is not supported by "
+													+ getClass().getSimpleName());
 								}
+								objWhere += sqlCond;
 							}
 						}
 					}
@@ -316,7 +363,7 @@ public class GaussDBAdapter implements DataAdapter {
 			if (steps.size() == 1) {
 				subSelectSql = appendGroupByHaving(firstStep, subSelectSql, null);
 				subSelectSql = appendOrderBy(firstStep, subSelectSql, null);
-				subSelectSql = appendLimit(firstStep, subSelectSql);
+				subSelectSql = appendLimit(firstStep, subSelectSql, rowLimit);
 				return subSelectSql;
 			} else {
 				JSONObject secondStep = steps.getJSONObject(1);
@@ -354,9 +401,13 @@ public class GaussDBAdapter implements DataAdapter {
 
 				sql = appendGroupByHaving(secondStep, sql, tmpClassAs);
 				sql = appendOrderBy(secondStep, sql, tmpClassAs);
-				sql = appendLimit(secondStep, sql);
+				sql = appendLimit(secondStep, sql, rowLimit);
 				return sql;
 			}
+		} catch (DslContractViolationException e) {
+			// located + actionable: let it through unchanged
+			log.warn(e.getMessage());
+			throw e;
 		} catch (Exception e) {
 			log.error(e.getMessage(), e);
 			throw new Exception("Failed to convert DSL to SQL");
@@ -416,16 +467,20 @@ public class GaussDBAdapter implements DataAdapter {
 		return sql;
 	}
 
-	private String appendLimit(JSONObject step, String sql) {
-		if (step.getJSONObject("output").getJSONObject("limit") == null) {
-			return sql;
+	private String appendLimit(JSONObject step, String sql, DslRowLimit.Tracker rowLimit) {
+		JSONObject limit = step.getJSONObject("output").getJSONObject("limit");
+		if (limit == null) {
+			// An omitted limit means the engine default, never an unbounded read (one probe row extra).
+			int cap = DslRowLimit.defaultRowLimit();
+			rowLimit.terminalLimit(cap, true);
+			return sql + "\nlimit " + (cap + 1);
 		}
-		Integer offset = step.getJSONObject("output").getJSONObject("limit").getInteger("offset");
+		Integer offset = limit.getInteger("offset");
 		if (offset == null) {
 			offset = 0;
 		}
-		sql += "\nlimit " + step.getJSONObject("output").getJSONObject("limit").getInteger("count")
-				+ " offset " + offset;
+		sql += "\nlimit " + limit.getInteger("count") + " offset " + offset;
+		rowLimit.terminalLimit(limit.getInteger("count"), false);
 		return sql;
 	}
 
@@ -445,7 +500,7 @@ public class GaussDBAdapter implements DataAdapter {
 				}
 			}
 			String sql = "select " + select + " from " + className + " limit 1";
-			JSONArray data = executeSql(connection, sql);
+			JSONArray data = executeSql(sql);
 			if (data.size() > 0) {
 				JSONObject datum = data.getJSONObject(0);
 				Set<String> keys = datum.keySet();
@@ -468,32 +523,69 @@ public class GaussDBAdapter implements DataAdapter {
 		}
 	}
 
-	private JSONArray executeSql(DataAdapterConnection props, String sql) throws Exception {
-		log.info(sql);
-		SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+	/** A time condition value is passed through verbatim: the source's own time convention is never re-interpreted. */
+	private static String timeLiteral(Object value) {
+		return "'" + String.valueOf(value).replace("'", "''") + "'";
+	}
+
+	private static final DateTimeFormatter TEMPORAL_TEXT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+	/** A temporal column is a date/time type, returned as its own text rather than re-rendered in the process zone. */
+	private static boolean isTemporalColumn(int sqlType) {
+		return sqlType == Types.DATE || sqlType == Types.TIME || sqlType == Types.TIMESTAMP
+				|| sqlType == Types.TIME_WITH_TIMEZONE || sqlType == Types.TIMESTAMP_WITH_TIMEZONE;
+	}
+
+	/**
+	 * The source's own text for a temporal column: a naive value keeps its wall clock, a tz-aware value
+	 * keeps its offset, and the process zone is never applied. A driver without the typed read falls
+	 * back to its own string form.
+	 */
+	private static Object temporalValue(ResultSet rs, int i, int sqlType) throws SQLException {
+		try {
+			switch (sqlType) {
+				case Types.DATE: {
+					LocalDate d = rs.getObject(i, LocalDate.class);
+					return d == null ? null : d.toString();
+				}
+				case Types.TIME: {
+					LocalTime t = rs.getObject(i, LocalTime.class);
+					return t == null ? null : t.toString();
+				}
+				case Types.TIMESTAMP: {
+					LocalDateTime dt = rs.getObject(i, LocalDateTime.class);
+					return dt == null ? null : dt.format(TEMPORAL_TEXT);
+				}
+				default: {
+					OffsetDateTime odt = rs.getObject(i, OffsetDateTime.class);
+					return odt == null ? null : odt.toString();
+				}
+			}
+		} catch (SQLException e) {
+			return rs.getString(i);
+		}
+	}
+
+	private JSONArray executeSql(String sql) throws Exception {
+		log.debug(sql);
 		Connection conn = null;
 		PreparedStatement pst = null;
 		ResultSet rs = null;
 		try {
 			JSONArray rows = new JSONArray();
-			conn = createDataSource(props).getConnection();
+			conn = openConnection();
 			pst = conn.prepareStatement(sql);
 			rs = pst.executeQuery();
 			ResultSetMetaData meta = rs.getMetaData();
 			while (rs.next()) {
 				JSONObject row = new JSONObject();
 				for (int i = 1; i <= meta.getColumnCount(); i++) {
-					Object value = rs.getObject(i);
-					if (value == null) {
-						row.put(meta.getColumnLabel(i), null);
+					String label = meta.getColumnLabel(i);
+					if (isTemporalColumn(meta.getColumnType(i))) {
+						// Return the source's own text: a tz-aware column keeps its offset and a naive one keeps its wall clock.
+						row.put(label, temporalValue(rs, i, meta.getColumnType(i)));
 					} else {
-						if (value instanceof Timestamp) {
-							row.put(meta.getColumnLabel(i), sdf.format((Timestamp) value));
-						} else if (value instanceof Date) {
-							row.put(meta.getColumnLabel(i), sdf.format((Date) value));
-						} else {
-							row.put(meta.getColumnLabel(i), value);
-						}
+						row.put(label, rs.getObject(i));
 					}
 				}
 				rows.add(row);
@@ -527,8 +619,7 @@ public class GaussDBAdapter implements DataAdapter {
 	}
 
 	@Override
-	public boolean useM3() {
-		return false;
+	public void validatePrimaryKeyName(String attrName) throws Exception {
 	}
 
 	@Override
@@ -607,7 +698,7 @@ public class GaussDBAdapter implements DataAdapter {
 		String fullClassName = (String) classDef.get("className");
 		String pk = DslUtil.getPrimaryKey(classDef);
 		String sql = "select " + attrName + " from " + fullClassName + " where " + pk + " = '" + objectId.replace("'", "''") + "'";
-		JSONArray rows = executeSql(connection, sql);
+		JSONArray rows = executeSql(sql);
 		if (rows == null || rows.isEmpty()) {
 			throw new IllegalArgumentException("Object " + objectId + " of class " + fullClassName + " does not exist");
 		}

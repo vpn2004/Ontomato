@@ -17,6 +17,8 @@ public class Action {
 	public static final String STATUS_PUBLISHED = "PUBLISHED";
 	public static final String STATUS_UNUSED = "UNUSED";
 
+	public static final int EXPLANATION_VERSION = 1;
+
 	private String id;
 	private String name;
 	private String description;
@@ -24,6 +26,8 @@ public class Action {
 	private Function function;
 	private JSONArray codeSegments;
 	private BusinessMeaning businessMeaning;
+	private String codeHash;
+	private Integer explanationVersion;
 	private String status;
 	private Long createTimestamp;
 	private Long modifyTimestamp;

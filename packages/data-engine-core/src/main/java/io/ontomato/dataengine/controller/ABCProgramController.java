@@ -9,8 +9,8 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.ResponseBody;
 import org.springframework.web.bind.annotation.RestController;
 
-import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
+import io.ontomato.dataengine.bean.PythonExecuteResult;
 import io.ontomato.dataengine.bean.abcHarness.ABCHarnessDashboard;
 import io.ontomato.dataengine.bean.abcHarness.ABCHarnessProgram;
 import io.ontomato.dataengine.config.BusinessConfig;
@@ -50,9 +50,10 @@ public class ABCProgramController {
 			if (timeoutMinutes <= 0) {
 				timeoutMinutes = 1;
 			}
-			JSONArray answer = abcProgramService.execute(UUID.randomUUID().toString(), program, user.getId(), curUserDataPermission, lang, timeoutMinutes, user.getDomainId());
+			Object[] o = abcProgramService.execute(UUID.randomUUID().toString(), program, user.getId(), curUserDataPermission, lang, timeoutMinutes, user.getDomainId());
 			ret.put("success", true);
-			ret.put("data", answer);
+			ret.put("data", o[0]);
+			((PythonExecuteResult)o[1]).markCompleteness(ret);
 		} catch (Exception e) {
 			log.error(e.getMessage(), e);
 			ret.put("success", false);
@@ -74,9 +75,10 @@ public class ABCProgramController {
 			if (timeoutMinutes <= 0) {
 				timeoutMinutes = 1;
 			}
-			JSONArray answer = abcProgramService.execute(UUID.randomUUID().toString(), dashboard, user.getId(), curUserDataPermission, lang, timeoutMinutes, user.getDomainId());
+			Object[] o = abcProgramService.execute(UUID.randomUUID().toString(), dashboard, user.getId(), curUserDataPermission, lang, timeoutMinutes, user.getDomainId());
 			ret.put("success", true);
-			ret.put("data", answer);
+			ret.put("data", o[0]);
+			((PythonExecuteResult)o[1]).markCompleteness(ret);
 		} catch (Exception e) {
 			log.error(e.getMessage(), e);
 			ret.put("success", false);

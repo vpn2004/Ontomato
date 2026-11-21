@@ -8,7 +8,9 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TimeZone;
 import java.util.UUID;
+import java.util.function.Function;
 
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONArray;
@@ -17,7 +19,9 @@ import com.alibaba.fastjson2.JSONWriter;
 import com.alibaba.fastjson2.JSONWriter.Feature;
 import io.ontomato.dataengine.bean.DslConsanguinity;
 import io.ontomato.dataengine.bean.VectorResource;
+import io.ontomato.dataengine.dataAdapter.DslGrammarValidator;
 import io.ontomato.dataengine.dao.VectorResourceDao;
+import io.ontomato.dataengine.dataAdapter.DataAdapter;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -109,7 +113,19 @@ public class DslUtil {
     	return JSONArray.toJSONString(dsl, Feature.WriteMapNullValue);
     }
     
-    public static String setConditionTimeColumnToCorrectFormat(String dslStr, String[] mightFormats, List<Map<String, Object>> classDefs) {
+    /**
+     * Rewrite a date/timestamp condition value.
+     *
+     * <p>Only when {@code toEpochMillis} is true is the string value turned into epoch millis
+     * (using {@code zone}, or the process default when {@code zone} is null). That form exists for
+     * stores that require it (M3). Otherwise the value is passed through verbatim: a time condition
+     * is compared against the column natively, so an existing source's own time convention is never
+     * reinterpreted by this engine.</p>
+     */
+    public static String setConditionTimeColumnToCorrectFormat(String dslStr, String[] mightFormats, List<Map<String, Object>> classDefs, boolean toEpochMillis, TimeZone zone) {
+    	if (!toEpochMillis) {
+    		return dslStr;
+    	}
     	if (mightFormats == null || mightFormats.length == 0) {
     		mightFormats = new String[] {"yyyy-MM-dd", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-ddTHH:mm:ss", "yyyy-MM-dd HH:mm:ss.SSS"};
     	}
@@ -171,6 +187,9 @@ public class DslUtil {
 						                                        			try {
 						                                        				if (v.length() == mightFormat.length()) {
 						                                        					SimpleDateFormat sdf = new SimpleDateFormat(mightFormat);
+	    						                                        			if (zone != null) {
+	    						                                        				sdf.setTimeZone(zone);
+	    						                                        			}
 	    						                                        			date = sdf.parse(v);
 	    						                                        			break;
 						                                        				}
@@ -190,6 +209,9 @@ public class DslUtil {
 	    						                                        			try {
 	    						                                        				if (s.length() == mightFormat.length()) {
 	    						                                        					SimpleDateFormat sdf = new SimpleDateFormat(mightFormat);
+		        						                                        			if (zone != null) {
+		        						                                        				sdf.setTimeZone(zone);
+		        						                                        			}
 		        						                                        			date = sdf.parse(s);
 		        						                                        			break;
 	    						                                        				}
@@ -308,68 +330,70 @@ public class DslUtil {
     	}
     }
     
-    public static void setRefName(JSONObject dsl) {
-    	JSONObject answer = dsl.getJSONObject("answer");
-    	if (answer != null) {
-    		JSONArray steps = answer.getJSONArray("steps");
-    		if (steps != null && steps.size() == 2) {
-    			JSONObject firstStep = steps.getJSONObject(0);
-    			JSONObject lastStep = steps.getJSONObject(1);
-    			String refName = "t" + UUID.randomUUID().toString();
-    			firstStep.getJSONObject("output").remove("save_table");
-    			firstStep.put("ref_name", refName);
-    			firstStep.put("direct_mql", true);
-    			lastStep.getJSONObject("graph").getJSONArray("patterns").getJSONObject(0).getJSONArray("objects").getJSONObject(0).put("class", "$" + refName);
-    		}
-    	}
-    }
-    
     public static String fromQuestionDslToNodeDsl(String dslStr) {
-		List<Map> dsl = JSONArray.parseArray(dslStr, Map.class);
-    	for (Map question : dsl) {
-    		if (question.get("answer") != null && question.get("answer") instanceof Map) {
-    			Map answer = (Map)question.get("answer");
-    			if (answer.get("steps") != null && answer.get("steps") instanceof List) {
-    				List steps = (List)answer.get("steps");
-    				if (steps.size() > 0 && steps.get(0) instanceof Map) {
-    					Map firstStep = (Map)steps.get(0);
-    					if (firstStep.get("output") != null && firstStep.get("output") instanceof Map) {
-							Map output = (Map)firstStep.get("output");
-							output.put("to_user", true);
-							output.remove("save_table");
-							
-							Set<String> variables = new HashSet<String>();
-							if (output.get("fields") != null && output.get("fields") instanceof List) {
-								List fields = (List)output.get("fields");
-								for (Object f : fields) {
-									if (f instanceof Map) {
-										Map field = (Map)f;
-										if (field.get("variable") != null && field.get("variable") instanceof String) {
-											variables.add((String)field.get("variable"));
-										}
-									}
-								}
-							}
-							List<Map<String, String>> newFields = new ArrayList<Map<String, String>>();
-							for (String variable : variables) {
-								Map<String, String> field = new HashMap<String, String>();
-								field.put("variable", variable);
-								field.put("field", "id");
-								field.put("as", variable + "_id");
-								newFields.add(field);
-							}
-							output.put("fields", newFields);
-						}
-    				}
-    				while (steps.size() > 1) {
-    					steps.remove(steps.size() - 1);
-    				}
-    			}
-    		}
-    	}
-    	return JSONArray.toJSONString(dsl, Feature.WriteMapNullValue);
-	}
-	
+        return fromQuestionDslToNodeDsl(dslStr, null, null);
+    }
+
+    /** Project evidence using the identity field understood by the executing adapter. */
+    public static String fromQuestionDslToNodeDsl(String dslStr, List<Map<String, Object>> classDefs, DataAdapter adapter) {
+        Map<String, Map<String, Object>> definitions = new HashMap<>();
+        if (classDefs != null) {
+            for (Map<String, Object> definition : classDefs) {
+                definitions.put((String) definition.get("className"), definition);
+            }
+        }
+        JSONArray questions = JSON.parseArray(dslStr);
+        for (int q = 0; q < questions.size(); q++) {
+            JSONObject question = questions.getJSONObject(q);
+            if (question == null || question.getJSONObject("answer") == null) continue;
+            JSONArray steps = question.getJSONObject("answer").getJSONArray("steps");
+            if (steps == null || steps.isEmpty()) continue;
+            JSONObject firstStep = steps.getJSONObject(0);
+            JSONObject output = firstStep.getJSONObject("output");
+            if (output != null) {
+                output.put("to_user", true);
+                output.remove("save_table");
+                Map<String, String> classesByVariable = new HashMap<>();
+                JSONObject graph = firstStep.getJSONObject("graph");
+                JSONArray patterns = graph == null ? null : graph.getJSONArray("patterns");
+                if (patterns != null) {
+                    for (int i = 0; i < patterns.size(); i++) {
+                        JSONArray objects = patterns.getJSONObject(i).getJSONArray("objects");
+                        if (objects == null) continue;
+                        for (int j = 0; j < objects.size(); j++) {
+                            JSONObject object = objects.getJSONObject(j);
+                            classesByVariable.put(object.getString("variable"), object.getString("class"));
+                        }
+                    }
+                }
+                Set<String> variables = new HashSet<>();
+                JSONArray fields = output.getJSONArray("fields");
+                if (fields != null) {
+                    for (int i = 0; i < fields.size(); i++) {
+                        String variable = fields.getJSONObject(i).getString("variable");
+                        if (variable != null) variables.add(variable);
+                    }
+                }
+                JSONArray identityFields = new JSONArray();
+                for (String variable : variables) {
+                    String identityField = "id";
+                    if (adapter != null) {
+                        String className = classesByVariable.get(variable);
+                        Map<String, Object> definition = definitions.get(className);
+                        if (definition == null) {
+                            throw new IllegalArgumentException("Cannot resolve evidence class for variable " + variable);
+                        }
+                        identityField = adapter.objectPrimaryKey(definition);
+                    }
+                    identityFields.add(JSONObject.of("variable", variable, "field", identityField, "as", variable + "_id"));
+                }
+                output.put("fields", identityFields);
+            }
+            while (steps.size() > 1) steps.remove(steps.size() - 1);
+        }
+        return JSON.toJSONString(questions, Feature.WriteMapNullValue);
+    }
+
 	public static String enrichShouldReturnAttr(String dslStr, List<Map<String, Object>> classDefs) {
 		List<Map> dsl = JSONArray.parseArray(dslStr, Map.class);
 		
@@ -938,7 +962,7 @@ public class DslUtil {
 		return JSONArray.toJSONString(dsls, Feature.WriteMapNullValue);
 	}
 	
-	public static Object[] splitToVector(String dslStr, List<Map<String, Object>> classDefs, VectorResourceDao vectorResourceDao, String domainId, boolean useM3) throws Exception {
+	public static Object[] splitToVector(String dslStr, List<Map<String, Object>> classDefs, VectorResourceDao vectorResourceDao, String domainId) throws Exception {
 		JSONArray dsls = JSON.parseArray(dslStr);
 		Map<String, Map<String, Object>> classDefMap = new HashMap<String, Map<String, Object>>();
 		for (Map<String, Object> classDef : classDefs) {
@@ -985,8 +1009,8 @@ public class DslUtil {
 							if (vectorAttrs.contains(cond.getString("field")) && cond.getString("query") != null && !"".equals(cond.getString("query").trim())) {
 								// Query the vector store
 								String queryStr = cond.getString("query").trim();
-								int total = vectorResourceDao.getResourceTotal(className, cond.getString("field"), domainId);
-								List<VectorResource> vectorResources = vectorResourceDao.find(queryStr, total, className, cond.getString("field"), domainId);
+								List<VectorResource> vectorResources = vectorResourceDao.find(queryStr,
+										DslGrammarValidator.vectorTopK(cond), className, cond.getString("field"), domainId);
 								Set<String> objIds = new HashSet<String>();
 								for (VectorResource vectorResource : vectorResources) {
 									objIds.add(vectorResource.getObjectId());
@@ -1040,8 +1064,8 @@ public class DslUtil {
 					if (field.getString("query") != null && !"".equals(field.getString("query").trim())) {
 						// Query the vector store
 						String queryStr = field.getString("query").trim();
-						int total = vectorResourceDao.getResourceTotal(className, attrName, domainId);
-						List<VectorResource> vectorResources = vectorResourceDao.find(queryStr, total, className, attrName, domainId);
+						List<VectorResource> vectorResources = vectorResourceDao.find(queryStr,
+								DslGrammarValidator.vectorTopK(field), className, attrName, domainId);
 						Set<String> objIds = new HashSet<String>();
 						List<String> filePaths = new ArrayList<String>();
 						for (VectorResource vectorResource : vectorResources) {
@@ -1056,9 +1080,11 @@ public class DslUtil {
 							ids.retainAll(objIds);
 						}
 						
+						// Nearest first: the result rows and their resources are ordered by it.
 						selectAsFilePathsMap.put(as, filePaths);
 						field.remove("query");
 					}
+					field.remove("topK");
 					vectorResourceAsSet.add(as);
 				}
 			}
@@ -1085,7 +1111,7 @@ public class DslUtil {
 						objIds.add("not found");
 					}
 					JSONObject idInArray = new JSONObject();
-					idInArray.put("field", useM3 ? "id" : getPrimaryKey(classDefMap.get(className)));
+					idInArray.put("field", getPrimaryKey(classDefMap.get(className)));
 					idInArray.put("operator", "in");
 					idInArray.put("value", objIds);
 					
@@ -1121,9 +1147,9 @@ public class DslUtil {
 	/**
 	 * Resolve the primary-key field name of a class definition.
 	 *
-	 * <p>M3 objects always use the implicit {@code id} field; relational adapters use the attribute marked
-	 * {@code primaryKey=true}. When no attribute is marked, this falls back to {@code "id"} so that the result
-	 * stays identical to the historical hard-coded {@code "id"} for classes without an explicit primary key.</p>
+	 * <p>The attribute marked {@code primaryKey=true}. When no attribute is marked, this falls back to {@code "id"}
+	 * so that the result stays identical to the historical hard-coded {@code "id"} for classes without an explicit
+	 * primary key.</p>
 	 */
 	public static String getPrimaryKey(Map<String, Object> classDef) {
 		String pk = "id";
@@ -1168,19 +1194,6 @@ public class DslUtil {
 			}
 		}
 		return result;
-	}
-
-	public static boolean isSupportM3ModeV1(JSONObject dsl, List<Map<String, Object>> classDefs) {
-		boolean fourBasic = false;
-		Map<String, DslConsanguinity> consanguinityMap = findConsanguinityFromDsl(dsl, classDefs);
-		for (String key : consanguinityMap.keySet()) {
-			DslConsanguinity consanguinity = consanguinityMap.get(key);
-			if (consanguinity.getAttrName() == null || "".equals(consanguinity.getAttrName().trim())) {
-				fourBasic = true;
-				break;
-			}
-		}
-		return !fourBasic;
 	}
 	
 }

@@ -1,0 +1,1 @@
+Produce a concise checkpoint of verified facts, evidence references, failed attempts, unresolved requirements and the next useful step. Preserve raw numbers, units and statuses. Do not invent results.

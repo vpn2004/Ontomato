@@ -7,6 +7,15 @@
     <div ref="rootRef" class="metric-container">
       <div class="title-row">
         <h3 class="title" :title="name">{{ name }}</h3>
+        <span
+          v-if="partialNotice"
+          class="metric-partial"
+          role="note"
+          :title="partialNotice"
+          :aria-label="partialNotice"
+        >
+          <TriangleAlert :size="14" />
+        </span>
         <DropdownMenu
           scene="metric"
           trigger-class="metric-more"
@@ -29,8 +38,9 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import interact from "interactjs";
+import { TriangleAlert } from "lucide-vue-next";
 import DropdownMenu from "./DropdownMenu.vue";
-import { clamp, parseGridColumns } from "./utils/dashboardHelper";
+import { clamp, parseGridColumns, partialResultNotice } from "./utils/dashboardHelper";
 import { useI18n } from "vue-i18n";
 import { workbenchContent } from "../../../content";
 
@@ -70,6 +80,7 @@ const name = computed(() => String(props.metric?.name || ""));
 const unit = computed(() => String(props.metric?.unit || "").trim());
 const loading = computed(() => String(props.metric?.state || "").trim() === "loading");
 const formattedValue = computed(() => formatValue(props.metric?.value));
+const partialNotice = computed(() => partialResultNotice(props.metric?.truncation, t));
 
 /* ======================== resize logic ======================== */
 const rootRef = ref(null);
@@ -167,6 +178,12 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 8px;
   margin-bottom: 10px;
+}
+
+.metric-partial {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--el-color-warning);
 }
 
 .title {

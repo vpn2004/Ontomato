@@ -7,6 +7,9 @@ export const MODEL_ROLES = [
 ] as const;
 
 export type ModelRole = (typeof MODEL_ROLES)[number];
+export const CONFIGURABLE_MODEL_ROLES = [...MODEL_ROLES, "qualityCheck"] as const;
+export type ConfigurableModelRole = (typeof CONFIGURABLE_MODEL_ROLES)[number];
+export type ModelRoleBindings<T> = Record<ModelRole, T> & { qualityCheck?: T };
 
 /** Model entry: displayName, maxTokens, and contextWindow are guaranteed after Java getModelSettings read normalization (defaults are maintained only in Java). */
 export interface BackendModelConfig {
@@ -33,7 +36,7 @@ export interface BackendAgentConfig {
 
 export interface ModelSettingsData {
   models: BackendModelConfig[];
-  agents: Record<ModelRole, BackendAgentConfig>;
+  agents: ModelRoleBindings<BackendAgentConfig>;
 }
 
 /**

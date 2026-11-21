@@ -186,7 +186,29 @@ export function patchDeleteChart(groups, chartId) {
   });
 }
 
-export function patchChartOption(groups, chartId, option, chartType, rows, fields, dsl) {
+/**
+ * The data engine's partial-result marker of one widget refresh response; complete results have
+ * none. The widget keeps it beside the rows it shows.
+ */
+export function refreshTruncation(response) {
+  return response?.truncated
+    ? {
+        truncated: true,
+        rowLimit: response.rowLimit,
+        truncationHint: response.truncationHint,
+      }
+    : undefined;
+}
+
+/** The localized partial-result header followed by the data engine's hint verbatim; "" when complete. */
+export function partialResultNotice(truncation, t) {
+  return truncation?.truncated
+    ? `${t("chat.partialResult", { rowLimit: truncation.rowLimit })} ${truncation.truncationHint}`
+    : "";
+}
+
+/** `truncation` belongs to this refresh only: a later complete or failed refresh clears it. */
+export function patchChartOption(groups, chartId, option, chartType, rows, fields, dsl, truncation) {
   const cid = normalizeId(chartId);
   if (!cid) return groups;
 
@@ -204,6 +226,7 @@ export function patchChartOption(groups, chartId, option, chartType, rows, field
               rows: rows || c?.rows || [],
               fields: fields ?? c?.fields,
               dsl: dsl ?? c?.dsl,
+              truncation,
             }
           : c
       ),
@@ -404,12 +427,7 @@ function buildRenderModelAndTasks({ dashboardId, localGroups, setGroups, guard, 
             }
           }
 
-          const {
-            data: rows,
-            rawData,
-            fields: mappedFields,
-            dsl: nextDsl,
-          } = await getAnswerByDslConditionParam({
+          const response = await getAnswerByDslConditionParam({
             dsl,
             abcProgram,
             conditions: effectiveConditions,
@@ -420,6 +438,8 @@ function buildRenderModelAndTasks({ dashboardId, localGroups, setGroups, guard, 
             timeoutMs: abcProgram ? 300000 : 30000,
           });
           if (!guard()) return;
+          const { data: rows, rawData, fields: mappedFields, dsl: nextDsl } = response;
+          const truncation = refreshTruncation(response);
 
           const chartRows = applyDataPlan(rawData, dataPlan);
           const usedFields = mappedFields || fields || {};
@@ -433,7 +453,8 @@ function buildRenderModelAndTasks({ dashboardId, localGroups, setGroups, guard, 
                 chartType,
                 [],
                 usedFields,
-                nextDsl || dsl || {}
+                nextDsl || dsl || {},
+                truncation
               )
             );
             return;
@@ -455,7 +476,8 @@ function buildRenderModelAndTasks({ dashboardId, localGroups, setGroups, guard, 
                 chartType,
                 rows,
                 usedFields,
-                nextDsl || dsl || {}
+                nextDsl || dsl || {},
+                truncation
               )
             );
             return;
@@ -469,7 +491,8 @@ function buildRenderModelAndTasks({ dashboardId, localGroups, setGroups, guard, 
               chartType,
               rows,
               usedFields,
-              nextDsl || dsl || {}
+              nextDsl || dsl || {},
+              truncation
             )
           );
         } catch (e) {
@@ -528,12 +551,9 @@ function buildRenderModelAndTasks({ dashboardId, localGroups, setGroups, guard, 
           };
           if (inputValueField) args.fields = { value: inputValueField };
 
-          const {
-            rawData,
-            fields: mappedFields,
-            dsl: nextDsl,
-          } = await getAnswerByDslConditionParam(args, { signal });
+          const response = await getAnswerByDslConditionParam(args, { signal });
           if (!guard()) return;
+          const { rawData, fields: mappedFields, dsl: nextDsl } = response;
 
           const metricRows = applyDataPlan(rawData, dataPlan);
 
@@ -547,7 +567,15 @@ function buildRenderModelAndTasks({ dashboardId, localGroups, setGroups, guard, 
           });
 
           setGroups((prev) =>
-            patchMetricValue(prev, metricId, value, "ready", nextDsl || dsl, valueField)
+            patchMetricValue(
+              prev,
+              metricId,
+              value,
+              "ready",
+              nextDsl || dsl,
+              valueField,
+              refreshTruncation(response)
+            )
           );
         } catch (e) {
           if (isAbortError(e)) return;
@@ -573,7 +601,7 @@ function buildRenderModelAndTasks({ dashboardId, localGroups, setGroups, guard, 
  * Backfill metric value/state
  * Locating by the three keys dimensionId + resultSetId + name is more robust (the same resultSet may have multiple metric fields)
  */
-function patchMetricValue(prevGroups, metricId, value, state, dsl, valueField) {
+function patchMetricValue(prevGroups, metricId, value, state, dsl, valueField, truncation) {
   if (!Array.isArray(prevGroups)) return prevGroups;
   const mid = normalizeId(metricId);
   if (!mid) return prevGroups;
@@ -585,7 +613,8 @@ function patchMetricValue(prevGroups, metricId, value, state, dsl, valueField) {
     const nextMetrics = g.metrics.map((m) => {
       if (normalizeId(m?.id) !== mid) return m;
       changed = true;
-      const next = { ...m, value, state, dsl: dsl ?? m?.dsl };
+      // A value computed from a partial result keeps that refresh's marker.
+      const next = { ...m, value, state, dsl: dsl ?? m?.dsl, truncation };
       if (typeof valueField === "string" && valueField && valueField !== m?.valueField)
         next.valueField = valueField;
       return next;

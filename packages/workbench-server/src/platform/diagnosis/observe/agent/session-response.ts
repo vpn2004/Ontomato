@@ -3,7 +3,7 @@ import { createSseErrorEvent } from "../../../../utils/sse";
 import type { AssistantMessage } from "../../../../core/agent-loop/types";
 import { harnessSessions } from "../../../../infrastructure/harness-sessions";
 import type { ManagedSession } from "./session-runtime";
-import type { SessionResponseStream } from "./session-stream";
+import type { SessionResponseStream } from "../../../../utils/response-stream";
 import { toDiagnosisStreamEvent } from "./sse-bridge";
 
 import { runWithLogContext } from "../../../../logging/log-context";

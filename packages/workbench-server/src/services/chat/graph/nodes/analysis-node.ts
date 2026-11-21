@@ -10,19 +10,23 @@ import { createModel, type ModelOptions } from "../../../../config/model-factory
 import { modelAgentName } from "../../../../logging/model-agents";
 import type { SkillMeta } from "../../../../core/skills/types";
 import {
-  estimateMessagesSize,
   stringifyWithLimit,
   truncateText,
 } from "../../../../utils/prompt-context";
 import { buildModelDataView } from "../../../../utils/model-data-view";
-import { applyFieldDisplayPlan } from "../../../data-query/adapter";
-import { buildAgentPromptMessages, resolveAgentPromptHistory } from "../utils/conversation-context";
 import { renderPrompt } from "../../../../core/prompts/loader";
 import {
   createRuntimeArtifactRef,
   getQueryArtifactCache,
-  resolveAnalysisData,
+  resolveAnalysisEvidence,
 } from "../utils/query-artifact-cache";
+
+import { formatReportResult, runReportHarness } from "../../report/harness";
+import { createReportEvidence } from "../../report/evidence";
+import { executeBaseQuery, DEEP_ANALYSIS_QUERY_BRANCHES } from "../../../data-query/base-query-executor";
+import { buildQueryRunInput } from "../../../data-query/query-fact";
+import { upsertQueryRun, buildQueryRunId } from "../../../data-query/query-run-store";
+import { randomUUID } from "node:crypto";
 
 const logger = createLogger("analysis-node");
 
@@ -30,7 +34,8 @@ async function matchExecutableAnalysisSkills(
   registry: SkillRegistryManager,
   query: string,
   data: Record<string, unknown>[],
-  services: { createModel: (opts?: number | ModelOptions) => Promise<any> | any }
+  services: { createModel: (opts?: number | ModelOptions) => Promise<any> | any },
+  signal?: AbortSignal
 ): Promise<{ skill: SkillMeta; confidence: number; reason: string }[]> {
   const executableSkills = registry.getSkills({
     type: SkillType.EXECUTABLE,
@@ -84,7 +89,7 @@ async function matchExecutableAnalysisSkills(
     });
 
     let fullContent = "";
-    const stream = await model.stream(prompt);
+    const stream = await model.stream(prompt, { signal });
 
     for await (const chunk of stream) {
       const token = chunk.content;
@@ -121,6 +126,9 @@ async function matchExecutableAnalysisSkills(
 }
 
 export async function analysisNode(state: GraphState, config?: any): Promise<GraphUpdate> {
+  const signal: AbortSignal | undefined = config?.signal ?? config?.configurable?.signal;
+  signal?.throwIfAborted();
+  if (state.errors?.some((error) => error.node === "query")) return {};
   const locale = config?.configurable?.locale as string | undefined;
   const analysisStep = state.plan?.steps.find((step) => step.type === "analysis");
   const analysisInstruction =
@@ -155,9 +163,9 @@ export async function analysisNode(state: GraphState, config?: any): Promise<Gra
     };
   }
 
-  const resolvedData = await resolveAnalysisData(state, config);
+  const evidence = await resolveAnalysisEvidence(state, config);
 
-  if (!resolvedData) {
+  if (!evidence) {
     logger.error(tApp("queryFixed.28"));
     const errorMsg = t("analysis.noDataForAnalysis");
 
@@ -186,10 +194,8 @@ export async function analysisNode(state: GraphState, config?: any): Promise<Gra
     };
   }
 
-  const data = resolvedData.data;
-  const dataSource = resolvedData.source;
-  const sourceQueryResult = resolvedData.queryResult;
-  logger.info(tApp("queryFixed.14", { v0: (dataSource), v1: (data.length) }));
+  // Single-table compute skills retain their contract; multi-table reports use explicit evidence tools.
+  const data = evidence.datasets.length === 1 ? evidence.datasets[0]!.data : [];
 
   try {
     const registry = domainId ? await skillRegistryManager.forDomain(domainId) : null;
@@ -201,8 +207,8 @@ export async function analysisNode(state: GraphState, config?: any): Promise<Gra
       timestamp: Date.now(),
     });
 
-    const matchedCalcSkills = registry
-      ? await matchExecutableAnalysisSkills(registry, analysisInstruction, data, services)
+    const matchedCalcSkills = registry && evidence.datasets.length === 1
+      ? await matchExecutableAnalysisSkills(registry, analysisInstruction, data, services, signal)
       : [];
     const computedResults: Record<string, any> = {};
 
@@ -338,61 +344,32 @@ export async function analysisNode(state: GraphState, config?: any): Promise<Gra
       timestamp: Date.now(),
     });
 
-    const displayRows = resolvedData.fieldDisplayPlan
-      ? applyFieldDisplayPlan(data, resolvedData.fieldDisplayPlan, locale)
-      : data;
-    const dataContext =
-      data.length > 0
-        ? [
-            resolvedData.fieldDisplayPlan
-              ? `fieldDisplayPlan=${JSON.stringify(resolvedData.fieldDisplayPlan)}`
-              : "",
-            `dataView=${JSON.stringify(buildModelDataView(displayRows, { maxChars: 100_000 }))}`,
-          ]
-            .filter(Boolean)
-            .join("\n")
-        : truncateText(sourceQueryResult?.markdownTable || "", 2500);
-    const computedContext =
-      Object.keys(computedResults).length > 0
-        ? tApp("queryFixed.20", { v0: (stringifyWithLimit(computedResults, 2500)) })
-        : "";
-
-    const model = await createModel({ agentName: modelAgentName("analysis") });
-    const promptHistory = resolveAgentPromptHistory(config, state.messages || []);
-    const messagesForLLM = buildAgentPromptMessages({
-      systemPrompt: renderPrompt("standard-chat.analysis.answer.system", { methodologyContent }),
-      currentUserContent: renderPrompt("standard-chat.analysis.answer.user", {
-        userQuestion: analysisInstruction,
-        dataContext,
-        computedContext,
-      }),
-      priorMessages: promptHistory.messages,
-      historyIncludesCurrentTurn: promptHistory.historyIncludesCurrentTurn,
-      historyMode: "user-only",
-    });
-
-    logger.debug(tApp("queryFixed.29"), {
-      systemPromptLength: String(messagesForLLM[0].content || "").length,
-      messageCount: messagesForLLM.length,
-      messagesLength: estimateMessagesSize(messagesForLLM as Array<{ content: string }>),
-      dataRowCount: data.length,
-    });
-
-    const stream = await model.stream(messagesForLLM);
-
-    let analysisContent = "";
-    for await (const chunk of stream) {
-      const token = chunk.content;
-      if (token) {
-        analysisContent += token;
-        sendEvent({
-          type: "token" as const,
-          node: "analysis" as const,
-          content: token,
-          timestamp: Date.now(),
+    signal?.throwIfAborted();
+    const report = await runReportHarness({
+      threadId: state.threadId, requestSeq, question: state.userQuestion, instruction: analysisInstruction,
+      evidence, methodology: `${methodologyContent}\n${stringifyWithLimit(computedResults, 5000)}`, locale, signal,
+      onCheckpoint: (resumable) => sendEvent({ type: "report_checkpoint", requestSeq, resumable }),
+      onProgress: (content) => sendEvent({ type: "progress", node: "analysis", content, timestamp: Date.now() }),
+      collect: async (question, reportSignal) => {
+        const sourceRef = `report-evidence:${randomUUID()}`;
+        const identity = { threadId: state.threadId, requestSeq, sourceKind: "report_evidence", sourceRef };
+        const execution = await executeBaseQuery({ queryQuestion: question,
+          token: config?.configurable?.token || "", apiKey: config?.configurable?.apiKey || "",
+          userId: config?.configurable?.user_id || state.userId, locale,
+          enabledBranches: DEEP_ANALYSIS_QUERY_BRANCHES, signal: reportSignal, answerMode: "evidence",
         });
-      }
-    }
+        reportSignal.throwIfAborted();
+        const output = execution.winner ? execution.output : execution.abcFallback;
+        const error = execution.winner ? undefined : execution.error.message;
+        await upsertQueryRun(buildQueryRunInput({ identity, question, status: execution.winner ? "completed" : "failed", error,
+          fact: { datasets: output?.datasets ?? [], fullContent: output?.content, error, abcCodes: output?.abcCodes, abcDsls: output?.abcDsls } }));
+        return createReportEvidence({ queryRunId: buildQueryRunId(state.threadId, requestSeq, sourceRef), question,
+          datasets: output?.datasets ?? [], completed: !!execution.winner, error, abcCodes: output?.abcCodes, abcDsls: output?.abcDsls });
+      },
+    });
+    signal?.throwIfAborted();
+    const analysisContent = formatReportResult(report, locale);
+    sendEvent({ type: "token", node: "analysis", content: analysisContent, timestamp: Date.now() });
 
     logger.info(tApp("queryFixed.21", { v0: (analysisContent.length) }));
 
@@ -432,6 +409,7 @@ export async function analysisNode(state: GraphState, config?: any): Promise<Gra
       events: [],
     };
   } catch (error) {
+    signal?.throwIfAborted();
     const errorMsg = error instanceof Error ? error.message : String(error);
     logger.error(tApp("queryFixed.22", { v0: (errorMsg) }));
 

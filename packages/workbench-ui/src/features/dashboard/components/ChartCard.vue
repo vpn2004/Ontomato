@@ -2,6 +2,15 @@
   <div ref="rootRef" class="chart-container">
     <div class="chart-header">
       <h3 :title="title">{{ title }}</h3>
+      <span
+        v-if="partialNotice && state !== 'empty'"
+        class="chart-partial"
+        role="note"
+        :title="partialNotice"
+        :aria-label="partialNotice"
+      >
+        <TriangleAlert :size="14" />
+      </span>
     </div>
     <div
       v-loading="loading"
@@ -10,7 +19,9 @@
     >
       <div ref="elRef" class="chart-echarts"></div>
       <ChartDataOverlay :open="dataOpen" :tabular="tabular" @view-dsl="handleViewDsl" />
-      <div v-if="state === 'empty'" class="chart-mask">{{ t("common.noData") }}</div>
+      <div v-if="state === 'empty'" class="chart-mask">
+        {{ partialNotice || t("common.noData") }}
+      </div>
       <div v-else-if="state === 'error' && !dataOpen" class="chart-mask">
         {{ t("analysis.cannotGenerateChart") }}
       </div>
@@ -44,12 +55,13 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import * as echarts from "echarts";
 import interact from "interactjs";
 import { ElMessage, ElMessageBox } from "element-plus";
+import { TriangleAlert } from "lucide-vue-next";
 import ChartDataOverlay from "./ChartDataOverlay.vue";
 import ChartToolbar from "./ChartToolbar.vue";
 import ChartZoomModal from "./ChartZoomModal.vue";
 import { extractTabularDataFromOption, safeCloneOption } from "./utils/chartTabular";
 import { modifyResultSetName, deleteResultSet } from "../api";
-import { clamp, parseGridColumns } from "./utils/dashboardHelper";
+import { clamp, parseGridColumns, partialResultNotice } from "./utils/dashboardHelper";
 import { getEchartsTheme } from "./utils/echartsTheme";
 import { useI18n } from "vue-i18n";
 import { workbenchContent } from "../../../content";
@@ -102,6 +114,9 @@ const disabledChartTypes = computed(() => {
   if (!rows || !Array.isArray(rows) || rows.length === 0) return ALL_CHART_TYPES.slice();
   return [];
 });
+
+/** Zero rows of a partial result are not "no data": the empty mask shows this notice instead. */
+const partialNotice = computed(() => partialResultNotice(props.chart?.truncation, t));
 
 const state = computed(() => {
   const opt = props.chart?.option;
@@ -460,6 +475,13 @@ onBeforeUnmount(() => {
 .chart-echarts {
   width: 100%;
   height: 100%;
+}
+
+.chart-partial {
+  display: inline-flex;
+  flex-shrink: 0;
+  margin-left: 6px;
+  color: var(--el-color-warning);
 }
 
 .chart-mask {

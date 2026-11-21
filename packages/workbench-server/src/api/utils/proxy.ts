@@ -35,9 +35,13 @@ export async function proxyResponse(upstreamRes: globalThis.Response, res: Respo
     return;
   }
 
-  const body = await upstreamRes.text();
+  // Read as bytes: text() decodes and re-encodes the body as UTF-8, which corrupts binary
+  // payloads such as the action/metric-view export zips.
+  const body = Buffer.from(await upstreamRes.arrayBuffer());
   res.status(upstreamRes.status);
   res.setHeader("Content-Type", contentType);
+  const disposition = upstreamRes.headers.get("content-disposition");
+  if (disposition) res.setHeader("Content-Disposition", disposition);
   res.send(body);
 }
 
@@ -63,7 +67,8 @@ export async function proxyUpstream(
   res: Response,
   baseUrl: string,
   upstreamPath: string,
-  method?: string
+  method?: string,
+  onResponse?: (response: globalThis.Response) => Promise<void>
 ) {
   try {
     const headers = buildUpstreamHeaders(req);
@@ -81,6 +86,7 @@ export async function proxyUpstream(
       body,
       duplex: "half",
     } as Parameters<typeof fetch>[1]);
+    if (onResponse) await onResponse(upstreamRes);
     return proxyResponse(upstreamRes, res);
   } catch (error) {
     res.status(500).json({ success: false, message: toErrorMessage(error) });

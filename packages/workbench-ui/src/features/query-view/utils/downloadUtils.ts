@@ -8,8 +8,9 @@ function escapeCsvCell(value: string): string {
   return value;
 }
 
-export function downloadDsl(dsl: any, filename: string) {
-  const normalized = typeof dsl === "string" ? dsl : JSON.stringify(dsl, null, 2);
+/** Saves a value as a `.json` file; a string is taken as JSON text already (a saved DSL). */
+export function downloadJson(value: unknown, filename: string) {
+  const normalized = typeof value === "string" ? value : JSON.stringify(value, null, 2);
   const blob = new Blob([normalized], { type: "application/json;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   try {

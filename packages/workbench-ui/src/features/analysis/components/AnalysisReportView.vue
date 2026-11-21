@@ -74,6 +74,7 @@ const {
   taskProgressMap,
 } = storeToRefs(useAnalysisStore());
 const isStreaming = computed(() => isStreamingReport.value && !!activeSession.value?.isLoading);
+const isExecuting = computed(() => useAnalysisStore().isSelectedLatestRun && task.value?.status === "running");
 const taskProgress = computed(() =>
   task.value ? taskProgressMap.value[task.value.id] : undefined
 );
@@ -477,7 +478,8 @@ onUnmounted(() => {
           <span v-if="task?.lastRunAt">
             {{ t("analysis.reportLastRun") }}{{ formatReportTime(task.lastRunAt) }}
           </span>
-          <span v-if="isStreaming" class="streaming-badge">
+          <span v-if="isExecuting || isStreaming" class="streaming-badge" role="status">
+            <LoaderCircle :size="12" class="report-progress-spin" aria-hidden="true" />
             {{ t("analysis.reportGenerating") }}
           </span>
         </p>
@@ -566,7 +568,8 @@ onUnmounted(() => {
         <div class="report-progress-icon">
           <LoaderCircle :size="30" class="report-progress-spin" />
         </div>
-        <div class="report-progress-title">{{ taskProgress?.stageText }}</div>
+        <div class="report-progress-title">{{ t("common.inProgress") }}</div>
+        <div v-if="taskProgress?.stageText">{{ taskProgress.stageText }}</div>
         <div v-if="taskProgress?.progress !== undefined">{{ taskProgress.progress }}%</div>
       </div>
       <div v-else class="report-empty">
@@ -684,6 +687,7 @@ onUnmounted(() => {
 .report-feedback-btn.active {
   color: var(--el-color-primary);
   background: var(--el-color-primary-light-9);
+  box-shadow: inset 0 0 0 1px var(--el-color-primary-light-7);
 }
 
 .report-meta span::after {

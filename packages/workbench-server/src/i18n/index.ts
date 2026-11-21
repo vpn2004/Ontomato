@@ -23,7 +23,7 @@ let configured = false;
 export function configureI18n(input: {
   defaultLocale: Locale;
   packs: Partial<Record<Locale, LocalePack>>;
-  /** The host decides whether users may switch languages; the language given by the caller is passed through to DataRAG as-is. The OSS build is fixed to English. */
+  /** The host decides whether users may switch languages; the language given by the caller is passed through to DataRAG as-is. */
   languageSwitchEnabled: boolean;
   /** Fixed language for artifacts, matcher terms, and existing error substrings. Does not follow request setLocale or APP_DEFAULT_LOCALE. */
   appTextLocale: Locale;

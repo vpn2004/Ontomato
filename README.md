@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-639c2d" alt="License: Apache 2.0"></a>
-  <a href="https://github.com/Aohan/Ontomato/tags"><img src="https://img.shields.io/github/v/tag/Aohan/Ontomato?include_prereleases&label=version&color=639c2d" alt="Version"></a>
+  <a href="https://github.com/ontomato-ai/Ontomato/tags"><img src="https://img.shields.io/github/v/tag/ontomato-ai/Ontomato?include_prereleases&label=version&color=639c2d" alt="Version"></a>
   <img src="https://img.shields.io/badge/status-beta-639c2d" alt="Status: beta">
 </p>
 
@@ -18,7 +18,7 @@
   <a href="#quick-start">Quick start</a> ·
   <a href="#architecture">Architecture</a> ·
   <a href="docs/development.md">Development</a> ·
-  <a href="https://github.com/Aohan/Ontomato/discussions">Discussions</a>
+  <a href="https://github.com/ontomato-ai/Ontomato/discussions">Discussions</a>
 </p>
 
 Ontomato is an open-source ontology layer for business data. You define the things your
@@ -134,32 +134,32 @@ documents every field.
 | Server | Docker Engine 26+ with the Compose plugin; 4 CPU cores, 8 GB RAM, 20 GB free disk (8 cores and 16 GB recommended) |
 | Chat model | An OpenAI-compatible endpoint at least as capable as `deepseek-v4-flash` |
 | Embedding model | An OpenAI-compatible endpoint at least as capable as `qwen3-embedding-8b` |
-| Business database | PostgreSQL |
+| Business database | PostgreSQL, MySQL, SQL Server, DuckDB, Neo4j |
 
 ### 1. Deploy
 
 The images are published to GitHub Container Registry for amd64 and arm64. On the server:
 
 ```bash
-git clone https://github.com/Aohan/Ontomato.git
+git clone https://github.com/ontomato-ai/Ontomato.git
 cd Ontomato/deploy
 cp .env.example .env    # set ARCH (amd64 or arm64), POSTGRES_PASSWORD and PUBLIC_HOST
-docker compose -f docker-compose.ghcr.yml up -d
+echo "COMPOSE_FILE=docker-compose.yml:docker-compose.ghcr.yml" >> .env
+docker compose up -d
 ```
 
-The workbench and the data engine each come as a runtime image and an app image, which
-are assembled on the server at startup; an update downloads only the app images unless
-the runtime changed. The stack follows `latest`; set `ONTOMATO_VERSION` in `.env`, for
-example `ONTOMATO_VERSION=4.0.0-beta.1`, to stay on one release. For a server without
-internet access, deploy from the offline bundle instead.
+The workbench, data engine and ontology manager are final runnable images. Deployment
+pulls and starts them directly. Set `ONTOMATO_VERSION` in `.env` to select a release.
+Offline sites use [oc-mirror incremental delivery](deploy/README.md#offline-delivery).
 
 When `docker compose ps` shows every service healthy, open `http://<host>:3000` and set the
 chat and embedding models under **Model Configuration** in the Admin Panel. You can also
-preset them in `.env` (`BACKEND_LLM_*`, `BACKEND_EMBEDDING_*`).
+preset new-domain defaults using the optional [configuration](deploy/README.md#configuration).
 
-`BACKEND_EMBEDDING_DIMENSIONS` (default `2048`) is sent to the embedding model and sizes
-the vector tables. Change it in `.env` before the first start if your model needs another
-value; it cannot change once data exists.
+`EMBEDDING_DIMENSIONS` (default `2048`) is the embedding dimension a new domain
+starts with; it is sent to the embedding model with that domain's own configuration.
+An existing domain keeps its saved dimension: change it under **Model Configuration**
+and rebuild the vectors.
 
 [deploy/README.md](deploy/README.md) describes updates, the offline bundle and the
 remaining settings.
@@ -171,7 +171,7 @@ agents supported by [`skills`](https://github.com/vercel-labs/skills)) and point
 the Workbench:
 
 ```bash
-npx skills add Aohan/Ontomato --skill ontomato-ontomap-builder ontomato-analyst ontomato-app-builder
+npx skills add ontomato-ai/Ontomato --skill ontomato-ontomap-builder ontomato-book-ontology-builder ontomato-analyst ontomato-app-builder ontomato-agent-builder
 export ONTOMATO_URL=http://<host>:3000
 ```
 
@@ -180,9 +180,17 @@ export ONTOMATO_URL=http://<host>:3000
 
 | Skill | Use it to |
 | --- | --- |
-| `ontomato-ontomap-builder` | connect a database, draft and import the ontology, and check it with questions |
-| `ontomato-analyst` | read the ontology, run Ontology DSL queries and questions, and reach the analysis agents |
-| `ontomato-app-builder` | on a separate test deployment: build and debug MetricViews, Actions and the pages that call them |
+| `ontomato-ontomap-builder` | establish or maintain the ontology's data mappings and business knowledge, load business data and vector resources, then check them with questions |
+| `ontomato-book-ontology-builder` | derive a book-specific ontology from full reading, with source evidence and analysis, then hand a deployable package to ontomap-builder |
+| `ontomato-analyst` | query and analyze business objects and relationships through the same ontology |
+| `ontomato-app-builder` | build MetricViews, Actions and application pages on the ontology, in the configured single- or two-environment setup |
+| `ontomato-agent-builder` | configure agents (prompt, MetricViews, Actions, MCP services, skills) and external MCP services |
+| `ontomato-adapter-builder` | implement a new data-source type in a compatible development checkout; ordinary database connection setup uses ontomap-builder |
+
+The skills share one ontology model: business object types, their attributes and directed
+relationships, and mappings to real data. Using the deployed capabilities does not require
+the product source. Adapter development is a separate workflow that does require a development
+checkout. Each package explains its prerequisites, operation effects and limits for the agent.
 
 For deep analysis reports, also add the MCP server `http://<host>:3000/mcp/analysis-agents`
 (Streamable HTTP) to your agent.
@@ -190,8 +198,8 @@ For deep analysis reports, also add the MCP server `http://<host>:3000/mcp/analy
 <details>
 <summary>Install without the <code>skills</code> CLI</summary>
 
-Copy the skill directories from [`agent-skills/`](agent-skills) into your agent's skills
-directory, for example:
+Copy whole skill directories, including their scripts, configuration and local references,
+from [`agent-skills/`](agent-skills) into your agent's skills directory, for example:
 
 ```bash
 mkdir -p .claude/skills && cp -R agent-skills/* .claude/skills/   # Claude Code
@@ -241,8 +249,8 @@ If you are a coding agent asked to set Ontomato up:
 
 Ontomato is in beta. Current limits:
 
-- PostgreSQL is the only supported business database, and a deployment works with one
-  datasource at a time.
+- PostgreSQL, MySQL, SQL Server, DuckDB, and Neo4j are the supported business databases, and a
+  deployment works with one datasource at a time.
 - The open-source edition has no login: everyone who can reach the ports has full access.
   Run it on a trusted network.
 
@@ -260,8 +268,8 @@ Local development and image builds are described in [docs/development.md](docs/d
 
 ## Community
 
-- Questions and ideas: [GitHub Discussions](https://github.com/Aohan/Ontomato/discussions)
-- Bugs: [GitHub Issues](https://github.com/Aohan/Ontomato/issues)
+- Questions and ideas: [GitHub Discussions](https://github.com/ontomato-ai/Ontomato/discussions)
+- Bugs: [GitHub Issues](https://github.com/ontomato-ai/Ontomato/issues)
 - Contributing: [CONTRIBUTING.md](CONTRIBUTING.md)
 - Security: report vulnerabilities privately as described in [SECURITY.md](SECURITY.md)
 

@@ -4,10 +4,11 @@ import type {
   Message,
   ExecutionSnapshotStep,
 } from "../../../types/chat";
-import type { ChatClientEvent } from "@ontomato/contracts/chat";
+import { applyAbcContent, type ChatClientEvent } from "@ontomato/contracts/chat";
 import { nextTick, type Ref } from "vue";
 
 import { buildExecutionStepId } from "../../../utils/snapshot-helpers";
+import { buildResultDatasets } from "../../query-view/utils/result-datasets";
 import { t, workbenchI18n } from "../../../i18n";
 import { authHost } from "../../../utils/auth";
 import { chatApi } from "../api";
@@ -38,6 +39,8 @@ export interface SendStandardMessageOptions {
   displayText: string;
   token: string;
   threadListRef?: any;
+  resumeReportSeq?: number;
+  onRunNotFound?: () => void | Promise<void>;
 }
 
 export interface ResumeStandardMessageOptions {
@@ -137,6 +140,8 @@ export function createStandardSender(deps: StandardStreamDeps) {
               requestSeq:
                 typeof json.requestSeq === "number" ? json.requestSeq : current?.requestSeq,
             });
+          } else if (json.type === "report_checkpoint") {
+            updateStreamingSnapshot({ reportEvidenceRequestSeq: json.requestSeq, reportRecoveryRequestSeq: json.resumable ? json.requestSeq : undefined });
           } else if (json.type === "turn_key") {
             updateStreamingSnapshot({
               turnKey: json.turnKey,
@@ -154,6 +159,8 @@ export function createStandardSender(deps: StandardStreamDeps) {
               showPendingUnderstanding: true,
               analysisText: `${current?.analysisText || ""}${json.content}`,
             });
+          } else if (json.type === "turn_finished") {
+            updateStreamingSnapshot({ durationMs: json.durationMs });
           } else if (json.type === "title") {
             if (!hasSettledTitle.value) {
               hasSettledTitle.value = true;
@@ -185,12 +192,10 @@ export function createStandardSender(deps: StandardStreamDeps) {
               });
             }
           } else if (json.type === "abc_content") {
-            if (json.content) {
-              updateStreamingSnapshot({
-                primaryText: json.content,
-                showPendingUnderstanding: true,
-              });
-            }
+            updateStreamingSnapshot({
+              primaryText: applyAbcContent(current?.primaryText || "", json),
+              showPendingUnderstanding: true,
+            });
           } else if (json.type === "result") {
             const resultContent =
               typeof json.content === "string"
@@ -209,19 +214,11 @@ export function createStandardSender(deps: StandardStreamDeps) {
           } else if (json.type === "query_datasets") {
             updateStreamingSnapshot({
               showPendingUnderstanding: true,
-              datasets: Array.isArray(json.datasets)
-                ? json.datasets.map((dataset: any, index: number) => ({
-                    id: `dataset-${index}`,
-                    title:
-                      dataset?.subQuestion ||
-                      dataset?.name ||
-                      dataset?.description ||
-                      `${t("hotData.dataTable")}_${index + 1}`,
-                    rows: Array.isArray(dataset?.data) ? dataset.data : [],
-                    dsl: dataset?.dsl,
-                    subQuestion: dataset?.subQuestion,
-                  }))
-                : [],
+              // The live datasets take the same derivation as the execution facts, ids included.
+              datasets: buildResultDatasets(
+                { datasets: json.datasets as QueryExecutionFacts["datasets"] },
+                t
+              ),
               graphNodeIds: Array.isArray(json.nodeIds)
                 ? json.nodeIds.map((item: unknown) => String(item)).filter(Boolean)
                 : current?.graphNodeIds,
@@ -420,6 +417,7 @@ export function createStandardSender(deps: StandardStreamDeps) {
       threadId,
       runId,
       locale: workbenchI18n().global.locale.value as string,
+      ...(options.resumeReportSeq === undefined ? {} : { resumeReportSeq: String(options.resumeReportSeq) }),
       ...(token ? { tk: token } : {}),
       ...(!token && apiKey ? { apiKey } : {}),
     });
@@ -427,6 +425,7 @@ export function createStandardSender(deps: StandardStreamDeps) {
       openStream: () => chatApi.openStream(params),
       threadId,
       threadListRef,
+      onRunNotFound: options.onRunNotFound,
     });
   }
 

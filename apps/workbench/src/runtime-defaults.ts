@@ -7,6 +7,6 @@ export const ossRuntimeDefaults: RuntimeDefaults = {
 
   defaultDataAdapter: "sql",
   /** The OSS edition's historical default request locale. */
-  requestLocaleFallback: "en",
+  requestLocaleFallback: "zh-CN",
 };
 

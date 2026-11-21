@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   classifyWindows,
@@ -111,6 +114,28 @@ test("Java roles use the launcher's main-class position, not any argv mention", 
   assert.equal(role(`"${JAVA}" -cp "${CTX.devRoot}\\conf;x.jar" io.ontomato.dataengine.OtherMain`, JAVA), undefined);
   // -jar form has no main class argument, unknown form not claimed.
   assert.equal(role(`"${JAVA}" -jar "${CTX.devRoot}\\conf\\app.jar" io.ontomato.dataengine.RAGMain`, JAVA), undefined);
+});
+
+test("Spring Boot classpath argument files keep Java ownership bound to this checkout", () => {
+  const temp = mkdtempSync(join(tmpdir(), "ontomato-classpath-"));
+  const file = join(temp, "spring boot.argfile");
+  const command = `"${JAVA}" -cp "@${file}" io.ontomato.dataengine.RAGMain`;
+  try {
+    writeFileSync(file, JSON.stringify(`${CTX.devRoot}\\conf;C:\\deps\\x.jar`) + "\n");
+    assert.equal(role(command, JAVA), "ragmain");
+    assert.equal(role(command.replace("RAGMain", "OtherMain"), JAVA), undefined);
+    writeFileSync(file, JSON.stringify(`${CTX.devRoot}-other\\conf;C:\\deps\\x.jar`));
+    assert.equal(role(command, JAVA), undefined);
+    writeFileSync(file, '"unterminated');
+    assert.equal(role(command, JAVA), undefined);
+    writeFileSync(file, JSON.stringify([`${CTX.devRoot}\\conf`]));
+    assert.equal(role(command, JAVA), undefined);
+    assert.equal(role(`"${JAVA}" -cp @missing.argfile io.ontomato.dataengine.RAGMain`, JAVA), undefined);
+    rmSync(file);
+    assert.equal(role(command, JAVA), undefined);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
 });
 
 test("javaMainClass reads the position, skipping option values", () => {

@@ -1,3 +1,4 @@
+import { logDslDiagnostic } from "./dsl-diagnostics";
 import { getApiConfig, buildHeaders, buildUrl } from "../../config/data-query-api";
 import type { ApiConfig } from "../../config/data-query-api";
 import { environment } from "../../config/environment";
@@ -108,6 +109,8 @@ function buildDataChunkFromEvent(
   if (event.error !== undefined && !error) {
     throw new Error(tApp("queryFixed.215"));
   }
+
+  logDslDiagnostic(event.dsl, `abc.${source}`);
 
   const common: DataChunkBase = {
     dsl: event.dsl,

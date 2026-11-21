@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { agentChatMessageSchema, agentResponseEventSchema } from "./agent-chat";
 
 export const governanceSourceSchema = z.object({
   id: z.string().min(1),
@@ -29,13 +30,6 @@ export const governanceWorkSchema = z.object({
   sources: z.array(governanceSourceSchema),
 });
 
-export const governanceMessageSchema = z.object({
-  id: z.string(),
-  role: z.enum(["user", "assistant"]),
-  text: z.string(),
-  timestamp: z.number(),
-});
-
 export const governanceSessionSchema = z.object({
   id: z.string().uuid(),
   domainId: z.string().min(1),
@@ -44,9 +38,10 @@ export const governanceSessionSchema = z.object({
   updatedAt: z.string(),
   revision: z.number().int().nonnegative(),
   status: z.enum(["idle", "running", "stopped", "failed"]),
-  messages: z.array(governanceMessageSchema),
-  draft: z.string(),
-  activity: z.string(),
+  /** Harness turn of a running round; its response stream is addressed by this id. */
+  activeTurnId: z.string().min(1).nullable(),
+  /** Settled Harness messages; the running turn arrives only through the response stream. */
+  messages: z.array(agentChatMessageSchema),
   error: z.string().nullable(),
   work: governanceWorkSchema,
 });
@@ -89,3 +84,10 @@ export type GovernanceSourceRead = z.infer<typeof governanceSourceReadSchema>;
 export const governanceMessageInputSchema = z.object({
   message: z.string().trim().min(1).max(20_000),
 });
+
+/** Response stream of one governance turn: shared chat events plus saved business work. */
+export const governanceStreamEventSchema = z.union([
+  agentResponseEventSchema,
+  z.object({ type: z.literal("work"), work: governanceWorkSchema }),
+]);
+export type GovernanceStreamEvent = z.infer<typeof governanceStreamEventSchema>;

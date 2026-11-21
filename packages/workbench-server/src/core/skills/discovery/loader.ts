@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import type { SkillMeta } from "../types";
-import { normalizeSkillPackagePath, readSkillMarkdown } from "../manifest";
+import { normalizeSkillPackagePath, parseSkillMarkdownFrontmatter } from "../manifest";
 import { createLogger } from "../../../logging/logger";
 import { tApp } from "../../../i18n";
 
@@ -33,7 +33,7 @@ export function loadSkillContent(skill: SkillMeta): string | null {
 
   try {
     if (!fs.existsSync(skill.skillMdPath)) return null;
-    return readSkillMarkdown(skill.skillMdPath)?.content ?? null;
+    return parseSkillMarkdownFrontmatter(fs.readFileSync(skill.skillMdPath, "utf8"))?.content ?? null;
   } catch (error) {
     logger.warn(`[Loader] Failed to load SKILL.md for ${skill.id}:`, error);
     return null;

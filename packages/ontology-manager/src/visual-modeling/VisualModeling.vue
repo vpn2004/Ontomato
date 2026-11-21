@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch } from "vue";
+import { computed, ref, onMounted, onUnmounted, watch } from "vue";
 import { ElButton, ElTag, vLoading } from "element-plus";
+import { D3ForceLayout } from "@antv/g6";
+import { graphLayout, initialNodePosition } from "../ontology-graph-layout";
 import { useManagerFeedback } from "../feedback";
-import { ArrowLeft, Box, Link2, Maximize2, Minus, Pencil, Plus, Trash2 } from "lucide-vue-next";
+import { ArrowLeft, Box, Link2, Maximize, Minus, Network, Pencil, Plus, Trash2 } from "lucide-vue-next";
 import { Graph, Node, Edge } from "@antv/x6";
-import { useManagerClient, useManagerContext, useOntologyText, useSharedText } from "../context";
+import { useManagerAdapter, useManagerClient, useManagerContext, useOntologyText, useSharedText } from "../context";
 import VisualModelingDialogs from "./VisualModelingDialogs.vue";
 import VisualModelingRightPanel from "./VisualModelingRightPanel.vue";
 import VisualModelingAttributeDialog, {
@@ -18,17 +20,17 @@ const { ot } = useOntologyText();
 const props = defineProps<{ focus: string; focusId: string; backToPlayground: boolean }>();
 const emit = defineEmits<{ back: [] }>();
 const context = useManagerContext();
+const { adapter, capabilities } = useManagerAdapter();
 const {
   createOntologyAttribute,
   createOntologyObject,
   createOntologyRelation,
   deleteOntologyObject,
   deleteOntologyRelation,
-  getBusinessConfig,
   getMetas,
-  listDataAdapters,
   updateOntologyAttribute,
   updateOntologyObject,
+  updateOntologyRelation,
 } = useManagerClient();
 
 interface ClassDef {
@@ -45,7 +47,6 @@ interface AttrDef {
   showName: string;
   attrDesc: string;
   enable: boolean;
-  bizzkey: string;
   bizzkeyBool: boolean;
   primaryKey: boolean;
   isNew?: boolean;
@@ -146,24 +147,14 @@ let graph: Graph | null = null;
 
 const classList = ref<ClassDef[]>([]);
 const relationList = ref<RelationDef[]>([]);
-// When the current data adapter is SQL-based (the sql flag in the backend adapter list), relations can take join fields.
-const showJoinFields = ref(false);
+const requiresJoinFields = computed(() => adapter.value?.requiresJoinFields ?? null);
 
 const selectedNode = ref<ClassDef | null>(null);
 const selectedEdge = ref<RelationDef | null>(null);
 
-async function loadAdapterConfig() {
-  try {
-    const [config, adapters] = await Promise.all([getBusinessConfig(), listDataAdapters()]);
-    const current: string = config.data.dataAdapter;
-    showJoinFields.value = (adapters.data as { type: string; sql: boolean }[]).some(
-      ({ type, sql }) => type === current && sql
-    );
-  } catch {
-    showJoinFields.value = false;
-  }
-}
 const loading = ref(false);
+const layouting = ref(false);
+let activeLayout: D3ForceLayout | null = null;
 
 const originalAttrShowNameMap = ref<Record<string, string>>({});
 const originalClassShowName = ref("");
@@ -399,6 +390,7 @@ function initGraph() {
       arrowheadMovable: true,
     },
     connecting: {
+      validateConnection: () => capabilities.value.schemaWrite,
       snap: true,
       allowBlank: false,
       allowLoop: true,
@@ -530,6 +522,7 @@ function initGraph() {
   });
 
   g.on("edge:connected", ({ edge, isNew }: { edge: Edge; isNew: boolean }) => {
+    if (!capabilities.value.schemaWrite) return;
     const source = edge.getSourceCellId();
     const target = edge.getTargetCellId();
     if (!source || !target) return;
@@ -757,7 +750,6 @@ async function loadData() {
           showName: a.showName || a.name,
           attrDesc: a.attrDesc || "",
           enable: toBoolean(a.enable, true),
-          bizzkey: a.bizzkey ?? "",
           bizzkeyBool: toBoolean(raw),
           primaryKey: toBoolean(a.primaryKey),
         };
@@ -770,6 +762,8 @@ async function loadData() {
         fromclass: rel.fromclass,
         toclass: rel.toclass,
         desc: rel.desc || "",
+        fromField: rel.fromField,
+        toField: rel.toField,
         isNew: false,
       })
     );
@@ -789,6 +783,7 @@ async function loadData() {
 }
 
 function openAddNodeDialog() {
+  if (!capabilities.value.schemaWrite) return;
   newNodeName.value = "";
   newNodeShowName.value = "";
   newNodeDesc.value = "";
@@ -806,14 +801,16 @@ function openPencilNodeDialog(cls: ClassDef) {
 }
 
 function openAddAttrDialog(cls: ClassDef) {
+  if (!capabilities.value.schemaWrite) return;
   attrOwner.value = cls;
   attrDialogVisible.value = true;
 }
 
 async function handleAddAttr(input: NewAttributeInput) {
+  if (!capabilities.value.schemaWrite) return;
   attrSaving.value = true;
   try {
-    await createOntologyAttribute({ ...input, name: input.attrName });
+    await createOntologyAttribute({ ...input });
     attrDialogVisible.value = false;
     await loadData();
     selectNodeByClassName(input.className);
@@ -826,6 +823,7 @@ async function handleAddAttr(input: NewAttributeInput) {
 }
 
 function openAddEdgeDialog() {
+  if (!capabilities.value.schemaWrite) return;
   if (classList.value.length < 2) {
     message.warning(t("hotData.needAtLeastTwoClasses"));
     return;
@@ -858,6 +856,7 @@ function openPencilEdgeDialog(rel: RelationDef) {
 }
 
 async function handleAddNode() {
+  if (!capabilities.value.schemaWrite) return;
   if (!newNodeName.value.trim()) {
     message.warning(t("hotData.enterClassName"));
     return;
@@ -944,6 +943,7 @@ async function handlePencilNode() {
 }
 
 function handleTrash2Node() {
+  if (!capabilities.value.schemaWrite) return;
   if (!selectedNode.value) return;
 
   const nodeToTrash2 = selectedNode.value;
@@ -981,23 +981,27 @@ function handleTrash2Node() {
     .catch(() => {});
 }
 
-async function handleAddEdge() {
-  if (!editingEdge.value) return;
-
+function validateEdgeFields() {
   if (!newEdgeDesc.value.trim()) {
     message.warning(t("hotData.enterRelDesc"));
-    return;
+    return false;
   }
-  if (showJoinFields.value) {
+  if (requiresJoinFields.value) {
     if (!newEdgeFromField.value.trim()) {
       message.warning(t("hotData.enterSrcField"));
-      return;
+      return false;
     }
     if (!newEdgeToField.value.trim()) {
       message.warning(t("hotData.enterTgtField"));
-      return;
+      return false;
     }
   }
+  return true;
+}
+
+async function handleAddEdge() {
+  if (!capabilities.value.schemaWrite) return;
+  if (!editingEdge.value || !validateEdgeFields()) return;
 
   const edge = editingEdge.value;
   const existingRel = relationList.value.find(
@@ -1030,6 +1034,8 @@ async function handleAddEdge() {
     const idx = relationList.value.findIndex((r) => r.relationship === edge.relationship);
     if (idx >= 0) {
       relationList.value[idx].desc = newEdgeDesc.value.trim();
+      relationList.value[idx].fromField = newEdgeFromField.value;
+      relationList.value[idx].toField = newEdgeToField.value;
       relationList.value[idx].isNew = false;
       selectedEdge.value = relationList.value[idx];
     } else {
@@ -1070,23 +1076,30 @@ function handleCancelEdge() {
   edgeDialogVisible.value = false;
 }
 
-function handlePencilEdge() {
-  if (!editingEdge.value) return;
+async function handlePencilEdge() {
+  if (!editingEdge.value || !validateEdgeFields()) return;
 
   const edge = editingEdge.value;
-  const idx = relationList.value.findIndex((r) => r.relationship === edge.relationship);
-  if (idx >= 0) {
-    relationList.value[idx].desc = newEdgeDesc.value.trim();
-    relationList.value[idx].fromField = newEdgeFromField.value;
-    relationList.value[idx].toField = newEdgeToField.value;
-    selectedEdge.value = relationList.value[idx];
+  const changes = {
+    desc: newEdgeDesc.value.trim(),
+    fromField: newEdgeFromField.value.trim(),
+    toField: newEdgeToField.value.trim(),
+  };
+  try {
+    await updateOntologyRelation(edge.relationship, changes);
+    const saved = relationList.value.find((relation) => relation.relationship === edge.relationship)!;
+    Object.assign(saved, changes);
+    selectedEdge.value = saved;
     renderNodes();
-    message.warning(t("hotData.relDescSaved"));
+    message.success(ot("relationSaved"));
+    edgeDialogVisible.value = false;
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : ot("relationSaveFailed"));
   }
-  edgeDialogVisible.value = false;
 }
 
 function handleTrash2Edge() {
+  if (!capabilities.value.schemaWrite) return;
   if (!selectedEdge.value) return;
 
   const edgeToTrash2 = selectedEdge.value;
@@ -1123,15 +1136,84 @@ function onZoomOut() {
 function onZoomFit() {
   if (!graph) return;
   graph.centerContent();
-  graph.zoomToFit({ padding: 50, maxScale: 1 });
+  graph.zoomToFit({ padding: 48, maxScale: Math.min(1, context.presentation.maxFitZoom ?? 1) });
+}
+
+async function fitRelayoutToContainer(target: Graph) {
+  const container = graphRef.value;
+  if (!container) return;
+  const { width, height } = container.getBoundingClientRect();
+  if (!width || !height) return;
+  target.resize(Math.round(width), Math.round(height));
+  target.zoomToFit({ padding: 48, maxScale: Math.min(1, context.presentation.maxFitZoom ?? 1) });
+  target.centerContent();
+}
+
+async function onRelayout() {
+  if (!graph || loading.value || layouting.value || !graph.getNodes().length) return;
+
+  const target = graph;
+  const nodes = target.getNodes().map((node, index, all) => ({
+    id: node.id,
+    ...initialNodePosition(index, all.length),
+  }));
+  const edges = target.getEdges().flatMap((edge) => {
+    const source = edge.getSourceCellId();
+    const targetId = edge.getTargetCellId();
+    return source && targetId ? [{ id: edge.id, source, target: targetId }] : [];
+  });
+  const { width = 0, height = 0 } = graphRef.value?.getBoundingClientRect() ?? {};
+  const layout = new D3ForceLayout({
+    ...graphLayout(),
+    nodeSize: 62,
+    center: { x: width / 2, y: height / 2 },
+  });
+  activeLayout = layout;
+  layouting.value = true;
+  try {
+    // Match G6's non-animated layout runner: initialize, stop its timer, then
+    // calculate the final positions immediately with the same 300 iterations.
+    const layoutExecution = layout.execute({ nodes, edges });
+    layout.stop();
+    layout.tick(300);
+    // Stopping the timer leaves execute's end-event promise pending; only handle
+    // initialization failures here, rather than waiting for a timer that is stopped.
+    void layoutExecution.catch((error) => {
+      if (graph === target) message.error(error instanceof Error ? error.message : String(error));
+    });
+    if (graph !== target || activeLayout !== layout) return;
+    target.batchUpdate(() => {
+      layout.forEachNode(({ id, x, y }) => {
+        const node = target.getCellById(String(id));
+        if (node?.isNode() && Number.isFinite(x) && Number.isFinite(y)) {
+          // Layout positions are node centers; X6 positions are top-left corners.
+          node.position(x! - NODE_CENTER, y! - NODE_CENTER);
+        }
+      });
+      updateEdgeAnchors();
+    });
+    await fitRelayoutToContainer(target);
+    saveLayout();
+  } catch (error) {
+    if (graph === target) message.error(error instanceof Error ? error.message : String(error));
+  } finally {
+    layout.stop();
+    layout.destroy();
+    if (activeLayout === layout) {
+      activeLayout = null;
+      layouting.value = false;
+    }
+  }
 }
 
 onMounted(() => {
-  loadAdapterConfig();
   loadData();
 });
 
 onUnmounted(() => {
+  activeLayout?.stop();
+  activeLayout?.destroy();
+  activeLayout = null;
   if (graph) {
     graph.dispose();
     graph = null;
@@ -1248,6 +1330,7 @@ async function saveAttrShowName(cls: ClassDef, prop: AttrDef) {
 }
 
 async function onAttrEnableChange(cls: ClassDef, prop: AttrDef) {
+  if (!capabilities.value.schemaWrite) return;
   try {
     await updateOntologyAttribute(cls.className, prop, {
       attrDesc: prop.attrDesc,
@@ -1264,11 +1347,20 @@ async function onAttrBizKeyChange(cls: ClassDef, prop: AttrDef) {
   const shouldReturn = !!prop.bizzkeyBool;
   try {
     await updateOntologyAttribute(cls.className, prop, { bizzkeyBool: shouldReturn });
-    prop.bizzkey = String(shouldReturn);
     message.success(shouldReturn ? t("hotData.mustReturnSet") : t("hotData.mustReturnUnset"));
   } catch {
     prop.bizzkeyBool = !prop.bizzkeyBool;
     message.error(t("hotData.bizzkeySaveFailed"));
+  }
+}
+
+async function onAttrPrimaryKeyChange(cls: ClassDef, prop: AttrDef) {
+  try {
+    await updateOntologyAttribute(cls.className, prop, { primaryKey: true });
+    prop.primaryKey = true;
+    message.success(ot("primaryKeySet"));
+  } catch {
+    message.error(ot("primaryKeySetFailed"));
   }
 }
 
@@ -1342,21 +1434,22 @@ async function saveClassDesc(cls: ClassDef) {
   <div class="visual-modeling">
     <div class="toolbar">
       <div class="toolbar-group toolbar-group-primary">
-        <el-button v-if="backToPlayground" :icon="ArrowLeft" @click="emit('back')">
+        <el-button v-if="backToPlayground" text :icon="ArrowLeft" @click="emit('back')">
           {{ ot("backToGraph") }}
         </el-button>
-        <el-button type="primary" :icon="Box" @click="openAddNodeDialog">
+        <el-button v-if="capabilities.schemaWrite" type="primary" :icon="Box" @click="openAddNodeDialog">
           {{ t("hotData.addClass") }}
         </el-button>
-        <el-button :icon="Link2" @click="openAddEdgeDialog">
+        <el-button v-if="capabilities.schemaWrite" type="primary" plain :icon="Link2" @click="openAddEdgeDialog">
           {{ t("hotData.addRelation") }}
         </el-button>
       </div>
 
-      <div class="zoom-controls">
-        <el-button :icon="Minus" :title="ot('zoomOut')" @click="onZoomOut" />
-        <el-button :icon="Plus" :title="ot('zoomIn')" @click="onZoomIn" />
-        <el-button :icon="Maximize2" :title="ot('fitCanvas')" @click="onZoomFit" />
+      <div class="zoom-controls" role="toolbar" :aria-label="ot('fitCanvas')">
+        <el-button text :title="ot('zoomIn')" :aria-label="ot('zoomIn')" @click="onZoomIn"><Plus :size="18" /></el-button>
+        <el-button text :title="ot('zoomOut')" :aria-label="ot('zoomOut')" @click="onZoomOut"><Minus :size="18" /></el-button>
+        <el-button text :title="ot('fitCanvas')" :aria-label="ot('fitCanvas')" @click="onZoomFit"><Maximize :size="18" /></el-button>
+        <el-button text :title="ot('relayout')" :aria-label="ot('relayout')" :disabled="loading || layouting || !classList.length" @click="onRelayout"><Network :size="18" /></el-button>
       </div>
 
       <div class="selection-cluster">
@@ -1371,7 +1464,9 @@ async function saveClassDesc(cls: ClassDef) {
         <div class="toolbar-group toolbar-group-selection">
           <el-button
             :icon="Pencil"
-            :disabled="!selectedNode && !selectedEdge"
+            type="primary"
+            plain
+            :disabled="(!selectedNode && !selectedEdge) || (!capabilities.schemaWrite && !!selectedEdge)"
             @click="
               selectedNode
                 ? openPencilNodeDialog(selectedNode)
@@ -1383,7 +1478,9 @@ async function saveClassDesc(cls: ClassDef) {
             {{ t("common.edit") }}
           </el-button>
           <el-button
+            v-if="capabilities.schemaWrite"
             type="danger"
+            plain
             :icon="Trash2"
             :disabled="!selectedNode && !selectedEdge"
             @click="selectedNode ? handleTrash2Node() : handleTrash2Edge()"
@@ -1410,6 +1507,7 @@ async function saveClassDesc(cls: ClassDef) {
         @save-class-desc="saveClassDesc"
         @attr-enable-change="onAttrEnableChange"
         @attr-biz-key-change="onAttrBizKeyChange"
+        @attr-primary-key-change="onAttrPrimaryKeyChange"
         @attr-show-name-focus="onAttrShowNameFocus"
         @attr-show-name-blur="onAttrShowNameBlur"
         @save-attr-desc="saveAttrDesc"
@@ -1430,7 +1528,7 @@ async function saveClassDesc(cls: ClassDef) {
       :editing-node="editingNode"
       :editing-edge="editingEdge"
       :class-list="classList"
-      :show-join-fields="showJoinFields"
+      :requires-join-fields="requiresJoinFields"
       @update-edge-field="updateEditingEdgeField"
       @add-node="handleAddNode"
       @pencil-node="handlePencilNode"

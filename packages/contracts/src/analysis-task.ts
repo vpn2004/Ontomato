@@ -5,6 +5,7 @@ import type {
 } from "./analysis-presentation";
 import type { AnalysisChartDiagnostic, AnalysisChartResult } from "./analysis-charts";
 import type { EgressMessage } from "./agent-egress";
+import type { AnalysisGraphScope } from "./analysis-agent";
 export type AnalysisTaskStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 
 export type AnalysisTaskTriggerSource = "manual" | "scheduled";
@@ -20,6 +21,8 @@ export interface AnalysisTask {
   runState?: DeepAnalysisTaskPayload["runState"];
   /** Whether a report deliverable is attached; when off, tasks are accepted turn by turn like regular sessions */
   reportDeliverableEnabled?: boolean;
+  graphScopeSnapshot?: AnalysisGraphScope;
+  classNamesSnapshot?: string[];
   threadId?: string;
   question?: string;
   scheduleExpression?: string;
@@ -33,8 +36,6 @@ export interface AnalysisTask {
   nextRunAt?: number;
   createdAt: number;
   updatedAt: number;
-  /** Status and result of each past run; the current report still treats analysis artifacts as the only authority. */
-  runHistory?: AnalysisTaskRun[];
 }
 
 export interface AnalysisTaskRun {
@@ -46,6 +47,7 @@ export interface AnalysisTaskRun {
   resultSummary?: string;
   /** Report body at the end of that run; only for historical run review, never part of the current report decision. */
   resultReport?: string;
+  /** That run's replay snapshot; run lists omit it and `GET /:id/runs/:runId` returns it. */
   snapshot?: unknown;
   followUpMessages?: Array<{
     role: "user" | "assistant";
@@ -57,10 +59,8 @@ export interface AnalysisTaskRun {
   completedAt?: number;
 }
 
-export interface AnalysisTaskDetail extends AnalysisTask, Partial<DeepAnalysisTaskPayload> {}
-
 export interface AnalysisTaskPage {
-  tasks: AnalysisTaskDetail[];
+  tasks: AnalysisTask[];
   total: number;
   limit: number;
   offset: number;

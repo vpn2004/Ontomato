@@ -1,4 +1,7 @@
+import type { ResultSourceWindows } from "@ontomato/contracts/result-window";
+import { randomUUID } from "node:crypto";
 import type { AbcProgramDashboard } from "@ontomato/contracts/dashboard";
+import type { QueryDatasetIdentity, ResultTruncation } from "@ontomato/contracts/query-execution";
 import { createModel } from "../../config/model-factory";
 import { modelAgentName } from "../../logging/model-agents";
 import { renderPrompt } from "../../core/prompts/loader";
@@ -19,7 +22,8 @@ export type FieldDisplayPlanItem = {
 
 export type FieldDisplayPlan = Record<string, FieldDisplayPlanItem>;
 
-export interface Dataset {
+/** A result dataset; a partial one carries the data engine's truncation marker unchanged. */
+export interface Dataset extends QueryDatasetIdentity, Partial<ResultTruncation>, ResultSourceWindows {
   name: string;
   description: string;
   columns: string[];
@@ -53,8 +57,6 @@ export function rowsFromQueryAnswerPayloads(
   return payloads.flatMap((payload) => normalizeAnswerRows(payload.answer));
 }
 
-const TZ_CN = "Asia/Shanghai";
-
 function isISODateTimeString(s: string): boolean {
   return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?$/.test(s);
 }
@@ -65,9 +67,8 @@ function isSpaceSeparatedDatetime(s: string): boolean {
   return RE_SPACE_DATETIME.test(s.trim());
 }
 
-function formatInCNTimeZone(date: Date, withTime: boolean, locale?: string): string {
+function formatInTimeZone(date: Date, withTime: boolean, locale?: string): string {
   const dtf = new Intl.DateTimeFormat(locale ? resolveLocale(locale) : "sv-SE", {
-    timeZone: TZ_CN,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -83,9 +84,8 @@ function formatInCNTimeZone(date: Date, withTime: boolean, locale?: string): str
   return dtf.format(date);
 }
 
-function getHMSInCNTimeZone(date: Date): string {
+function getHMSInTimeZone(date: Date): string {
   const dtf = new Intl.DateTimeFormat("sv-SE", {
-    timeZone: TZ_CN,
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
@@ -94,13 +94,13 @@ function getHMSInCNTimeZone(date: Date): string {
   return dtf.format(date);
 }
 
-function formatISOToCN(iso: string, locale?: string): string {
+function formatISOToLocalTime(iso: string, locale?: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
 
-  const hms = getHMSInCNTimeZone(d);
-  if (hms === "00:00:00") return formatInCNTimeZone(d, false, locale);
-  return formatInCNTimeZone(d, true, locale);
+  const hms = getHMSInTimeZone(d);
+  if (hms === "00:00:00") return formatInTimeZone(d, false, locale);
+  return formatInTimeZone(d, true, locale);
 }
 
 function formatSpaceSepDatetime(raw: string, locale?: string): string {
@@ -108,15 +108,15 @@ function formatSpaceSepDatetime(raw: string, locale?: string): string {
   const d = new Date(cleaned);
   if (Number.isNaN(d.getTime())) return raw;
 
-  const hms = getHMSInCNTimeZone(d);
-  if (hms === "00:00:00") return formatInCNTimeZone(d, false, locale);
-  return formatInCNTimeZone(d, true, locale);
+  const hms = getHMSInTimeZone(d);
+  if (hms === "00:00:00") return formatInTimeZone(d, false, locale);
+  return formatInTimeZone(d, true, locale);
 }
 
 function simplifyTimeString(val: unknown, locale?: string): string | null {
   if (typeof val !== "string") return null;
   const s = val.trim();
-  if (isISODateTimeString(s)) return formatISOToCN(s, locale);
+  if (isISODateTimeString(s)) return formatISOToLocalTime(s, locale);
   if (isSpaceSeparatedDatetime(s)) return formatSpaceSepDatetime(s, locale);
   return null;
 }
@@ -531,7 +531,7 @@ function formatCell(
     if (allowTimestamp && /^-?\d+$/.test(rawStr)) {
       const n = Number(rawStr);
       if (Number.isFinite(n) && n > 0) {
-        const toCN = (ms: number) => formatISOToCN(new Date(ms).toISOString(), locale);
+        const toLocalTime = (ms: number) => formatISOToLocalTime(new Date(ms).toISOString(), locale);
 
         const MIN_MS = Date.UTC(1970, 0, 1);
         const MAX_MS = Date.UTC(2101, 0, 1);
@@ -550,7 +550,7 @@ function formatCell(
           if (isMsInRange(ms2)) ms = ms2;
         }
 
-        if (ms != null) return toCN(ms);
+        if (ms != null) return toLocalTime(ms);
       }
     }
 
@@ -678,17 +678,23 @@ function sortHeaders(headers: string[], rows: Record<string, unknown>[]): string
     .map((x) => x.h);
 }
 
+/** The empty state of a table: a partial result only says its processed portion had no rows. */
+function emptyTableText(locale?: string, truncation?: Partial<ResultTruncation>): string {
+  return tForLocale(locale, truncation?.truncated ? "query.display.emptyPartial" : "query.display.empty");
+}
+
 export function renderDataAsTable(
   data: unknown,
   fieldDisplayPlan: FieldDisplayPlan | undefined,
   options?: {
     maxRows?: number;
     locale?: string;
+    truncation?: Partial<ResultTruncation>;
   }
 ): string {
   const normalized = normalizeData(data);
   if (normalized.length === 0) {
-    return tForLocale(options?.locale, "query.display.empty");
+    return emptyTableText(options?.locale, options?.truncation);
   }
   const plan =
     fieldDisplayPlan || fallbackDisplayPlan(collectAllHeaders(normalized), options?.locale);
@@ -765,6 +771,7 @@ export async function buildTableFromRows(
     outputKeyDescriptionMDTable?: string;
     code?: string;
     locale?: string;
+    truncation?: Partial<ResultTruncation>;
   }
 ): Promise<{
   tableSegment: string;
@@ -773,7 +780,7 @@ export async function buildTableFromRows(
 }> {
   if (rows.length === 0) {
     return {
-      tableSegment: tForLocale(options?.locale, "query.display.empty"),
+      tableSegment: emptyTableText(options?.locale, options?.truncation),
       normalizedRows: [],
     };
   }
@@ -823,7 +830,7 @@ export function extractAnswerFromData(data: unknown): string {
 }
 
 export function convertChunkToDataset(
-  chunk: { data: Record<string, unknown>[]; dsl?: unknown },
+  chunk: { data: Record<string, unknown>[]; dsl?: unknown; truncation?: ResultTruncation } & ResultSourceWindows,
   index: number,
   locale?: string
 ): Dataset {
@@ -836,10 +843,13 @@ export function convertChunkToDataset(
   const columns = collectAllHeaders(chunk.data);
 
   return {
+    id: randomUUID(),
     name,
     description: problem,
     columns,
     data: chunk.data,
     dsl: chunk.dsl,
+    ...chunk.truncation,
+    sourceWindows: chunk.sourceWindows,
   };
 }

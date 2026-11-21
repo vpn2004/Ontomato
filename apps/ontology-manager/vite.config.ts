@@ -21,6 +21,8 @@ export default defineConfig(({ command, mode }) => {
     );
   }
   return {
+    // Relative asset URLs: the same image serves at the root or under any prefix a gateway strips.
+    base: "./",
     plugins: [vue()],
     build: { outDir: "dist", emptyOutDir: true },
     server: {
@@ -31,6 +33,8 @@ export default defineConfig(({ command, mode }) => {
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/api\/data-query/, ""),
         },
+        "/api/skills": { target: "http://127.0.0.1:3000", changeOrigin: true },
+        "/api/echart": { target: "http://127.0.0.1:3000", changeOrigin: true },
       },
     },
   };

@@ -10,7 +10,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), "p3-t3-import-"));
 installContentLayout({
   runtimeRoot: root,
   prompts: [],
-  skillTemplate: [],
+  publicSkillsRoot: path.join(os.tmpdir(), "no-public-skills"),
   runtimeResources: [],
 });
 

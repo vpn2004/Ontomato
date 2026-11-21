@@ -83,7 +83,23 @@ export function startManagerShell(profile: ManagerShellProfile) {
   }
 
   createApp({
-    render: () =>
+    render: () => h("div", { class: "manager-shell" }, [
+      !embedded && profile.localeSync && h("div", { class: "manager-shell-preferences" }, [
+        h("select", {
+          "aria-label": "中文 / English",
+          value: locale.value,
+          onChange: (event: Event) => {
+            const value = (event.target as HTMLSelectElement).value;
+            if (!Object.hasOwn(profile.messages, value)) return;
+            locale.value = value;
+            document.documentElement.lang = value;
+            document.documentElement.dir = value === "ar" ? "rtl" : "ltr";
+            try { localStorage.setItem("app-locale", value); } catch { /* Persistence is optional. */ }
+          },
+        }, Object.keys(profile.messages).map((value) =>
+          h("option", { value }, value === "zh-CN" ? "简体中文" : value === "en" ? "English" : value)
+        )),
+      ]),
       credential.value
         ? h(OntologyManager, {
             apiBase,
@@ -107,5 +123,6 @@ export function startManagerShell(profile: ManagerShellProfile) {
               ? ontologyText(messages(), "requestFailedStatus", { status: 401 })
               : ontologyText(messages(), "credentialMissing")
           ),
+    ]),
   }).mount("#app");
 }

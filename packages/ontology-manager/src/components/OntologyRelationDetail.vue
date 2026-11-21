@@ -1,14 +1,16 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref, watch } from "vue";
 import { ArrowLeft, ArrowRight, Save, Trash2 } from "lucide-vue-next";
-import { ElAlert, ElButton, ElEmpty, ElForm, ElFormItem, ElInput, vLoading } from "element-plus";
+import { ElAlert, ElButton, ElEmpty, ElForm, ElFormItem, ElInput, ElOption, ElSelect, vLoading } from "element-plus";
 import { useManagerFeedback } from "../feedback";
-import type { OntologyRelation } from "../api";
-import { useManagerClient, useOntologyText } from "../context";
+import type { OntologyAttribute, OntologyRelation } from "../api";
+import { useManagerAdapter, useManagerClient, useOntologyText, useSharedText } from "../context";
 
 const { ot } = useOntologyText();
+const { t } = useSharedText();
+const { capabilities } = useManagerAdapter();
 const { message, confirm } = useManagerFeedback();
-const { deleteOntologyRelation, loadOntology, updateOntologyRelation } = useManagerClient();
+const { deleteOntologyRelation, loadOntology, updateOntologyRelation, listDataAdapters } = useManagerClient();
 
 const props = defineProps<{ relationship: string }>();
 const emit = defineEmits<{ back: []; updated: []; object: [className: string] }>();
@@ -17,8 +19,11 @@ const loading = ref(false);
 const saving = ref(false);
 const deleting = ref(false);
 const relation = ref<OntologyRelation | null>(null);
+const requiresJoinFields = ref<boolean | null>(null);
+const sourceAttributes = ref<OntologyAttribute[]>([]);
+const targetAttributes = ref<OntologyAttribute[]>([]);
 const objectLabels = ref<Record<string, string>>({});
-const form = reactive({ desc: "" });
+const form = reactive({ desc: "", fromField: "", toField: "" });
 
 function objectLabel(className: string) {
   return objectLabels.value[className] || className;
@@ -26,16 +31,25 @@ function objectLabel(className: string) {
 
 async function loadDetail() {
   loading.value = true;
+  requiresJoinFields.value = null;
   try {
-    const ontology = await loadOntology();
+    const [ontology, { currentType, adapters }] = await Promise.all([loadOntology(), listDataAdapters()]);
+    requiresJoinFields.value = adapters.some(
+      ({ type, requiresJoinFields }) => type === currentType && requiresJoinFields
+    );
     objectLabels.value = Object.fromEntries(
       ontology.objects.map((object) => [object.className, object.showName])
     );
     relation.value =
       ontology.relations.find((item) => item.relationship === props.relationship) || null;
     form.desc = relation.value?.desc || "";
-  } catch {
+    form.fromField = relation.value?.fromField || "";
+    form.toField = relation.value?.toField || "";
+    sourceAttributes.value = ontology.objects.find((object) => object.className === relation.value?.fromclass)?.attrs || [];
+    targetAttributes.value = ontology.objects.find((object) => object.className === relation.value?.toclass)?.attrs || [];
+  } catch (error) {
     relation.value = null;
+    message.error(error instanceof Error ? error.message : t("dataBrowser.loadDataFailed"));
   } finally {
     loading.value = false;
   }
@@ -48,12 +62,19 @@ async function save() {
     message.warning(ot("fillRelationDescription"));
     return;
   }
-  if (desc === relation.value.desc) return;
+  if (requiresJoinFields.value && !form.fromField) {
+    message.warning(t("hotData.enterSrcField"));
+    return;
+  }
+  if (requiresJoinFields.value && !form.toField) {
+    message.warning(t("hotData.enterTgtField"));
+    return;
+  }
+  if (desc === relation.value.desc && form.fromField === (relation.value.fromField || "") && form.toField === (relation.value.toField || "")) return;
   saving.value = true;
   try {
-    await updateOntologyRelation(relation.value.relationship, desc);
-    relation.value.desc = desc;
-    relation.value.showName = desc;
+    await updateOntologyRelation(relation.value.relationship, { desc, fromField: form.fromField, toField: form.toField });
+    Object.assign(relation.value, { desc, showName: desc, fromField: form.fromField, toField: form.toField });
     message.success(ot("relationSaved"));
     emit("updated");
   } catch (error) {
@@ -102,7 +123,7 @@ onMounted(() => void loadDetail());
       </span>
       <span class="title-spacer"></span>
       <el-button
-        v-if="relation"
+        v-if="relation && capabilities.schemaWrite"
         type="danger"
         plain
         :icon="Trash2"
@@ -111,7 +132,7 @@ onMounted(() => void loadDetail());
       >
         {{ ot("delete") }}
       </el-button>
-      <el-button v-if="relation" type="primary" :icon="Save" :loading="saving" @click="save">
+      <el-button v-if="relation" type="primary" :icon="Save" :loading="saving" :disabled="requiresJoinFields === null" @click="save">
         {{ ot("save") }}
       </el-button>
     </header>
@@ -134,6 +155,26 @@ onMounted(() => void loadDetail());
               maxlength="400"
               show-word-limit
             />
+          </el-form-item>
+          <el-form-item :label="t('hotData.srcField')" :required="requiresJoinFields === true">
+            <el-select v-model="form.fromField" :placeholder="t('hotData.enterSrcField')" filterable clearable fit-input-width popper-class="ontology-relation-options" style="width: 100%">
+              <el-option
+                v-for="attribute in sourceAttributes"
+                :key="attribute.name"
+                :label="`${attribute.showName} (${attribute.name})`"
+                :value="attribute.name"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item :label="t('hotData.tgtField')" :required="requiresJoinFields === true">
+            <el-select v-model="form.toField" :placeholder="t('hotData.enterTgtField')" filterable clearable fit-input-width popper-class="ontology-relation-options" style="width: 100%">
+              <el-option
+                v-for="attribute in targetAttributes"
+                :key="attribute.name"
+                :label="`${attribute.showName} (${attribute.name})`"
+                :value="attribute.name"
+              />
+            </el-select>
           </el-form-item>
         </el-form>
       </section>
@@ -168,6 +209,24 @@ onMounted(() => void loadDetail());
           show-icon
         />
       </section>
+      <section v-if="relation.attributes?.length" class="relation-attributes-section">
+        <div class="section-title">
+          <div><h2>{{ ot("relationAttributes") }}</h2></div>
+        </div>
+        <div class="relation-attributes-list">
+          <article v-for="attribute in relation.attributes" :key="attribute.name" class="relation-attribute-row">
+            <div class="relation-attribute-name">
+              <strong>{{ attribute.showName }}</strong>
+              <code>{{ attribute.name }}</code>
+            </div>
+            <span>{{ attribute.type }}</span>
+            <span>{{ attribute.required ? ot("requiredField") : "" }}</span>
+            <p v-if="attribute.attrDesc">{{ attribute.attrDesc }}</p>
+            <p v-if="attribute.enumValues?.length">{{ ot("enumValues") }}: {{ attribute.enumValues.join(", ") }}</p>
+            <p v-if="attribute.enable === false" class="relation-attribute-disabled">{{ ot("relationAttributeUnavailable") }}</p>
+          </article>
+        </div>
+      </section>
     </div>
     <el-empty v-else-if="!loading" :description="ot('relationMissing')" />
   </section>
@@ -180,10 +239,11 @@ onMounted(() => void loadDetail());
 }
 .detail-titlebar {
   display: flex;
+  flex-wrap: wrap;
   min-height: 64px;
   align-items: center;
   gap: var(--spacing-sm);
-  padding: 0 var(--spacing-2xl);
+  padding: var(--spacing-sm) var(--spacing-2xl);
   border-bottom: 1px solid var(--el-border-color);
   background: var(--el-bg-color);
 }
@@ -223,12 +283,49 @@ onMounted(() => void loadDetail());
   padding: var(--spacing-xl) var(--spacing-2xl);
 }
 .definition-section,
-.endpoints-section {
+.endpoints-section,
+.relation-attributes-section {
   min-width: 0;
   padding: var(--spacing-lg);
   border: 1px solid var(--el-border-color);
   border-radius: var(--radius-sm);
   background: var(--el-bg-color);
+}
+.relation-attributes-section {
+  grid-column: 1 / -1;
+}
+.relation-attributes-list {
+  display: grid;
+  margin-top: var(--spacing-md);
+}
+.relation-attribute-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) 100px 100px 2fr;
+  align-items: start;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) 0;
+  border-top: 1px solid var(--el-border-color-lighter);
+  color: var(--el-text-color-secondary);
+  font-size: var(--text-sm);
+}
+.relation-attribute-name strong,
+.relation-attribute-name code {
+  display: block;
+  overflow-wrap: anywhere;
+}
+.relation-attribute-name strong {
+  color: var(--el-text-color-primary);
+}
+.relation-attribute-name code {
+  color: var(--el-text-color-secondary);
+  font-size: var(--text-xs);
+}
+.relation-attribute-row p {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+.relation-attribute-disabled {
+  color: var(--el-color-warning);
 }
 .section-title {
   display: flex;
@@ -249,6 +346,8 @@ h2 {
   font-size: var(--text-sm);
 }
 .endpoint-card {
+  min-width: 0;
+  overflow-wrap: anywhere;
   display: block;
   width: 100%;
   padding: var(--spacing-md);
@@ -311,6 +410,9 @@ h2 {
   }
   .endpoints-flow {
     grid-template-columns: 1fr;
+  }
+  .relation-attribute-row {
+    grid-template-columns: minmax(0, 1fr) 80px;
   }
   .relation-arrow {
     height: 24px;

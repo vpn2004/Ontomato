@@ -12,10 +12,11 @@ import {
   Table2,
   Workflow,
 } from "lucide-vue-next";
-import { useSharedText } from "../context";
+import { useOntologyText, useSharedText } from "../context";
 import type { AssetTab, ModelResource, OntologyResourceCounts, Workspace } from "../workspace";
 
 const { t } = useSharedText();
+const { ot } = useOntologyText();
 
 defineProps<{
   activeWorkspace: Workspace;
@@ -85,6 +86,17 @@ defineEmits<{
           <small v-if="counts.relations !== null">{{ counts.relations }}</small>
         </button>
         <button
+          :class="[
+            'nav-item',
+            { active: activeWorkspace === 'assets' && activeAssetTab === 'actions' },
+          ]"
+          @click="$emit('asset', 'actions')"
+        >
+          <MousePointerClick :size="16" />
+          <span>{{ t("nav.actionManagement") }}</span>
+          <small v-if="counts.actions !== null">{{ counts.actions }}</small>
+        </button>
+        <button
           :class="['nav-item', { active: activeWorkspace === 'visual-modeling' }]"
           @click="$emit('visualModeling')"
         >
@@ -98,21 +110,17 @@ defineEmits<{
           <Table2 :size="16" />
           <span>{{ t("nav.dataBrowser") }}</span>
         </button>
+        <button
+          :class="['nav-item', { active: activeWorkspace === 'instance-graph' }]"
+          :title="ot('instanceGraphTitle')"
+          @click="$emit('workspace', 'instance-graph')"
+        >
+          <Network :size="16" />
+          <span>{{ ot("instanceGraphTitle") }}</span>
+        </button>
       </section>
 
       <section class="nav-group">
-        <p class="nav-heading">{{ t("nav.intelligenceAssets") }}</p>
-        <button
-          :class="[
-            'nav-item',
-            { active: activeWorkspace === 'assets' && activeAssetTab === 'actions' },
-          ]"
-          @click="$emit('asset', 'actions')"
-        >
-          <MousePointerClick :size="16" />
-          <span>{{ t("nav.actionManagement") }}</span>
-          <small v-if="counts.actions !== null">{{ counts.actions }}</small>
-        </button>
         <button
           :class="[
             'nav-item',

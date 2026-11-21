@@ -111,7 +111,7 @@ public class AdminController {
 			String desc = param.getString("desc").trim();
 			if (!"".equals(relationship) && !"".equals(desc)) {
 				User user = SystemUtils.getCurUser();
-				adminService.setRelationshipDesc(relationship, desc, user);
+				adminService.editRelationship(relationship, desc, param.getString("fromField"), param.getString("toField"), user);
 			}
 			ret.put("success", true);
 		} catch (Exception e) {
@@ -347,24 +347,6 @@ public class AdminController {
 		return ret;
 	}
 
-	@PostMapping("/admin/setClassAttrPermissionField")
-	@ResponseBody
-	public JSONObject setClassAttrPermissionField(@RequestBody JSONObject param) {
-		JSONObject ret = new JSONObject();
-		try {
-			String className = param.getString("className");
-			String attr = param.getString("attr");
-			boolean permissionField = param.getBooleanValue("permissionField");
-			User user = SystemUtils.getCurUser();
-			adminService.setClassAttrPermissionField(className, attr, permissionField, user);
-			ret.put("success", true);
-		} catch (Exception e) {
-			ret.put("success", false);
-			ret.put("message", e.getMessage());
-		}
-		return ret;
-	}
-	
 	@PostMapping("/admin/editClassAttrPrimaryKey")
     @ResponseBody
     public JSONObject editClassAttrPrimaryKey(@RequestHeader(ControllerConst.LANG_HEADER_KEY) String lang, @RequestBody JSONObject param) {
@@ -605,7 +587,7 @@ public class AdminController {
 
 	@PostMapping("/admin/addBussinessKnowledge")
     @ResponseBody
-    public JSONObject addBussinessKnowledge(@RequestBody JSONObject param) {
+    public JSONObject addBussinessKnowledge(@RequestHeader(ControllerConst.LANG_HEADER_KEY) String lang, @RequestBody JSONObject param) {
 		JSONObject ret = new JSONObject();
 		try {
 			String knowledgeID = param.getString("knowledgeID");
@@ -613,10 +595,12 @@ public class AdminController {
 			String bk = param.getString("knowledgeText").trim();
 			int status = param.getInteger("status");
 			List<String> listknowledgeTags = param.getList("knowledgeTags", String.class);
-			if (!"".equals(bk)) {
-				User user = SystemUtils.getCurUser();
-				knowledgeService.addBussinessKnowledge(knowledgeID, knowledgeTitle,bk,status,listknowledgeTags, user);
+			// The content is what gets embedded and recalled; an entry without it is refused instead of reported as saved.
+			if ("".equals(bk)) {
+				throw new Exception(langService.get(lang, "Admin.knowledge.textRequired"));
 			}
+			User user = SystemUtils.getCurUser();
+			knowledgeService.addBussinessKnowledge(knowledgeID, knowledgeTitle,bk,status,listknowledgeTags, user);
 			ret.put("success", true);
 		} catch (Exception e) {
 			ret.put("success", false);
@@ -627,7 +611,7 @@ public class AdminController {
 	
 	@PostMapping("/admin/editBussinessKnowledge")
     @ResponseBody
-    public JSONObject editBussinessKnowledge(@RequestBody JSONObject param) {
+    public JSONObject editBussinessKnowledge(@RequestHeader(ControllerConst.LANG_HEADER_KEY) String lang, @RequestBody JSONObject param) {
 		JSONObject ret = new JSONObject();
 		try {
 			String knowledgeID = param.getString("knowledgeID");
@@ -635,10 +619,15 @@ public class AdminController {
 			String bk = param.getString("knowledgeText").trim();
 			int status = param.getInteger("status");
 			List<String> listknowledgeTags = param.getList("knowledgeTags", String.class);
-			if (!"".equals(bk) && knowledgeID != null) {
-				User user = SystemUtils.getCurUser();
-				knowledgeService.editBussinessKnowledge(knowledgeID,knowledgeTitle, bk,status,listknowledgeTags, user);
+			// Without an ID there is nothing to edit; it is refused instead of reported as saved.
+			if (knowledgeID == null || knowledgeID.isBlank()) {
+				throw new Exception(langService.get(lang, "Admin.knowledge.idRequired"));
 			}
+			if ("".equals(bk)) {
+				throw new Exception(langService.get(lang, "Admin.knowledge.textRequired"));
+			}
+			User user = SystemUtils.getCurUser();
+			knowledgeService.editBussinessKnowledge(knowledgeID,knowledgeTitle, bk,status,listknowledgeTags, user);
 			ret.put("success", true);
 		} catch (Exception e) {
 			ret.put("success", false);
@@ -649,14 +638,15 @@ public class AdminController {
 	
 	@PostMapping("/admin/delBussinessKnowledge")
     @ResponseBody
-    public JSONObject delBussinessKnowledge(@RequestBody JSONObject param) {
+    public JSONObject delBussinessKnowledge(@RequestHeader(ControllerConst.LANG_HEADER_KEY) String lang, @RequestBody JSONObject param) {
 		JSONObject ret = new JSONObject();
 		try {
 			String knowledgeID = param.getString("knowledgeID");
-			if (knowledgeID != null) {
-				User user = SystemUtils.getCurUser();
-				knowledgeService.delBussinessKnowledge(knowledgeID, user);
+			if (knowledgeID == null || knowledgeID.isBlank()) {
+				throw new Exception(langService.get(lang, "Admin.knowledge.idRequired"));
 			}
+			User user = SystemUtils.getCurUser();
+			knowledgeService.delBussinessKnowledge(knowledgeID, user);
 			ret.put("success", true);
 		} catch (Exception e) {
 			ret.put("success", false);

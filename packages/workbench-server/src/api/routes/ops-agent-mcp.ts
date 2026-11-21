@@ -6,7 +6,7 @@ import { workbenchProduct } from "../../product/installed";
 import { createLogger } from "../../logging/logger";
 import { tApp } from "../../i18n";
 import { diagnosisManager } from "../../platform/diagnosis/observe/agent/pi-agent";
-import type { SessionResponseStream } from "../../platform/diagnosis/observe/agent/session-stream";
+import type { SessionResponseStream } from "../../utils/response-stream";
 import {
   catalogRequest,
   createStreamableMcpRouter,

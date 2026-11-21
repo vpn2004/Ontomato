@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
+import MarkdownIt from "markdown-it";
 import { ArrowLeft, History, Play, Plus, Save, Sparkles, Trash2 } from "lucide-vue-next";
 import {
   ElAlert,
@@ -27,6 +28,7 @@ import type { SmartAsset } from "../api";
 import type { AssetTab } from "../workspace";
 import ActionCodeExplainer from "./codeExplainer/ActionCodeExplainer.vue";
 import BusinessMeaning from "./codeExplainer/BusinessMeaning.vue";
+import SourceCodeEditor from "./SourceCodeEditor.vue";
 import { normalizeBusinessMeaning, normalizeCodeSegments } from "./codeExplainer/codeSegments";
 import { useManagerClient, useOntologyText } from "../context";
 
@@ -59,6 +61,9 @@ const metricGenerating = ref(false);
 const testVisible = ref(false);
 const testTab = ref("markdown");
 const testMarkdown = ref("");
+const markdownView = ref("preview");
+const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true });
+const testMarkdownPreview = computed(() => markdown.render(testMarkdown.value));
 const testJson = ref("");
 const testResultUrl = ref("");
 const taskResultsVisible = ref(false);
@@ -367,6 +372,7 @@ async function viewTaskResult(result: AssetRecord) {
 }
 
 function openMetricTest() {
+  markdownView.value = "preview";
   testMarkdown.value = "";
   testJson.value = "";
   testResultUrl.value = "";
@@ -380,6 +386,7 @@ async function testMetricView() {
   try {
     const response = await requestSmartAsset("metrics", "test", record.value);
     testMarkdown.value = response?.data?.md || ot("metricTestNoResult");
+    markdownView.value = "preview";
     testResultUrl.value = typeof response?.data?.url === "string" ? response.data.url : "";
     testTab.value = "markdown";
   } catch (error) {
@@ -489,11 +496,13 @@ onMounted(() => void loadDetail());
         <small>{{ meta.title }}</small>
       </span>
       <span class="title-spacer"></span>
-      <el-button v-if="kind === 'metrics' && record" :icon="Play" @click="openMetricTest">
+      <el-button v-if="kind === 'metrics' && record" type="primary" plain :icon="Play" @click="openMetricTest">
         {{ ot("assetTest") }}
       </el-button>
       <el-button
         v-if="kind === 'metrics' && creating"
+        type="primary"
+        plain
         :icon="Sparkles"
         @click="metricGenerationVisible = true"
       >
@@ -600,7 +609,7 @@ onMounted(() => void loadDetail());
             />
           </el-form-item>
           <el-form-item v-if="isFunction" :label="ot('assetOperationType')">
-            <el-radio-group v-model="record.operation">
+            <el-radio-group v-model="record.operation" :disabled="Boolean(record.id)">
               <el-radio value="OPERATION_READ">{{ ot("assetOperationRead") }}</el-radio>
               <el-radio value="OPERATION_WRITE">{{ ot("assetOperationWrite") }}</el-radio>
             </el-radio-group>
@@ -645,7 +654,7 @@ onMounted(() => void loadDetail());
           <template v-if="functionRecord">
             <div class="parameter-header">
               <span class="field-label">{{ ot("assetInputParameters") }}</span>
-              <el-button size="small" :icon="Plus" @click="addParameter">
+              <el-button class="add-parameter-button" :icon="Plus" @click="addParameter">
                 {{ ot("assetAddParameter") }}
               </el-button>
             </div>
@@ -665,7 +674,7 @@ onMounted(() => void loadDetail());
                 :placeholder="ot('assetParameterClasses')"
                 @update:model-value="updateParameterClassNames(parameter, $event)"
               />
-              <el-button link type="danger" :icon="Trash2" @click="removeParameter(index)" />
+              <el-button link type="danger" :icon="Trash2" :title="ot('delete')" :aria-label="ot('delete')" @click="removeParameter(index)" />
             </div>
             <el-form-item :label="ot('assetReturnClasses')">
               <el-input
@@ -678,7 +687,7 @@ onMounted(() => void loadDetail());
                 <el-input v-model="record.logic" type="textarea" :rows="3" />
               </el-form-item>
               <el-form-item :label="ot('explainerCode')">
-                <el-input v-model="record.code" type="textarea" :rows="14" class="code-input" />
+                <SourceCodeEditor v-model="record.code" />
               </el-form-item>
             </template>
             <template v-else>
@@ -686,12 +695,7 @@ onMounted(() => void loadDetail());
                 <el-input v-model="functionRecord.logic" type="textarea" :rows="3" />
               </el-form-item>
               <el-form-item :label="ot('explainerCode')">
-                <el-input
-                  v-model="functionRecord.code"
-                  type="textarea"
-                  :rows="14"
-                  class="code-input"
-                />
+                <SourceCodeEditor v-model="functionRecord.code" />
               </el-form-item>
             </template>
           </template>
@@ -720,7 +724,7 @@ onMounted(() => void loadDetail());
           </div>
         </div>
         <div class="task-actions">
-          <el-button v-if="record.id" type="primary" :icon="Play" @click="runTask">
+          <el-button v-if="record.id" type="primary" plain :icon="Play" @click="runTask">
             {{ ot("taskRunOnce") }}
           </el-button>
           <el-button v-if="record.id" :icon="History" @click="openTaskResults">
@@ -797,7 +801,16 @@ onMounted(() => void loadDetail());
       </el-form>
       <el-tabs v-model="testTab">
         <el-tab-pane :label="ot('metricMarkdownTest')" name="markdown">
+          <el-radio-group v-model="markdownView" class="markdown-view-toggle" :aria-label="ot('metricMarkdownTest')" size="small">
+            <el-radio value="preview">{{ ot('metricMarkdownPreview') }}</el-radio>
+            <el-radio value="source">{{ ot('metricMarkdownSource') }}</el-radio>
+          </el-radio-group>
+          <div v-if="markdownView === 'preview'" class="metric-markdown-preview">
+            <div v-if="testMarkdown" v-html="testMarkdownPreview" />
+            <p v-else class="markdown-placeholder">{{ ot('metricTestResultPlaceholder') }}</p>
+          </div>
           <el-input
+            v-else
             v-model="testMarkdown"
             type="textarea"
             :rows="14"
@@ -897,6 +910,35 @@ onMounted(() => void loadDetail());
 </template>
 
 <style scoped>
+.markdown-view-toggle { margin-bottom: var(--spacing-md); }
+.metric-markdown-preview {
+  min-height: 300px;
+  max-height: 55vh;
+  overflow: auto;
+  padding: var(--spacing-md);
+  border: 1px solid var(--el-border-color);
+  border-radius: var(--radius-sm);
+  color: var(--el-text-color-primary);
+  background: var(--el-bg-color);
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.markdown-placeholder { color: var(--el-text-color-placeholder); margin: 0; }
+.metric-markdown-preview :deep(h1),
+.metric-markdown-preview :deep(h2),
+.metric-markdown-preview :deep(h3) { margin: 1em 0 0.5em; line-height: 1.4; color: inherit; }
+.metric-markdown-preview :deep(h1) { font-size: var(--text-2xl); }
+.metric-markdown-preview :deep(h2) { font-size: var(--text-xl); }
+.metric-markdown-preview :deep(h3) { font-size: var(--text-lg); }
+.metric-markdown-preview :deep(table) { border-collapse: collapse; width: 100%; margin: 1em 0; }
+.metric-markdown-preview :deep(th),
+.metric-markdown-preview :deep(td) { padding: 8px 12px; border: 1px solid var(--el-border-color); text-align: left; }
+.metric-markdown-preview :deep(th) { background: var(--el-fill-color-light); }
+.metric-markdown-preview :deep(pre) { overflow: auto; padding: var(--spacing-md); background: var(--el-fill-color-light); border-radius: var(--radius-sm); }
+.metric-markdown-preview :deep(code) { font-family: var(--font-mono); background: var(--el-fill-color-light); }
+.metric-markdown-preview :deep(blockquote) { margin-left: 0; padding-left: var(--spacing-md); border-left: 3px solid var(--el-border-color); color: var(--el-text-color-secondary); }
+.metric-markdown-preview :deep(a) { color: var(--el-color-primary); }
+.metric-markdown-preview :deep(img) { max-width: 100%; }
 .asset-detail {
   min-height: 100%;
   background: var(--el-bg-color);
@@ -938,10 +980,11 @@ onMounted(() => void loadDetail());
 }
 .detail-titlebar {
   display: flex;
+  flex-wrap: wrap;
   min-height: 64px;
   align-items: center;
   gap: var(--spacing-sm);
-  padding: 0 var(--spacing-2xl);
+  padding: var(--spacing-sm) var(--spacing-2xl);
   border-bottom: 1px solid var(--el-border-color);
   background: var(--el-bg-color);
 }
@@ -989,6 +1032,7 @@ onMounted(() => void loadDetail());
   border-radius: var(--radius-sm);
   background: var(--el-bg-color);
 }
+.logic-section { container: asset-logic / inline-size; }
 .section-title {
   display: flex;
   justify-content: space-between;
@@ -1024,10 +1068,26 @@ h2 {
 }
 .parameter-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: var(--spacing-md);
-  margin: var(--spacing-sm) 0 var(--spacing-xs);
+  margin: var(--spacing-sm) 0 var(--spacing-md);
+}
+.add-parameter-button {
+  flex-shrink: 0;
+  min-height: 32px;
+  height: auto;
+  max-width: 100%;
+  padding: 5px 12px;
+  font-size: var(--text-sm);
+  line-height: 20px;
+  white-space: normal;
+}
+.add-parameter-button :deep(> span) {
+  min-width: 0;
+  line-height: 20px;
+  overflow-wrap: anywhere;
 }
 .field-label {
   color: var(--el-text-color-secondary);
@@ -1054,7 +1114,16 @@ h2 {
 .parameter-row > .el-button {
   width: 28px;
   min-width: 28px;
+  height: 28px;
+  padding: 6px;
   justify-self: center;
+}
+@container asset-logic (max-width: 640px) {
+  .parameter-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 28px; padding: 12px; border: 1px solid var(--el-border-color-light); border-radius: var(--radius-sm); margin-bottom: 12px; }
+  .parameter-row > :nth-child(1) { grid-column: 1; grid-row: 1; }
+  .parameter-row > :nth-child(2) { grid-column: 2; grid-row: 1; }
+  .parameter-row > :nth-child(3), .parameter-row > :nth-child(4), .parameter-row > :nth-child(5) { grid-column: 1 / 3; }
+  .parameter-row > .el-button { grid-column: 3; grid-row: 1; }
 }
 .task-pagination {
   margin-top: var(--spacing-lg);
@@ -1136,16 +1205,6 @@ h2 {
     grid-template-columns: 1fr;
   }
 }
-@container ontology-manager (max-width: 900px) {
-  .parameter-row {
-    grid-template-columns: 1fr 1fr 28px;
-  }
-  .parameter-row .el-input:nth-child(3),
-  .parameter-row .el-input:nth-child(4),
-  .parameter-row .el-input:nth-child(5) {
-    grid-column: span 1;
-  }
-}
 @container ontology-manager (max-width: 640px) {
   .detail-titlebar {
     padding: 0 var(--spacing-md);
@@ -1173,7 +1232,6 @@ h2 {
   .detail-titlebar :deep(.el-button:not(:first-child)) {
     padding-left: var(--spacing-sm);
     padding-right: var(--spacing-sm);
-    font-size: 0;
   }
   .detail-titlebar :deep(.el-button:not(:first-child) .el-icon) {
     margin: 0;

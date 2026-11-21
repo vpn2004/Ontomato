@@ -3,7 +3,7 @@ import type { AnalysisAgentSkillReference as SkillAgentReference } from "@ontoma
 
 import type { SkillInfo } from "@ontomato/contracts/skills";
 
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessageBox, ElMessage } from "element-plus";
 import type { UploadFile } from "element-plus";
@@ -16,7 +16,7 @@ import { authHost } from "../../../utils/auth";
 import { ApiRequestError } from "../../../utils/api";
 import { useI18n } from "vue-i18n";
 
-const { t } = useI18n();
+const { t, locale } = useI18n();
 
 const route = useRoute();
 const router = useRouter();
@@ -72,6 +72,13 @@ async function loadSkills() {
     loading.value = false;
   }
 }
+
+watch(locale, async () => {
+  await loadSkills();
+  if (editingSkill.value?.isPublic) {
+    editingSkill.value = skills.value.find((skill) => skill.id === editingSkill.value?.id) ?? null;
+  }
+});
 
 async function handleToggle(skillId: string) {
   toggleLoading.value[skillId] = true;

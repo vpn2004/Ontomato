@@ -89,10 +89,21 @@ async function createApiRequestError(res: Response, _path: string): Promise<ApiR
   }
 }
 
+/** A response the backend answered with `success: false`; `body` is that response, for callers that read its `data`. */
+export class ApiBusinessError extends Error {
+  constructor(
+    message: string,
+    readonly body: unknown
+  ) {
+    super(message);
+    this.name = "ApiBusinessError";
+  }
+}
+
 function assertBusinessSuccess(json: any, _path: string) {
   if (json && json.success === false) {
     const msg = json.error || json.message || json.msg || t("admin.requestFailed");
-    throw new Error(msg);
+    throw new ApiBusinessError(msg, json);
   }
   return json;
 }

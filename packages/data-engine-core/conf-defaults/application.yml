@@ -1,5 +1,5 @@
 # DataEngine product default configuration. This file is the only source template and is not placed inside the jar.
-# On-site values always come from the BACKEND_* / POSTGRE_* environment variables (see the environment variable table in BUILD.md);
+# Environment placeholders below read the shared .env inputs.
 # If conf/application.yml is missing, startup copies this template; an existing site file is kept and read on restart.
 server:
   port: 18087
@@ -18,40 +18,38 @@ spring:
 langchain4j:
   open-ai:
     embedding-model:
-      base-url: ${BACKEND_EMBEDDING_BASE_URL:}
-      api-key: ${BACKEND_EMBEDDING_API_KEY:}
-      model-name: ${BACKEND_EMBEDDING_MODEL:}
-      dimensions: ${BACKEND_EMBEDDING_DIMENSIONS:2048}
+      base-url: ${EMBEDDING_BASE_URL:}
+      api-key: ${EMBEDDING_API_KEY:}
+      model-name: ${EMBEDDING_MODEL:}
+      dimensions: ${EMBEDDING_DIMENSIONS:2048}
       timeout: PT300S
       log-requests: true
       log-responses: false
 
 ontomato:
   data-engine:
-    service-id: ${BACKEND_SERVICE_ID:}
-    node-id: ${BACKEND_NODE_ID:}
-    ragchatrootpath: /opt/frontend
-    namespace: ${BACKEND_NAMESPACE:}
-    cardBase-url: ${BACKEND_CARD_BASE_URL:}
+    service-id: ${SERVICE_ID:}
+    node-id: ${NODE_ID:}
+    cardBase-url: ${CARD_BASE_URL:}
     knowledge_maxResult: 10
     toolsdatamaxsize: 20
     toolAndPythonRetry: 3
-    data-adapter: ${BACKEND_DATA_ADAPTER:postgresql}
-    production-env-url: ${BACKEND_PRODUCTION_ENV_URL:}
-    production-env-user: ${BACKEND_PRODUCTION_ENV_USER:}
-    production-env-pwd: ${BACKEND_PRODUCTION_ENV_PASSWORD:}
+    data-adapter: ${DATA_ADAPTER:postgresql}
+    production-env-url: ${PRODUCTION_ENV_URL:}
+    production-env-user: ${PRODUCTION_ENV_USER:}
+    production-env-pwd: ${PRODUCTION_ENV_PASSWORD:}
     pythonpath: /usr/local/bin/python3
     python-charset: UTF-8
     jdbc:
-      url: ${POSTGRE_JDBC_URL:}
-      username: ${POSTGRE_USER_NAME:}
-      password: ${POSTGRE_PASSWORD:}
-      driver-class-name: ${POSTGRE_DRIVER_CLASS:org.postgresql.Driver}
+      url: ${DATA_ENGINE_JDBC_URL:jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/datarag}
+      username: ${POSTGRES_USER:}
+      password: ${POSTGRES_PASSWORD:}
+      driver-class-name: ${DATA_ENGINE_JDBC_DRIVER:org.postgresql.Driver}
     models:
       - name: default
-        base-url: ${BACKEND_LLM_BASE_URL:}
-        api-keys: ${BACKEND_LLM_API_KEY:}
-        model-name: ${BACKEND_LLM_MODEL:}
+        base-url: ${LLM_BASE_URL:}
+        api-keys: ${LLM_API_KEY:}
+        model-name: ${LLM_MODEL:}
         timeout: PT300S
         temperature: 0.0
         top-p: 0.1

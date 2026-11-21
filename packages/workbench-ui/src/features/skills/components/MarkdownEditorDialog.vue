@@ -11,6 +11,7 @@ const content = defineModel<string>("content");
 
 const props = defineProps<{
   title?: string;
+  readonly?: boolean;
 }>();
 
 const localContent = ref("");
@@ -76,6 +77,7 @@ function togglePreview() {
         <div class="editor-panel">
           <CodeMirrorEditor
             v-model="localContent"
+            :readonly="readonly"
             language="markdown"
             :min-height="showPreview ? 350 : 400"
             :placeholder="markdownPlaceholder"
@@ -90,8 +92,8 @@ function togglePreview() {
     </div>
 
     <template #footer>
-      <el-button @click="handleCancel">{{ t("common.cancel") }}</el-button>
-      <el-button type="primary" @click="handleSave">{{ t("common.save") }}</el-button>
+      <el-button @click="handleCancel">{{ readonly ? t("common.close") : t("common.cancel") }}</el-button>
+      <el-button v-if="!readonly" type="primary" @click="handleSave">{{ t("common.save") }}</el-button>
     </template>
   </el-dialog>
 </template>

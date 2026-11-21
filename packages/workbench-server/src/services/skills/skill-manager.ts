@@ -9,6 +9,7 @@ import { randomUUID } from "crypto";
 import { skillRegistryManager } from "../../core/skills/registry/manager";
 import type { SkillRegistryManager } from "../../core/skills/registry/manager";
 import type { SkillMeta, SkillInput } from "../../core/skills/types";
+import { loadSkillContent } from "../../core/skills/discovery/loader";
 import {
   assertSkillPackageComplete,
   InvalidSkillPackageError,
@@ -23,6 +24,7 @@ import type { SkillCategoryValue, SkillTypeValue } from "../../core/skills/const
 import { SkillType } from "../../core/skills/constants";
 import { createLogger } from "../../logging/logger";
 import { tApp } from "../../i18n";
+import { HttpError } from "../../utils/errors";
 import { executeSkill } from "../../core/skills/execution/executor";
 import {
   listAnalysisAgentSkillReferences,
@@ -43,16 +45,30 @@ class SkillAlreadyExistsError extends Error {
   }
 }
 
+function requireWritableSkill(skill: SkillMeta): void {
+  if (skill.isPublic) {
+    throw new HttpError(403, tApp("skills.mgr.publicReadOnly"), "PUBLIC_SKILL_READ_ONLY");
+  }
+}
+
 class SkillManager {
-  async getAllSkills(domainId: string): Promise<SkillInfo[]> {
+  async getAllSkills(domainId: string, locale?: string): Promise<SkillInfo[]> {
     const registry = await skillRegistryManager.forDomain(domainId);
 
     return registry
       .getSkills({ includeDisabled: true })
-      .map((skill) => this.toSkillInfo(skill, registry));
+      .map((skill) => this.toSkillInfo(skill, registry, locale));
   }
 
-  private toSkillInfo(skill: SkillMeta, registry: SkillRegistryManager): SkillInfo {
+  private localizedSkill(skill: SkillMeta, locale?: string): SkillMeta {
+    if (!skill.isPublic || !locale?.toLowerCase().startsWith("en")) return skill;
+    const originalPath = path.join(skill.path, "SKILL.md");
+    const original = readSkillMarkdown(originalPath);
+    return original ? { ...skill, manifest: original.manifest, skillMdPath: originalPath } : skill;
+  }
+
+  private toSkillInfo(skill: SkillMeta, registry: SkillRegistryManager, locale?: string): SkillInfo {
+    skill = this.localizedSkill(skill, locale);
     return {
       id: skill.id,
       type: skill.manifest.type,
@@ -61,6 +77,7 @@ class SkillManager {
       description: skill.manifest.description,
       tags: skill.manifest.tags,
       enabled: registry.isSkillEnabled(skill.id),
+      isPublic: skill.isPublic,
       path: skill.path,
       version: skill.manifest.version,
       outputType: skill.manifest.outputType,
@@ -104,6 +121,7 @@ class SkillManager {
       throw new Error(tApp("skills.mgr.skillNotFound", { id: skillId }));
     }
 
+    requireWritableSkill(skill);
     const affectedAgents = await listAnalysisAgentSkillReferences(domainId, skillId);
     const wasEnabled = registry.isSkillEnabled(skillId);
     const trashRoot = path.join(skillRegistryManager.getDomainSkillsRoot(domainId), ".trash");
@@ -175,6 +193,7 @@ class SkillManager {
 
     const existing = registry.getSkillById(skillId);
     if (existing) {
+      requireWritableSkill(existing);
       throw new Error(tApp("skills.mgr.alreadyExists", { id: skillId }));
     }
 
@@ -271,6 +290,7 @@ class SkillManager {
       throw new Error(tApp("skills.mgr.skillNotFound", { id: skillId }));
     }
 
+    requireWritableSkill(skill);
     const skillDir = skill.path;
 
     try {
@@ -346,7 +366,7 @@ class SkillManager {
     }
   }
 
-  async getSkillContent(domainId: string, skillId: string): Promise<string | null> {
+  async getSkillContent(domainId: string, skillId: string, locale?: string): Promise<string | null> {
     const registry = await skillRegistryManager.forDomain(domainId);
 
     const skill = registry.getSkillById(skillId);
@@ -354,26 +374,19 @@ class SkillManager {
       throw new Error(tApp("skills.mgr.skillNotFound", { id: skillId }));
     }
 
-    const skillMdPath = path.join(skill.path, "SKILL.md");
-    if (!fs.existsSync(skillMdPath)) {
-      return null;
-    }
-
-    try {
-      return readSkillMarkdown(skillMdPath)?.content ?? null;
-    } catch (error) {
-      logger.error(tApp("skills.mgr.contentReadFail", { id: skillId }), error);
-      return null;
-    }
+    return loadSkillContent(this.localizedSkill(skill, locale));
   }
 
-  async searchSkills(domainId: string, query: string): Promise<SkillInfo[]> {
+  async searchSkills(domainId: string, query: string, locale?: string): Promise<SkillInfo[]> {
     const registry = await skillRegistryManager.forDomain(domainId);
     if (!query || query.trim() === "") {
       return [];
     }
 
-    return registry.searchSkills(query).map((skill) => this.toSkillInfo(skill, registry));
+    const needle = query.toLowerCase();
+    return (await this.getAllSkills(domainId, locale)).filter((skill) =>
+      [skill.id, skill.title, skill.description, ...skill.tags].some((text) => text?.toLowerCase().includes(needle))
+    );
   }
 
   async importSkill(domainId: string, zipBuffer: Buffer, overwrite = false): Promise<SkillInfo> {
@@ -447,6 +460,7 @@ class SkillManager {
       const existing = registry.getSkillById(manifest.name);
       const skillDir = path.join(domainSkillsRoot, manifest.type, manifest.category, manifest.name);
 
+      if (existing) requireWritableSkill(existing);
       if (existing && !overwrite) {
         throw new SkillAlreadyExistsError(manifest.name);
       }

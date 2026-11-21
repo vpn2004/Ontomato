@@ -1,0 +1,1 @@
+Summarize the investigation state for continuation. Do not answer the user. Preserve exact requirement IDs, evidence IDs, statistic receipts, query scopes, source truncation, reviewer issues, and remaining work. Stored evidence can be reread; never turn a preview into a complete result.

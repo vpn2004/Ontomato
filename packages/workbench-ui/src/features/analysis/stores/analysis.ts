@@ -1,9 +1,9 @@
 import type {
-  AnalysisTaskDetail as AnalysisTask,
+  AnalysisTask,
   AnalysisTaskRun,
   AnalysisConversationTurn,
 } from "@ontomato/contracts/analysis-task";
-import type { AnalysisAgent } from "@ontomato/contracts/analysis-agent";
+import type { AgentLineupEntry, AnalysisAgent } from "@ontomato/contracts/analysis-agent";
 import { computed, ref } from "vue";
 import { defineStore } from "pinia";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -30,7 +30,8 @@ import {
   type ReportSection,
 } from "../../../utils/analysis-report";
 import { buildTaskProgressMap } from "../utils/taskProgress";
-import { downloadPptx } from "../utils/ppt";
+import { buildScheduleExpression, type ScheduleSettings } from "../utils/schedule-expression";
+import { downloadPptx, type PptGenerationOptions } from "../utils/ppt";
 import { workbenchContent } from "../../../content";
 
 const TASK_PAGE_SIZE = 50;
@@ -43,6 +44,8 @@ export interface TaskSession {
   messages: Message[];
   input: string;
   isLoading: boolean;
+  /** The saved conversation of this task is being read on open; nothing is known to show yet. */
+  historyLoading?: boolean;
   streamingSnapshot: ResponseSnapshot | null;
   stopRequested: boolean;
   lastTaskEventSeq?: number;
@@ -59,7 +62,11 @@ function createRunId(prefix: string, id: string) {
 }
 
 export const useAnalysisStore = defineStore("analysis", () => {
-  const agents = ref<AnalysisAgent[]>([]);
+  /** Enabled entries of the domain's agent lineup, Q&A included, in the server's display order. */
+  const agentLineup = ref<AgentLineupEntry[]>([]);
+  const agents = computed<AnalysisAgent[]>(() =>
+    agentLineup.value.flatMap((entry) => (entry.kind === "agent" ? [entry.agent] : []))
+  );
   const selectedAgentId = ref("");
   const tasks = ref<AnalysisTask[]>([]);
   const taskTotal = ref(0);
@@ -76,8 +83,16 @@ export const useAnalysisStore = defineStore("analysis", () => {
   const editingAgent = ref<AnalysisAgent | null>(null);
   const sessionCache = new Map<string, ResponseSnapshot>();
   const pendingDeletions = new Set<string>();
-  let taskListPollTimer: ReturnType<typeof setInterval> | null = null;
-  let currentTaskPollTimer: ReturnType<typeof setInterval> | null = null;
+  // Each poll waits for its previous request before scheduling the next; a stop or restart bumps the
+  // generation so a request still in flight neither reschedules nor applies its late result.
+  let taskListPollTimer: ReturnType<typeof setTimeout> | null = null;
+  let taskListPollGeneration = 0;
+  let currentTaskPollTimer: ReturnType<typeof setTimeout> | null = null;
+  let currentTaskPollGeneration = 0;
+  /** Only the latest list load applies its result, so a slow background refresh never overwrites a newer list. */
+  let taskListLoadSeq = 0;
+  /** A historical run's replay snapshot, read when that run is selected. */
+  const selectedRunSnapshot = ref<{ runId: string; snapshot: unknown } | null>(null);
 
   const currentTask = computed<AnalysisTask | null>(() =>
     currentTaskId.value ? tasks.value.find((task) => task.id === currentTaskId.value) || null : null
@@ -119,9 +134,11 @@ export const useAnalysisStore = defineStore("analysis", () => {
     // The historical run's conversation view must use the deep analysis snapshot saved for that
     // run, not forge ordinary assistant messages from the report body, otherwise reviewing an old
     // run would directly show report content.
-    if (run.snapshot) {
+    const runSnapshot =
+      selectedRunSnapshot.value?.runId === run.id ? selectedRunSnapshot.value.snapshot : null;
+    if (runSnapshot) {
       const snapshot = {
-        ...(run.snapshot as any),
+        ...(runSnapshot as any),
         threadId: currentTask.value?.threadId,
         requestSeq: run.requestSeq,
         source: "history",
@@ -157,6 +174,13 @@ export const useAnalysisStore = defineStore("analysis", () => {
   );
   const displayIsLoading = computed(() =>
     isSelectedLatestRun.value ? (activeSession.value?.isLoading ?? false) : false
+  );
+  /** A selected task whose session is not open yet, or whose saved history is still being read. */
+  const displayHistoryLoading = computed(
+    () =>
+      isSelectedLatestRun.value &&
+      !!currentTaskId.value &&
+      (!activeSession.value || !!activeSession.value.historyLoading)
   );
   const displayTaskStatus = computed(() => selectedRun.value?.status || currentTask.value?.status);
   const showPendingTaskNotice = computed(
@@ -228,14 +252,17 @@ export const useAnalysisStore = defineStore("analysis", () => {
 
   async function loadAgents(): Promise<void> {
     try {
-      agents.value = await analysisAgentApi.getEnabledAgents();
+      const lineup = await analysisAgentApi.getAgentLineup();
+      agentLineup.value = lineup.filter((entry) => entry.kind === "qa" || entry.agent.isEnabled);
     } catch (error) {
       console.error(workbenchContent().console.loadAgentsFailed, error);
     }
   }
 
-  async function loadTasks(options: { append?: boolean } = {}) {
-    loadingTasks.value = true;
+  /** `background` refreshes keep the current list on screen without the loading mask. */
+  async function loadTasks(options: { append?: boolean; background?: boolean } = {}) {
+    const loadSeq = ++taskListLoadSeq;
+    if (!options.background) loadingTasks.value = true;
     try {
       const params: { agentId?: string; reportDeliverableEnabled?: boolean } = {};
       if (selectedAgentId.value) params.agentId = selectedAgentId.value;
@@ -247,6 +274,7 @@ export const useAnalysisStore = defineStore("analysis", () => {
           limit: TASK_PAGE_SIZE,
           offset: tasks.value.length,
         });
+        if (loadSeq !== taskListLoadSeq) return;
         taskTotal.value = page.total;
         tasks.value = [...tasks.value, ...page.tasks];
         return;
@@ -272,11 +300,12 @@ export const useAnalysisStore = defineStore("analysis", () => {
         refreshedTasks.push(...page.tasks);
         taskTotal.value = page.total;
       }
+      if (loadSeq !== taskListLoadSeq) return;
       tasks.value = refreshedTasks;
     } catch (error) {
       console.error(workbenchContent().console.loadTasksFailed, error);
     } finally {
-      loadingTasks.value = false;
+      if (!options.background) loadingTasks.value = false;
     }
   }
 
@@ -292,14 +321,19 @@ export const useAnalysisStore = defineStore("analysis", () => {
 
   function startTaskListPolling() {
     stopTaskListPolling();
-    taskListPollTimer = setInterval(() => {
-      if (hasRunningTasks.value && selectedAgentId.value !== undefined) loadTasks();
-    }, 5000);
+    const generation = taskListPollGeneration;
+    const tick = async () => {
+      if (hasRunningTasks.value && selectedAgentId.value !== undefined)
+        await loadTasks({ background: true });
+      if (generation === taskListPollGeneration) taskListPollTimer = setTimeout(tick, 5000);
+    };
+    taskListPollTimer = setTimeout(tick, 5000);
   }
 
   function stopTaskListPolling() {
+    taskListPollGeneration++;
     if (!taskListPollTimer) return;
-    clearInterval(taskListPollTimer);
+    clearTimeout(taskListPollTimer);
     taskListPollTimer = null;
   }
 
@@ -394,7 +428,12 @@ export const useAnalysisStore = defineStore("analysis", () => {
     const session = sessions.value[task.id];
     if (session) {
       session.messages = [];
-      await loadTaskHistory(task.id);
+      session.historyLoading = true;
+      try {
+        await loadTaskHistory(task.id);
+      } finally {
+        session.historyLoading = false;
+      }
       if (session.messages.length === 0 && task.question) {
         session.messages.push({ id: Date.now(), role: "user", content: task.question });
       }
@@ -834,9 +873,20 @@ export const useAnalysisStore = defineStore("analysis", () => {
     }
   }
 
-  function selectRun(index: number) {
+  async function selectRun(index: number) {
     if (index < 0 || index >= taskRuns.value.length) return;
     taskRunIndex.value = index;
+    selectedRunSnapshot.value = null;
+    if (isSelectedLatestRun.value) return;
+    const taskId = currentTaskId.value!;
+    const runId = taskRuns.value[index].id;
+    try {
+      const snapshot = await analysisTaskApi.getRunSnapshot(taskId, runId);
+      if (currentTaskId.value === taskId && selectedRun.value?.id === runId)
+        selectedRunSnapshot.value = { runId, snapshot };
+    } catch (error) {
+      console.error(workbenchContent().console.loadRunHistoryFailed, error);
+    }
   }
 
   /** Rerun reuses the same task identity: the server appends a run record and the page returns to that task's conversation view. */
@@ -901,15 +951,19 @@ export const useAnalysisStore = defineStore("analysis", () => {
   }
 
   function stopCurrentTaskPolling() {
+    currentTaskPollGeneration++;
     if (!currentTaskPollTimer) return;
-    clearInterval(currentTaskPollTimer);
+    clearTimeout(currentTaskPollTimer);
     currentTaskPollTimer = null;
   }
 
   function startCurrentTaskPolling(taskId: string) {
-    currentTaskPollTimer = setInterval(async () => {
+    stopCurrentTaskPolling();
+    const generation = currentTaskPollGeneration;
+    const tick = async () => {
       try {
         const updated = await analysisTaskApi.getTask(taskId);
+        if (generation !== currentTaskPollGeneration) return;
         const index = tasks.value.findIndex((task) => task.id === taskId);
         if (index >= 0) tasks.value.splice(index, 1, updated);
         const current = index >= 0 ? tasks.value[index] : updated;
@@ -924,28 +978,34 @@ export const useAnalysisStore = defineStore("analysis", () => {
           current.status === "failed" ||
           current.status === "cancelled"
         ) {
+          stopCurrentTaskPolling();
           const session = sessions.value[taskId];
           if (session?.stopRequested) {
             session.streamingSnapshot = null;
             session.stopRequested = false;
             await loadTaskHistory(taskId);
           }
-          stopCurrentTaskPolling();
           await loadRuns(taskId);
+          return;
         }
       } catch {
         // Polling failed, silently ignore
       }
-    }, 3000);
+      if (generation === currentTaskPollGeneration) currentTaskPollTimer = setTimeout(tick, 3000);
+    };
+    currentTaskPollTimer = setTimeout(tick, 3000);
   }
 
   async function selectTask(task: AnalysisTask, updateView: (view: "chat" | "report") => void) {
     currentTaskId.value = task.id;
     taskRuns.value = [];
     taskRunIndex.value = 0;
+    selectedRunSnapshot.value = null;
     let detailTask = task;
     try {
       detailTask = await analysisTaskApi.getTask(task.id);
+      // Another task was selected while this detail was loading; its view owns the page now.
+      if (currentTaskId.value !== task.id) return;
       const index = tasks.value.findIndex((item) => item.id === detailTask.id);
       if (index >= 0) tasks.value.splice(index, 1, detailTask);
       else tasks.value.unshift(detailTask);
@@ -956,6 +1016,7 @@ export const useAnalysisStore = defineStore("analysis", () => {
     updateView("chat");
     await openSession(detailTask);
     await loadRuns(detailTask.id);
+    if (currentTaskId.value !== task.id) return;
     if (detailTask.status === "running" || detailTask.status === "pending") {
       startCurrentTaskPolling(detailTask.id);
     }
@@ -1022,8 +1083,6 @@ export const useAnalysisStore = defineStore("analysis", () => {
     params?: {
       scheduleEnabled: boolean;
       scheduleExpression: string;
-      scheduleFrequency: string;
-      scheduleTime: string;
       emailEnabled: boolean;
       emailRecipient: string;
     }
@@ -1084,27 +1143,10 @@ export const useAnalysisStore = defineStore("analysis", () => {
     await refresh;
   }
 
-  function saveSchedule(settings: {
-    frequency: string;
-    time: string;
-    dayOfWeek: number;
-    dayOfMonth: number;
-    emailNotify: boolean;
-    emails: string;
-  }) {
+  function saveSchedule(settings: ScheduleSettings & { emailNotify: boolean; emails: string }) {
     const task = currentTask.value;
     if (!task) return;
-    const scheduleMap: Record<string, string> = {
-      [t("analysis.everyDay")]: "1d",
-      [t("analysis.everyWeek")]: "7d",
-      [t("analysis.everyMonth")]: "30d",
-    };
-    let scheduleExpression = `${scheduleMap[settings.frequency] || "1d"}@${settings.time}`;
-    if (settings.frequency === t("analysis.everyWeek")) {
-      scheduleExpression += `/${settings.dayOfWeek}`;
-    } else if (settings.frequency === t("analysis.everyMonth")) {
-      scheduleExpression += `/${settings.dayOfMonth}`;
-    }
+    const scheduleExpression = buildScheduleExpression(settings);
 
     analysisTaskApi
       .updateTask(task.id, {
@@ -1148,17 +1190,20 @@ export const useAnalysisStore = defineStore("analysis", () => {
     }
   }
 
-  async function createPpt() {
+  async function createPpt(options: PptGenerationOptions = {}) {
     if (!canCreatePpt.value || isCreatingPpt.value) return;
     isCreatingPpt.value = true;
     try {
       await downloadPptx(
         currentTask.value?.name || t("analysis.comprehensiveSummary"),
-        reportSections.value
+        reportSections.value,
+        options
       );
       ElMessage.success(t("analysis.pptGenerated"));
+      return true;
     } catch (error: any) {
       ElMessage.error(error?.message || t("analysis.pptGenerateFailed"));
+      return false;
     } finally {
       isCreatingPpt.value = false;
     }
@@ -1170,6 +1215,7 @@ export const useAnalysisStore = defineStore("analysis", () => {
   }
 
   return {
+    agentLineup,
     agents,
     selectedAgentId,
     tasks,
@@ -1188,6 +1234,7 @@ export const useAnalysisStore = defineStore("analysis", () => {
     displayMessages,
     displayStreamingSnapshot,
     displayIsLoading,
+    displayHistoryLoading,
     displayTaskStatus,
     sessions,
     activeSession,

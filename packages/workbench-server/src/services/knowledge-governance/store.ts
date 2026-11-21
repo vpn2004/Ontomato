@@ -6,7 +6,8 @@ import {
   governanceWorkSchema,
   type GovernanceSession,
 } from "@ontomato/contracts/knowledge-governance";
-import { toEgressMessages } from "../../core/agent-loop/egress";
+import { toChatHistory } from "../../core/agent-loop/chat-view";
+import type { AgentMessage } from "../../core/agent-loop/types";
 import {
   harnessSessions,
   type HarnessMessageRow,
@@ -19,10 +20,9 @@ export interface GovernanceOwner {
   domainId: string;
   userId: string;
 }
+// Payloads saved before live streaming also carry draft/activity; parsing strips them.
 const payloadSchema = z.object({
   work: governanceWorkSchema,
-  draft: z.string(),
-  activity: z.string(),
   error: z.string().nullable(),
 });
 export interface GovernanceRecord extends GovernanceSession {
@@ -50,10 +50,17 @@ function harnessReference(value: unknown): string {
   return value;
 }
 
+// Governance conversations do not show model thinking.
+function visibleMessage(message: AgentMessage): AgentMessage[] {
+  if (message.role !== "assistant") return [message];
+  const content = message.content.filter((part) => part.type !== "thinking");
+  return content.length ? [{ ...message, content }] : [];
+}
+
 // Read business work, execution state and raw messages in one database snapshot.
 // The business payload never owns execution status or a second conversation copy.
 function readFrom(includeMessages: boolean): string {
-  return `SELECT g.*, t.status AS turn_status, COALESCE(t.turn_index, 0) AS turn_index,
+  return `SELECT g.*, h.active_turn_id, t.status AS turn_status, COALESCE(t.turn_index, 0) AS turn_index,
     GREATEST(g.updated_at, h.updated_at) AS updated_at
     ${
       includeMessages
@@ -71,26 +78,10 @@ function fromRow(row: Record<string, unknown>): GovernanceRecord {
   const payload = payloadSchema.parse(row.payload);
   const status = statusOf(row.turn_status as HarnessTurnStatus | null);
   const rows = row.raw_messages as HarnessMessageRow[];
-  const messages = rows.flatMap(({ seq, message }) => {
-    const publicMessage = toEgressMessages([message], {
-      thinking: "omit",
-      toolResultContent: "full",
-    })[0]!;
-    if (publicMessage.role === "toolResult") return [];
-    const text = publicMessage.content
-      .flatMap((part) => (part.type === "text" ? [part.text] : []))
-      .join("");
-    return text.trim()
-      ? [
-          {
-            id: `${harnessSessionId}:${seq}`,
-            role: publicMessage.role,
-            text,
-            timestamp: publicMessage.timestamp ?? new Date(String(row.created_at)).getTime(),
-          },
-        ]
-      : [];
-  });
+  // The running turn is shown only by its response stream, so history never repeats it.
+  const settled = rows.flatMap(({ turnId, message }) =>
+    status === "running" && turnId === row.active_turn_id ? [] : visibleMessage(message)
+  );
   return {
     ...governanceSessionSchema.parse({
       ...payload,
@@ -102,9 +93,8 @@ function fromRow(row: Record<string, unknown>): GovernanceRecord {
       // begin/finish/recovery also advance the public revision, even without a business save.
       revision: Number(row.revision) + Number(row.turn_index) * 2 + (status === "running" ? 0 : 1),
       status,
-      messages,
-      draft: status === "running" && rows.at(-1)?.message.role !== "assistant" ? payload.draft : "",
-      activity: status === "running" ? payload.activity : "",
+      activeTurnId: status === "running" ? row.active_turn_id : null,
+      messages: toChatHistory(settled),
       error: status === "failed" ? payload.error : null,
     }),
     harnessSessionId,
@@ -112,6 +102,13 @@ function fromRow(row: Record<string, unknown>): GovernanceRecord {
 }
 
 export const governanceStore = {
+  async deleteByUser(userId: string): Promise<void> {
+    const { rows } = await getPostgresPool().query(
+      `DELETE FROM ${qualifiedTable("knowledge_governance_sessions")} WHERE initiator_id = $1 AND domain_id <> '' RETURNING harness_session_id`, [userId]
+    );
+    for (const row of rows) if (row.harness_session_id) await harnessSessions.deleteSession(row.harness_session_id);
+  },
+
   async create(owner: GovernanceOwner): Promise<GovernanceRecord> {
     const id = randomUUID();
     await harnessSessions.create(id);
@@ -124,8 +121,6 @@ export const governanceStore = {
           owner.domainId,
           owner.userId,
           JSON.stringify({
-            draft: "",
-            activity: "",
             error: null,
             work: {
               summary: "",
@@ -159,6 +154,15 @@ export const governanceStore = {
       });
     });
   },
+  /** Domain and initiator authorization without reading the conversation. */
+  async authorize(id: string, owner: GovernanceOwner): Promise<void> {
+    const { rowCount } = await getPostgresPool().query(
+      `SELECT 1 FROM ${qualifiedTable("knowledge_governance_sessions")}
+       WHERE id = $1 AND domain_id = $2 AND initiator_id = $3`,
+      [id, owner.domainId, owner.userId]
+    );
+    if (!rowCount) throw new HttpError(404, "Governance session not found");
+  },
   async get(id: string, owner: GovernanceOwner): Promise<GovernanceRecord> {
     const { rows } = await getPostgresPool().query(
       `${readFrom(true)} WHERE g.id = $1 AND g.domain_id = $2 AND g.initiator_id = $3`,
@@ -186,12 +190,7 @@ export const governanceStore = {
         [
           record.id,
           record.harnessSessionId,
-          JSON.stringify({
-            work: record.work,
-            draft: record.draft,
-            activity: record.activity,
-            error: record.error,
-          }),
+          JSON.stringify({ work: record.work, error: record.error }),
         ]
       );
       if (rowCount !== 1) throw new Error("Governance session not found");

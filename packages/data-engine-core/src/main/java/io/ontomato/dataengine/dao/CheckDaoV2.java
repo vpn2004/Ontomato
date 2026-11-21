@@ -25,7 +25,7 @@ public class CheckDaoV2 {
 
 	private static final String TABLE_NAME = "check_v2";
 
-	private static final String COLUMNS = "session_id, origin_question, program_descriptions, score, conclusion, fitted_question, lang, create_timestamp, finished";
+	private static final String COLUMNS = "session_id, origin_question, program_descriptions, score, conclusion, fitted_question, lang, create_timestamp, finished, phase, total_programs";
 
 	@PostConstruct
 	public void initIndex() {
@@ -40,21 +40,24 @@ public class CheckDaoV2 {
 				+ "create_timestamp BIGINT, "
 				+ "finished BOOLEAN"
 				+ ")");
+		jdbcTemplate.execute("ALTER TABLE " + TABLE_NAME + " ADD COLUMN IF NOT EXISTS phase VARCHAR(32)");
+		jdbcTemplate.execute("ALTER TABLE " + TABLE_NAME + " ADD COLUMN IF NOT EXISTS total_programs INTEGER");
 		log.info(">>>checkV2 table initialization complete");
 	}
 
 	public void save(ABCHarnessCheck task) {
 		jdbcTemplate.update(
-				"INSERT INTO " + TABLE_NAME + " (" + COLUMNS + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+				"INSERT INTO " + TABLE_NAME + " (" + COLUMNS + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
 						+ "ON CONFLICT (session_id) DO UPDATE SET origin_question = EXCLUDED.origin_question, "
 						+ "program_descriptions = EXCLUDED.program_descriptions, score = EXCLUDED.score, "
 						+ "conclusion = EXCLUDED.conclusion, fitted_question = EXCLUDED.fitted_question, "
-						+ "lang = EXCLUDED.lang, create_timestamp = EXCLUDED.create_timestamp, finished = EXCLUDED.finished",
+						+ "lang = EXCLUDED.lang, create_timestamp = EXCLUDED.create_timestamp, finished = EXCLUDED.finished, "
+						+ "phase = EXCLUDED.phase, total_programs = EXCLUDED.total_programs",
 				task.getSessionId(), task.getOriginQuestion(),
 				task.getProgramDescriptions() == null ? null
 						: JSON.toJSONString(task.getProgramDescriptions(), Feature.WriteMapNullValue),
 				task.getScore(), task.getConclusion(), task.getFittedQuestion(),
-				task.getLang(), task.getCreateTimestamp(), task.getFinished());
+				task.getLang(), task.getCreateTimestamp(), task.getFinished(), task.getPhase(), task.getTotalPrograms());
 	}
 
 	public void delete(String sessionId) {
@@ -101,6 +104,8 @@ public class CheckDaoV2 {
 		task.setLang(rs.getString("lang"));
 		task.setCreateTimestamp(rs.getObject("create_timestamp") == null ? null : rs.getLong("create_timestamp"));
 		task.setFinished(rs.getObject("finished") == null ? null : rs.getBoolean("finished"));
+		task.setPhase(rs.getString("phase"));
+		task.setTotalPrograms(rs.getObject("total_programs") == null ? null : rs.getInt("total_programs"));
 		return task;
 	}
 

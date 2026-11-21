@@ -2,6 +2,7 @@ package io.ontomato.dataengine.dataAdapter;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -9,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 
 import org.junit.jupiter.api.Test;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 
 import io.ontomato.dataengine.config.BusinessConfig;
 import io.ontomato.dataengine.config.DataRagConfig;
@@ -16,6 +18,21 @@ import io.ontomato.dataengine.config.DataRagConfig;
 class DataAdapterRegistryTest {
 
 	private static final List<String> SQL_FIELDS = List.of("url", "user", "password");
+
+	@Test
+	void multiSourceProviderStartsWithoutCircularReferences() {
+		try (AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext()) {
+			context.getDefaultListableBeanFactory().setAllowCircularReferences(false);
+			context.registerBean(DataRagConfig.class, DataRagConfig::new);
+			context.register(DataAdapterRegistry.class, MultiDataSourceAdapterProvider.class);
+			context.refresh();
+
+			DataAdapterRegistry registry = context.getBean(DataAdapterRegistry.class);
+			MultiDataSourceAdapterProvider multi = context.getBean(MultiDataSourceAdapterProvider.class);
+			assertSame(multi, registry.provider("multi"));
+			assertSame(multi, multi.registry.provider("multi"));
+		}
+	}
 
 	@Test
 	void aDuplicateTypeFailsStartup() {
@@ -67,6 +84,21 @@ class DataAdapterRegistryTest {
 		registry.create(businessConfig, null);
 
 		assertEquals(new DataAdapterConnection(), mysql.lastConnection);
+	}
+
+	@Test
+	void createForTestHandsTheCandidateConnectionWithNullRule() {
+		FakeDataAdapterProvider postgresql = new FakeDataAdapterProvider("postgresql", "PostgreSQL", SQL_FIELDS);
+		DataRagConfig dataRagConfig = new DataRagConfig();
+		DataAdapterRegistry registry = new DataAdapterRegistry(List.of(postgresql), dataRagConfig);
+		DataAdapterConnection candidate = new DataAdapterConnection();
+		candidate.setUrl("jdbc:postgresql://candidate");
+
+		registry.createForTest("postgresql", candidate);
+
+		assertSame(candidate, postgresql.lastConnection);
+		assertSame(dataRagConfig, postgresql.lastDataRagConfig);
+		assertNull(postgresql.lastJsonRule);
 	}
 
 	@Test

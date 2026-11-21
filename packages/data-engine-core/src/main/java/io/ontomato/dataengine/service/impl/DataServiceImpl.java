@@ -6,8 +6,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -21,23 +20,21 @@ import io.ontomato.dataengine.config.BusinessConfig;
 import io.ontomato.dataengine.config.DataRagConfig;
 import io.ontomato.dataengine.dao.StarChartDao;
 import io.ontomato.dataengine.dao.VectorResourceDao;
-import io.ontomato.dataengine.dao.sys.CSysDomain;
-import io.ontomato.dataengine.dao.sys.SysDomain;
-import io.ontomato.dataengine.dao.sys.SysDomainDao;
 import io.ontomato.dataengine.dataAdapter.DataAdapter;
 import io.ontomato.dataengine.dataAdapter.DataAdapterRegistry;
 import io.ontomato.dataengine.service.AdminService;
 import io.ontomato.dataengine.service.BusinessConfigService;
 import io.ontomato.dataengine.service.DataService;
+import io.ontomato.dataengine.service.DomainSvc;
 import io.ontomato.dataengine.service.LangService;
 import io.ontomato.dataengine.service.sys.bean.permission.FieldPermission;
 import io.ontomato.dataengine.service.sys.bean.permission.UserDataPermission;
 import io.ontomato.dataengine.util.DslPermissionUtil;
 import io.ontomato.dataengine.util.DslUtil;
+import io.ontomato.dataengine.dataAdapter.DslExecutionMode;
 import io.ontomato.dataengine.util.HttpRequestUtil;
 
 import cn.hutool.core.lang.UUID;
-import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
@@ -66,281 +63,119 @@ public class DataServiceImpl implements DataService {
 	private LangService langService;
 	
 	@Autowired
-	private SysDomainDao domainDao;
+	private DomainSvc domainSvc;
 	
-	private BlockingQueue<WholeDataOperate> wholeDataQueue = new LinkedBlockingQueue<WholeDataOperate>();
+	private static final String MODE_0 = "mode0";
+	private static final String MODE_1 = "mode1";
+
+	private static final String STATUS_READY = "READY";
+	private static final String STATUS_GENERATING = "GENERATING";
+	private static final String STATUS_NOT_GENERATED = "NOT_GENERATED";
+	private static final String STATUS_GENERATED = "GENERATED";
+
+	// Current A/B file suffix per domain; absent means the domain has no current data in this process.
+	// Package-visible so focused unit tests can drive the read states without a database.
+	final Map<String, String> currentSuffix = new ConcurrentHashMap<>();
+	// Domains with a generation in progress; guarantees at most one generation per domain at a time.
+	// Package-visible so focused unit tests can drive the read states without a database.
+	final Set<String> generatingDomains = ConcurrentHashMap.newKeySet();
+	private final Map<String, InstanceGraphIndex> instanceGraphIndexes = new ConcurrentHashMap<>();
+	@Autowired
+	private LiveInstanceGraph liveInstanceGraph;
 	
-	class WholeDataOperate {
-		public static final String TYPE_GET = "GET";
-		public static final String TYPE_CUT = "CUT";
-		public static final String TYPE_PUT = "PUT";
-		
-		public static final String MODE_0 = "mode0";
-		public static final String MODE_1 = "mode1";
-		
-		private String type;
-		private JSONObject input;
-		private BlockingQueue<JSONObject> output;
-		
-		public WholeDataOperate(String type, JSONObject input, BlockingQueue<JSONObject> output) {
-			this.type = type;
-			this.input = input;
-			this.output = output;
-		}
-		
-		public String getType() {
-			return type;
-		}
-		public void setType(String type) {
-			this.type = type;
-		}
-		public JSONObject getInput() {
-			return input;
-		}
-		public void setInput(JSONObject input) {
-			this.input = input;
-		}
-		public BlockingQueue<JSONObject> getOutput() {
-			return output;
-		}
-		public void setOutput(BlockingQueue<JSONObject> output) {
-			this.output = output;
-		}
-	}
-	
-	@PostConstruct
 	public void initService() {
-		new Thread(new Runnable() {
-			@Override
-			public void run() {
-				Map<String, String> currentMap = new HashMap<String, String>();
-				while (true) {
-					try {
-						WholeDataOperate operate = wholeDataQueue.take();
-						JSONObject input = operate.getInput();
-						BlockingQueue<JSONObject> output = operate.getOutput();
-						if (WholeDataOperate.TYPE_GET.equals(operate.getType())) {
-							String mode = input.getString("mode");
-							String domainId = input.getString("domainId");
-							String _current = currentMap.get(domainId) != null ? (currentMap.get(domainId) + "") : "";
-							new Thread(new Runnable() {
-								@Override
-								public void run() {
-									try {
-										boolean wholeDataIsNull = true;
-										if (!_current.equals("")) {
-											JSONObject wholeData = starChartDao.readWholeData(mode, _current, domainId);
-											if (wholeData != null) {
-												output.put(wholeData);
-												wholeDataIsNull = false;
-											}
-										}
-										if (wholeDataIsNull) {
-											Thread.sleep(1000);
-											wholeDataQueue.put(operate);
-										}
-									} catch (Exception e) {
-										log.error(e.getMessage(), e);
-									}
-								}
-							}).start();
-						} else if (WholeDataOperate.TYPE_CUT.equals(operate.getType())) {
-							String domainId = input.getString("domainId");
-							String _current = currentMap.get(domainId) != null ? (currentMap.get(domainId) + "") : "";
-							new Thread(new Runnable() {
-								@Override
-								public void run() {
-									try {
-										String newCurrent = null;
-										if (_current.equals("")) {
-											newCurrent = "A";
-										} else {
-											if (_current.equals("A")) {
-												newCurrent = "B";
-											} else {
-												newCurrent = "A";
-											}
-										}
-										BusinessConfig businessConfig = businessConfigService.get(domainId);
-										DataAdapter adapter = dataAdapterRegistry.create(businessConfig, null);
-										if (adapter.useM3()) {
-											JSONObject wholeData = cutWholeData(domainId);
-											log.info("TYPE_CUT writeWholeData start...");
-											starChartDao.writeWholeData(wholeData, WholeDataOperate.MODE_0, newCurrent, domainId);
-											starChartDao.writeWholeData(fromMode0ToMode1(wholeData, domainId), WholeDataOperate.MODE_1, newCurrent, domainId);
-											log.info("TYPE_CUT writeWholeData end...");
-										} else {
-											JSONObject wholeData = cutWholeDataBySql(domainId, businessConfig);
-											log.info("TYPE_CUT writeWholeData start...");
-											starChartDao.writeWholeData(wholeData, WholeDataOperate.MODE_0, newCurrent, domainId);
-											starChartDao.writeWholeData(fromMode0ToMode1(wholeData, domainId), WholeDataOperate.MODE_1, newCurrent, domainId);
-											log.info("TYPE_CUT writeWholeData end...");
-										}
-										JSONObject input = new JSONObject();
-										input.put("domainId", domainId);
-										input.put("newCurrent", newCurrent);
-										log.info("TYPE_CUT operate input start    " + input.toString());
-										WholeDataOperate operate = new WholeDataOperate(WholeDataOperate.TYPE_PUT, input, null);
-										wholeDataQueue.put(operate);
-									} catch (Exception e) {
-										log.error(e.getMessage(), e);
-									}
-								}
-							}).start();
-						} else if (WholeDataOperate.TYPE_PUT.equals(operate.getType())) {
-							String domainId = input.getString("domainId");
-							String current = input.getString("newCurrent");
-							currentMap.put(domainId, current);
-						}
-					} catch (Exception e) {
-						log.error(e.getMessage(), e);
-					}
-					try {
-						Thread.sleep(10);
-					} catch (Exception e) {}
-				}
-			}
-		}).start();
-		
-		new Thread(new Runnable() {
-			@Override
-			public void run() {
-				while (true) {
-					try {
-						List<SysDomain> domains = domainDao.queryList(new CSysDomain());
-						for (SysDomain domain : domains) {
-							JSONObject input = new JSONObject();
-							input.put("domainId", domain.getId());
-							WholeDataOperate operate = new WholeDataOperate(WholeDataOperate.TYPE_CUT, input, null);
-							wholeDataQueue.put(operate);
-						}
-						
-						break;
-					} catch (Exception e) {
-						log.error(e.getMessage(), e);
-					}
-					try {
-						Thread.sleep(5 * 60 * 1000);
-					} catch (Exception e) {}
-				}
-			}
-		}).start();
+		// Legacy star-chart files are generated only by the explicit refresh endpoint.
 	}
-	
+
 	@Override
-	public void refreshStarChartData(String domainId) {
-		try {
-			JSONObject input = new JSONObject();
-			input.put("domainId", domainId);
-			WholeDataOperate operate = new WholeDataOperate(WholeDataOperate.TYPE_CUT, input, null);
-			wholeDataQueue.put(operate);
-		} catch (Exception e) {
-			log.error(e.getMessage(), e);
+	public JSONObject refreshStarChartData(String domainId) {
+		if (!generatingDomains.add(domainId)) {
+			JSONObject ret = new JSONObject();
+			ret.put("success", true);
+			ret.put("status", STATUS_GENERATING);
+			return ret;
 		}
-	}
-	
-	@Override
-	public JSONObject queryWholeDataMode0(String domainId) {
-		return queryWholeData(WholeDataOperate.MODE_0, domainId);
-	}
-	
-	@Override
-	public JSONObject queryWholeDataMode1(String domainId) {
-		return queryWholeData(WholeDataOperate.MODE_1, domainId);
-	}
-	
-	private JSONObject queryWholeData(String mode, String domainId) {
-		JSONObject data = null;
 		try {
-			JSONObject input = new JSONObject();
-			input.put("mode", mode);
-			input.put("domainId", domainId);
-			BlockingQueue<JSONObject> output = new LinkedBlockingQueue<JSONObject>();
-			WholeDataOperate operate = new WholeDataOperate(WholeDataOperate.TYPE_GET, input, output);
-			wholeDataQueue.put(operate);
-			data = output.take();
-		} catch (Exception e) {
-			log.error(e.getMessage(), e);
+			generate(domainId);
+		} finally {
+			generatingDomains.remove(domainId);
 		}
 		JSONObject ret = new JSONObject();
-		if (data != null) {
-			ret.put("success", true);
+		ret.put("success", true);
+		ret.put("status", STATUS_GENERATED);
+		return ret;
+	}
+
+	@Override
+	public JSONObject queryWholeDataMode0(String domainId) {
+		return queryWholeData(MODE_0, domainId);
+	}
+
+	@Override
+	public JSONObject queryWholeDataMode1(String domainId) {
+		return queryWholeData(MODE_1, domainId);
+	}
+
+	private JSONObject queryWholeData(String mode, String domainId) {
+		JSONObject ret = new JSONObject();
+		ret.put("success", true);
+		String suffix = currentSuffix.get(domainId);
+		if (suffix != null) {
+			JSONObject data = starChartDao.readWholeData(mode, suffix, domainId);
+			ret.put("status", STATUS_READY);
 			ret.put("data", data);
-		} else {
+			return ret;
+		}
+		ret.put("status", generatingDomains.contains(domainId) ? STATUS_GENERATING : STATUS_NOT_GENERATED);
+		return ret;
+	}
+
+	private void generate(String domainId) {
+		JSONObject wholeData = cutWholeData(domainId, businessConfigService.get(domainId));
+		String suffix = currentSuffix.get(domainId);
+		String newSuffix = suffix == null ? "A" : (suffix.equals("A") ? "B" : "A");
+		log.info("generate star chart data writeWholeData start...");
+		starChartDao.writeWholeData(wholeData, MODE_0, newSuffix, domainId);
+		starChartDao.writeWholeData(fromMode0ToMode1(wholeData, domainId), MODE_1, newSuffix, domainId);
+		log.info("generate star chart data writeWholeData end...");
+		InstanceGraphIndex index = new InstanceGraphIndex(wholeData);
+		currentSuffix.put(domainId, newSuffix);
+		instanceGraphIndexes.put(domainId, index);
+	}
+
+	@Override
+	public JSONObject queryInstanceGraph(String operation, JSONObject request, String domainId) {
+		if (liveInstanceGraph != null) return liveInstanceGraph.query(operation, request, domainId);
+		JSONObject ret = new JSONObject();
+		ret.put("success", true);
+		InstanceGraphIndex index = instanceGraphIndexes.get(domainId);
+		if (index == null) {
+			ret.put("status", generatingDomains.contains(domainId) ? STATUS_GENERATING : STATUS_NOT_GENERATED);
+			return ret;
+		}
+		String version = request.getString("version");
+		if (!"summary".equals(operation) && (version == null || !version.equals(index.version))) {
 			ret.put("success", false);
+			ret.put("code", "GRAPH_VERSION_CHANGED");
+			ret.put("message", "Graph version changed. Refresh the overview before exploring.");
+			return ret;
+		}
+		try {
+			JSONObject data = switch (operation) {
+				case "summary" -> index.summary();
+				case "search" -> index.search(request);
+				case "neighborhood" -> index.neighborhood(request);
+				default -> throw new IllegalArgumentException("Unknown graph operation");
+			};
+			ret.put("status", STATUS_READY);
+			ret.put("data", data);
+		} catch (IllegalArgumentException e) {
+			ret.put("success", false);
+			ret.put("message", e.getMessage());
 		}
 		return ret;
 	}
 	
-	private JSONObject cutWholeData(String domainId) {
-		log.info("cutWholeData start...");
-		Map<String, Object> jsonRule = adminService.getJSONRule(domainId);
-		List<Map<String, Object>> classDefs = (List<Map<String, Object>>)jsonRule.get("classDef");
-		Map relationship_rule = (Map)jsonRule.get("relationship_rule");
-		String rootClass = (String)((List)jsonRule.get("classlist")).get(0);
-		
-		Map<String, JSONObject> nodeMap = new HashMap<String, JSONObject>();
-		Map<String, Set<String>> sourceTargetsMap = new HashMap<String, Set<String>>();
-		Map<String, Set<String>> targetSourcesMap = new HashMap<String, Set<String>>();
-		Set<String> roots = new HashSet<String>();
-		for (Object key : relationship_rule.keySet()) {
-			try {
-				Map edgeDef = (Map)relationship_rule.get(key);
-				Map<String, Object> sourceClassDef = null;
-				Map<String, Object> targetClassDef = null;
-				for (Map<String, Object> classDef : classDefs) {
-					if (edgeDef.get("fromclass").equals(classDef.get("className"))) {
-						sourceClassDef = classDef;
-					}
-					if (edgeDef.get("toclass").equals(classDef.get("className"))) {
-						targetClassDef = classDef;
-					}
-				}
-				if (sourceClassDef.get("inStarChart") != null && sourceClassDef.get("inStarChart") instanceof Boolean && (Boolean)sourceClassDef.get("inStarChart") 
-						&& targetClassDef.get("inStarChart") != null && targetClassDef.get("inStarChart") instanceof Boolean && (Boolean)targetClassDef.get("inStarChart")) {
-					String mql = "match (a:" + edgeDef.get("fromclass") + ")-[:" + key + "]->(b:" + edgeDef.get("toclass") + ")";
-					JSONObject output = HttpRequestUtil.queryMql(dataRagConfig, mql);
-					JSONArray message = output.getJSONArray("message");
-					for (int i = 0; i < message.size(); i++) {
-						JSONObject graph = message.getJSONObject(i).getJSONObject("graph");
-						JSONArray nodes = graph.getJSONArray("nodes");
-						for (int j = 0; j < nodes.size(); j++) {
-							JSONObject node = nodes.getJSONObject(j);
-							JSONObject obj = new JSONObject();
-							obj.put("id", node.getString("id"));
-							obj.put("name", node.getString("name"));
-							obj.put("class", node.getString("class"));
-							nodeMap.put(obj.getString("id"), obj);
-							if (rootClass.equals(obj.getString("class"))) {
-								roots.add(obj.getString("id"));
-							}
-						}
-						JSONArray edges = graph.getJSONArray("edges");
-						for (int j = 0; j < edges.size(); j++) {
-							JSONObject edge = edges.getJSONObject(j);
-							String source = edge.getString("source");
-							String target = edge.getString("target");
-							Set<String> targets = sourceTargetsMap.get(source);
-							if (targets == null) {
-								targets = new HashSet<String>();
-								sourceTargetsMap.put(source, targets);
-							}
-							targets.add(target);
-							Set<String> sources = targetSourcesMap.get(target);
-							if (sources == null) {
-								sources = new HashSet<String>();
-								targetSourcesMap.put(target, sources);
-							}
-							sources.add(source);
-						}
-					}
-				}
-			} catch (Exception e) {}
-		}
-		
-		return buildStarChartData(nodeMap, sourceTargetsMap, targetSourcesMap, roots);
-	}
-
 	private JSONObject buildStarChartData(Map<String, JSONObject> nodeMap, Map<String, Set<String>> sourceTargetsMap, Map<String, Set<String>> targetSourcesMap, Set<String> roots) {
 		Map<String, Set<String>> rootSourceTargetsMap = new HashMap<String, Set<String>>();
 		Map<String, Set<String>> rootTargetSourcesMap = new HashMap<String, Set<String>>();
@@ -461,12 +296,17 @@ public class DataServiceImpl implements DataService {
 		return data;
 	}
 	
-	private JSONObject cutWholeDataBySql(String domainId, BusinessConfig businessConfig) {
-		log.info("cutWholeDataBySql start...");
+	/**
+	 * The instance graph of every adapter: each in-chart class and relationship becomes a graph-pattern DSL run through
+	 * the domain's adapter. Node ids are {@code className:primaryKeyValue}, the form queryInfoByNode reads back.
+	 * Package-visible so focused unit tests can stub the data build without a database or remote query.
+	 */
+	JSONObject cutWholeData(String domainId, BusinessConfig businessConfig) {
+		log.info("cutWholeData start...");
 		Map<String, Object> jsonRule = adminService.getJSONRule(domainId);
 		List<Map<String, Object>> classDefs = (List<Map<String, Object>>)jsonRule.get("classDef");
 		Map relationship_rule = (Map)jsonRule.get("relationship_rule");
-		String rootClass = (String)((List)jsonRule.get("classlist")).get(0);
+		String rootClass = ((List<?>)jsonRule.get("classlist")).isEmpty() ? "" : (String)((List)jsonRule.get("classlist")).get(0);
 		
 		DataAdapter adapter = dataAdapterRegistry.create(businessConfig, jsonRule);
 		
@@ -479,6 +319,9 @@ public class DataServiceImpl implements DataService {
 		Map<String, Set<String>> sourceTargetsMap = new HashMap<String, Set<String>>();
 		Map<String, Set<String>> targetSourcesMap = new HashMap<String, Set<String>>();
 		Set<String> roots = new HashSet<String>();
+		JSONArray typedEdges = new JSONArray();
+		JSONArray failures = new JSONArray();
+		scanInstanceNodes(adapter, classDefs, nodeMap, roots, rootClass, failures);
 		for (Object key : relationship_rule.keySet()) {
 			try {
 				Map edgeDef = (Map)relationship_rule.get(key);
@@ -489,9 +332,9 @@ public class DataServiceImpl implements DataService {
 						&& targetClassDef.get("inStarChart") != null && targetClassDef.get("inStarChart") instanceof Boolean && (Boolean)targetClassDef.get("inStarChart")) {
 					String fromClass = (String)sourceClassDef.get("className");
 					String toClass = (String)targetClassDef.get("className");
-					String fromPk = DslUtil.getPrimaryKey(sourceClassDef);
+					String fromPk = adapter.objectPrimaryKey(sourceClassDef);
 					String fromName = getNameField(sourceClassDef);
-					String toPk = DslUtil.getPrimaryKey(targetClassDef);
+					String toPk = adapter.objectPrimaryKey(targetClassDef);
 					String toName = getNameField(targetClassDef);
 					
 					JSONObject dsl = new JSONObject();
@@ -562,7 +405,7 @@ public class DataServiceImpl implements DataService {
 					dsls.add(dsl);
 					String sessionId = UUID.randomUUID().toString();
 					List<String> generatedMqls = new ArrayList<String>();
-					String result = adapter.executeDsl(JSONArray.toJSONString(dsls, Feature.WriteMapNullValue), sessionId, null, generatedMqls);
+					String result = adapter.executeDsl(JSONArray.toJSONString(dsls, Feature.WriteMapNullValue), sessionId, DslExecutionMode.RAW, generatedMqls);
 					JSONArray answers = JSONArray.parseArray(result);
 					JSONArray rows = answers.getJSONObject(0).getJSONArray("answer");
 					for (int i = 0; i < rows.size(); i++) {
@@ -572,20 +415,22 @@ public class DataServiceImpl implements DataService {
 						String targetId = row.getString("tid");
 						String targetName = row.getString("tname");
 						
-						String sourceNodeId = fromClass + ":" + sourceId;
-						String targetNodeId = toClass + ":" + targetId;
+						String sourceNodeId = adapter.encodeNodeReference(fromClass, sourceId);
+						String targetNodeId = adapter.encodeNodeReference(toClass, targetId);
 						
 						JSONObject sourceObj = new JSONObject();
 						sourceObj.put("id", sourceNodeId);
-						sourceObj.put("name", sourceName);
+                    sourceObj.put("name", io.ontomato.dataengine.util.InstanceNameUtil.display(io.ontomato.dataengine.util.InstanceNameUtil.businessKey(sourceClassDef), sourceName));
 						sourceObj.put("class", fromClass);
-						nodeMap.put(sourceNodeId, sourceObj);
+						nodeMap.putIfAbsent(sourceNodeId, sourceObj);
 						
 						JSONObject targetObj = new JSONObject();
 						targetObj.put("id", targetNodeId);
-						targetObj.put("name", targetName);
+                    targetObj.put("name", io.ontomato.dataengine.util.InstanceNameUtil.display(io.ontomato.dataengine.util.InstanceNameUtil.businessKey(targetClassDef), targetName));
 						targetObj.put("class", toClass);
-						nodeMap.put(targetNodeId, targetObj);
+						nodeMap.putIfAbsent(targetNodeId, targetObj);
+						typedEdges.add(JSONObject.of("source", sourceNodeId, "target", targetNodeId,
+								"type", key.toString(), "label", edgeDef.get("desc")));
 						
 						if (rootClass.equals(fromClass)) {
 							roots.add(sourceNodeId);
@@ -610,30 +455,56 @@ public class DataServiceImpl implements DataService {
 					}
 				}
 			} catch (Exception e) {
+				failures.add("relationship:" + key);
 				log.error(e.getMessage(), e);
 			}
 		}
-		log.info("cutWholeDataBySql end...");
+		log.info("cutWholeData end...");
 		
-		return buildStarChartData(nodeMap, sourceTargetsMap, targetSourcesMap, roots);
+		JSONObject graphData;
+		if (roots.isEmpty()) {
+			graphData = JSONObject.of("nodes", new JSONArray(nodeMap.values()), "edges", new JSONArray());
+		} else {
+			graphData = buildStarChartData(nodeMap, sourceTargetsMap, targetSourcesMap, roots);
+		}
+		graphData.put("edges", typedEdges);
+		graphData.put("complete", failures.isEmpty());
+		graphData.put("failures", failures);
+		return graphData;
 	}
 	
-	private String getNameField(Map<String, Object> classDef) {
-		String pk = "id";
-		if (classDef.get("attrs") != null) {
-			List<Map<String, Object>> attrDefs = (List<Map<String, Object>>)classDef.get("attrs");
-			for (Map<String, Object> attrDef : attrDefs) {
-				if (attrDef.get("enable") == null || (Boolean)attrDef.get("enable")) {
-					if (attrDef.get("primaryKey") != null && (Boolean)attrDef.get("primaryKey")) {
-						pk = (String)attrDef.get("name");
-					}
-					if (attrDef.get("bizzkey") != null && (Boolean)attrDef.get("bizzkey")) {
-						return (String)attrDef.get("name");
-					}
+	private void scanInstanceNodes(DataAdapter adapter, List<Map<String, Object>> classDefs,
+			Map<String, JSONObject> nodeMap, Set<String> roots, String rootClass, JSONArray failures) {
+		for (Map<String, Object> classDef : classDefs) {
+			if (!Boolean.TRUE.equals(classDef.get("inStarChart"))) continue;
+			String className = (String) classDef.get("className");
+			try {
+				String pk = DslUtil.getPrimaryKey(classDef);
+				JSONArray fields = JSONArray.of(JSONObject.of("variable", "n", "field", pk, "as", "pk"),
+						JSONObject.of("variable", "n", "field", getNameField(classDef), "as", "name"));
+				JSONObject step = JSONObject.of("graph", JSONObject.of("patterns", JSONArray.of(JSONObject.of("objects",
+						JSONArray.of(JSONObject.of("idx", 0, "variable", "n", "class", className)))), "pattern_logic", "and"),
+						"output", JSONObject.of("to_user", true, "fields", fields));
+				JSONObject dsl = JSONObject.of("problem", "", "answer", JSONObject.of("steps", JSONArray.of(step)));
+				String result = adapter.executeDsl(JSONArray.of(dsl).toJSONString(), UUID.randomUUID().toString(), DslExecutionMode.RAW, new ArrayList<>());
+				for (Object raw : JSONArray.parseArray(result).getJSONObject(0).getJSONArray("answer")) {
+					JSONObject row = (JSONObject) raw;
+					String id = className + ":" + row.getString("pk");
+                    String name = io.ontomato.dataengine.util.InstanceNameUtil.display(io.ontomato.dataengine.util.InstanceNameUtil.businessKey(classDef), row.getString("name"));
+					JSONObject node = JSONObject.of("id", id, "class", className, "name", name);
+					nodeMap.put(id, node);
+					if (rootClass.equals(className)) roots.add(id);
 				}
+			} catch (Exception e) {
+				failures.add("class:" + className);
+				log.error("Instance graph class scan failed: {}", className, e);
 			}
 		}
-		return pk;
+	}
+
+	private String getNameField(Map<String, Object> classDef) {
+		String field = io.ontomato.dataengine.util.InstanceNameUtil.businessKey(classDef);
+		return field == null ? DslUtil.getPrimaryKey(classDef) : field;
 	}
 	
 	private JSONObject fromMode0ToMode1(JSONObject wholeData, String domainId) {
@@ -700,81 +571,9 @@ public class DataServiceImpl implements DataService {
 	}
 
 	@Override
-	public JSONObject queryNextByNode(JSONObject n, String lang, String domainId) {
-		JSONObject ret = new JSONObject();
-		BusinessConfig businessConfig = businessConfigService.get(domainId);
-		DataAdapter adapter = dataAdapterRegistry.create(businessConfig, null);
-		if (adapter.useM3()) {
-			try {
-				Map<String, JSONObject> nodeMap = new HashMap<String, JSONObject>();
-				Map<String, String[]> edgeMap = new HashMap<String, String[]>();
-				
-				String[] mqls = new String[] {
-						"match ('" + n.getString("id") + "')-[*1..1]->()",
-						"match ('" + n.getString("id") + "')<-[*1..1]-()"
-				};
-				for (String mql : mqls) {
-					JSONObject output = HttpRequestUtil.queryMql(dataRagConfig, mql);
-					JSONArray message = output.getJSONArray("message");
-					for (int i = 0; i < message.size(); i++) {
-						JSONObject graph = message.getJSONObject(i).getJSONObject("graph");
-						JSONArray nodes = graph.getJSONArray("nodes");
-						for (int j = 0; j < nodes.size(); j++) {
-							JSONObject node = nodes.getJSONObject(j);
-							if (!n.getString("id").equals(node.getString("id"))) {
-								JSONObject obj = new JSONObject();
-								obj.put("id", node.getString("id"));
-								obj.put("name", node.getString("name"));
-								obj.put("class", node.getString("class"));
-								nodeMap.put(obj.getString("id"), obj);
-							}
-						}
-						JSONArray edges = graph.getJSONArray("edges");
-						for (int j = 0; j < edges.size(); j++) {
-							JSONObject edge = edges.getJSONObject(j);
-							String source = edge.getString("source");
-							String target = edge.getString("target");
-							edgeMap.put(source + "_" + target, new String[] {source, target});
-						}
-					}
-				}
-				
-				JSONObject data = new JSONObject();
-				JSONArray nodes = new JSONArray();
-				for (String key : nodeMap.keySet()) {
-					JSONObject node = nodeMap.get(key);
-					nodes.add(node);
-				}
-				data.put("nodes", nodes);
-				JSONArray edges = new JSONArray();
-				for (String key : edgeMap.keySet()) {
-					String[] st = edgeMap.get(key);
-					JSONObject edge = new JSONObject();
-					edge.put("source", st[0]);
-					edge.put("target", st[1]);
-					edges.add(edge);
-				}
-				data.put("edges", edges);
-				ret.put("success", true);
-				ret.put("data", data);
-			} catch (Exception e) {
-				log.error(e.getMessage(), e);
-				ret.put("message", langService.get(lang, "Data.queryM3.error"));
-				ret.put("success", false);
-			}
-		} else {
-			ret.put("message", langService.get(lang, "Data.remoteDB.notSupport") + ": " + businessConfig.getDataAdapter());
-			ret.put("success", false);
-		}
-		
-		return ret;
-	}
-
-	@Override
 	public JSONObject queryInfoByNode(JSONObject node, String lang, UserDataPermission permission, String domainId) {
 		JSONObject ret = new JSONObject();
 		BusinessConfig businessConfig = businessConfigService.get(domainId);
-		DataAdapter adapter = dataAdapterRegistry.create(businessConfig, null);
 		try {
 			Map<String, Object> jsonRule = adminService.getJSONRule(domainId);
 			List<Map<String, Object>> classDefs = (List<Map<String, Object>>)jsonRule.get("classDef");
@@ -786,11 +585,9 @@ public class DataServiceImpl implements DataService {
 				}
 			}
 			
-			String pkField = adapter.useM3() ? "id" : DslUtil.getPrimaryKey(classDef);
-			String pkValue = node.getString("id");
-			if (!adapter.useM3()) {
-				pkValue = pkValue.substring(node.getString("class").length() + 1);
-			}
+			// The instance graph names a node className:primaryKeyValue.
+			String pkField = DslUtil.getPrimaryKey(classDef);
+			String pkValue = node.getString("id").substring(node.getString("class").length() + 1);
 			
 			JSONArray dsls = new JSONArray();
 			JSONObject dsl = new JSONObject();
@@ -837,9 +634,9 @@ public class DataServiceImpl implements DataService {
 			answer.put("steps", steps);
 			dsl.put("answer", answer);
 			dsls.add(dsl);
-			DslExecutionResult[] results = HttpRequestUtil.getM3Data(dataRagConfig, dataAdapterRegistry.create(businessConfig, jsonRule), JSON.toJSONString(dsls, Feature.WriteMapNullValue), UUID.randomUUID().toString(), false, jsonRule, vectorResourceDao, permission, HttpRequestUtil.M3Mode.V1, domainId);
-			Map<String, Object> dataMap = results[0].rawResponse();
-			Map<String, Object> rowPermissionDataMap = results[1].rawResponse();
+			DslExecutionResult[] results = HttpRequestUtil.executeDsl(dataRagConfig, dataAdapterRegistry.create(businessConfig, jsonRule), JSON.toJSONString(dsls, Feature.WriteMapNullValue), UUID.randomUUID().toString(), false, jsonRule, vectorResourceDao, permission, DslExecutionMode.OPTIMIZED, domainId);
+			Map<String, Object> dataMap = successfulQueryResponse(results[0]);
+			Map<String, Object> rowPermissionDataMap = successfulQueryResponse(results[1]);
 			
 			if (dataMap.get("data") != null 
 					&& ((List)dataMap.get("data")).size() > 0 
@@ -866,8 +663,7 @@ public class DataServiceImpl implements DataService {
 			}
 		} catch (Exception e) {
 			log.error(e.getMessage(), e);
-			ret.put("message", langService.get(lang, "Data.queryM3.error"));
-			ret.put("success", false);
+			return failedQueryResponse(e);
 		}
 		
 		return ret;
@@ -880,10 +676,10 @@ public class DataServiceImpl implements DataService {
 		String term = textSearch.get("term").toString();
 		String limit = textSearch.get("limit").toString();
 		int iLimit = Integer.parseInt(limit);
-		
+
 		Map<String, Object> jsonRule = adminService.getJSONRule(domainId);
 		List<Map<String, Object>> classDefs = (List<Map<String, Object>>)jsonRule.get("classDef");
-		
+
 		JSONArray allQueryData = new JSONArray();
 		for(Map<String, Object> classDef : classDefs){
 			String classDesc = (String)classDef.get("showName");
@@ -896,7 +692,7 @@ public class DataServiceImpl implements DataService {
 	        		}
 	        	}
 	        }
-			
+
 			FieldPermission fieldPermission = permission.getFieldPermissionByClassName(className);
 			if (permission.isFullData() || fieldPermission != null && !fieldPermission.isEmpty()) {
 				String sessionId = UUID.randomUUID().toString();
@@ -1007,8 +803,9 @@ public class DataServiceImpl implements DataService {
 	            dsl.put("answer", answer);
 	            dsls.add(dsl);
 	            
-	            DslExecutionResult[] results = HttpRequestUtil.getM3Data(dataRagConfig, dataAdapterRegistry.create(businessConfig, jsonRule), JSON.toJSONString(dsls, Feature.WriteMapNullValue), sessionId, true, jsonRule, vectorResourceDao, permission, HttpRequestUtil.M3Mode.V1, domainId);
-	            Map<String, Object> rowPermissionDataMap = results[1].rawResponse();
+	            DslExecutionResult[] results = HttpRequestUtil.executeDsl(dataRagConfig, dataAdapterRegistry.create(businessConfig, jsonRule), JSON.toJSONString(dsls, Feature.WriteMapNullValue), sessionId, true, jsonRule, vectorResourceDao, permission, DslExecutionMode.OPTIMIZED, domainId);
+	            if (results[1].failed()) return failedQueryResponse(results[1].failure().cause());
+			Map<String, Object> rowPermissionDataMap = successfulQueryResponse(results[1]);
 	            JSONArray rows = new JSONArray();
 	            if (rowPermissionDataMap.get("data") != null 
 	            		&& ((List)rowPermissionDataMap.get("data")).size() > 0 
@@ -1046,13 +843,18 @@ public class DataServiceImpl implements DataService {
 		JSONArray allQueryData = new JSONArray();
 		Map<String, Object> jsonRule = adminService.getJSONRule(domainId);
 		List<Map<String, Object>> classDefs = (List<Map<String, Object>>)jsonRule.get("classDef");
-		
+
 		for(Map<String, Object> classDef : classDefs) {
 			String className = (String)classDef.get("className");
 			FieldPermission fieldPermission = permission.getFieldPermissionByClassName(className);
-			
+
 			if (permission.isFullData() || fieldPermission != null && !fieldPermission.isEmpty()) {
-				Integer count = getCountByClassName(className, null, jsonRule, permission, domainId);
+				Integer count;
+				try {
+					count = getCountByClassName(className, null, jsonRule, permission, domainId);
+				} catch (Exception e) {
+					return failedQueryResponse(e);
+				}
 				Map<String,Object> classAndCount = new HashMap<String,Object>();
 				classAndCount.put("className", className);
 				classAndCount.put("showName", classDef.get("showName"));
@@ -1067,6 +869,23 @@ public class DataServiceImpl implements DataService {
 		return ret;
 	}
 	
+	private static JSONObject successfulQueryResponse(DslExecutionResult result) {
+		if (result.failed()) {
+			Exception cause = result.failure().cause();
+			throw new IllegalStateException(queryFailureMessage(cause), cause);
+		}
+		return result.rawResponse();
+	}
+
+	private static JSONObject failedQueryResponse(Exception cause) {
+		return JSONObject.of("success", false, "message", queryFailureMessage(cause));
+	}
+
+	private static String queryFailureMessage(Exception cause) {
+		return cause.getMessage() == null || cause.getMessage().isBlank()
+				? "Database query failed" : cause.getMessage();
+	}
+
 	static JSONObject buildClassQueryObject(String className, String searchTerm) {
 		JSONObject object = new JSONObject();
 		object.put("idx", 0);
@@ -1086,7 +905,6 @@ public class DataServiceImpl implements DataService {
 	}
 
 	private Integer getCountByClassName(String className, String searchTerm, Map<String, Object> jsonRule, UserDataPermission permission, String domainId) {
-		Integer count = 0;
 		List<Map<String, Object>> classDefs = (List<Map<String, Object>>)jsonRule.get("classDef");
 		Map<String, Object> classDef = null;
 		for(Map<String, Object> mapClassDef : classDefs) {
@@ -1140,18 +958,22 @@ public class DataServiceImpl implements DataService {
         dsls.add(dsl);
         
         BusinessConfig businessConfig = businessConfigService.get(domainId);
-		DslExecutionResult[] results = HttpRequestUtil.getM3Data(dataRagConfig, dataAdapterRegistry.create(businessConfig, jsonRule), JSON.toJSONString(dsls, Feature.WriteMapNullValue), sessionId, true, jsonRule, vectorResourceDao, permission, HttpRequestUtil.M3Mode.V1, domainId);
-		Map<String, Object> rowPermissionDataMap = results[1].rawResponse();
+		DslExecutionResult[] results = HttpRequestUtil.executeDsl(dataRagConfig, dataAdapterRegistry.create(businessConfig, jsonRule), JSON.toJSONString(dsls, Feature.WriteMapNullValue), sessionId, true, jsonRule, vectorResourceDao, permission, DslExecutionMode.OPTIMIZED, domainId);
+		Map<String, Object> rowPermissionDataMap = successfulQueryResponse(results[1]);
         if (rowPermissionDataMap.get("data") != null 
         		&& ((List)rowPermissionDataMap.get("data")).size() > 0 
         		&& ((Map)((List)rowPermissionDataMap.get("data")).get(0)).get("answer") != null
         		&& ((List)((Map)((List)rowPermissionDataMap.get("data")).get(0)).get("answer")).size() > 0) {
         	Map<String, Object> row = (Map<String, Object>)((List)((Map)((List)rowPermissionDataMap.get("data")).get(0)).get("answer")).get(0);
         	try {
-        		count = Integer.parseInt(row.get("count_id") + "");
-        	} catch (Exception e) {}
+				int count = new java.math.BigDecimal(String.valueOf(row.get("count_id"))).intValueExact();
+				if (count < 0) throw new IllegalArgumentException("Negative count");
+				return count;
+			} catch (RuntimeException e) {
+				throw new IllegalStateException("Database returned an invalid count for class " + className, e);
+			}
         }
-        return count;
+        throw new IllegalStateException("Database returned no count for class " + className);
 	}
 	
 	@Override
@@ -1167,9 +989,9 @@ public class DataServiceImpl implements DataService {
 	private JSONObject getClassDataByPage(JSONObject classSearch, String lang, UserDataPermission permission, boolean withBizzKey, String domainId) {
 		BusinessConfig businessConfig = businessConfigService.get(domainId);
 		DataAdapter adapter = dataAdapterRegistry.create(businessConfig, null);
-		
+
 		JSONObject ret = new JSONObject();
-		
+
 		String className = classSearch.get("classname").toString();
 		String searchTerm = classSearch.getString("search");
 		if (searchTerm != null ) {
@@ -1200,7 +1022,7 @@ public class DataServiceImpl implements DataService {
         		}
         	}
         }
-		
+
 		FieldPermission fieldPermission = permission.getFieldPermissionByClassName(className);
 		if (permission.isFullData() || fieldPermission != null && !fieldPermission.isEmpty()) {
 			// Query details by page
@@ -1247,7 +1069,7 @@ public class DataServiceImpl implements DataService {
         		field0.put("as", pk);
         		fields0.add(field0);
             }
-            
+
             output0.put("fields", fields0);
             JSONObject sort0 = new JSONObject();
             JSONArray sortFields0 = new JSONArray();
@@ -1268,8 +1090,9 @@ public class DataServiceImpl implements DataService {
             dsl.put("answer", answer);
             dsls.add(dsl);
             
-			DslExecutionResult[] results = HttpRequestUtil.getM3Data(dataRagConfig, dataAdapterRegistry.create(businessConfig, jsonRule), JSON.toJSONString(dsls, Feature.WriteMapNullValue), sessionId, true, jsonRule, vectorResourceDao, permission, HttpRequestUtil.M3Mode.V1, domainId);
-			Map<String, Object> rowPermissionDataMap = results[1].rawResponse();
+			DslExecutionResult[] results = HttpRequestUtil.executeDsl(dataRagConfig, dataAdapterRegistry.create(businessConfig, jsonRule), JSON.toJSONString(dsls, Feature.WriteMapNullValue), sessionId, true, jsonRule, vectorResourceDao, permission, DslExecutionMode.OPTIMIZED, domainId);
+			if (results[1].failed()) return failedQueryResponse(results[1].failure().cause());
+			Map<String, Object> rowPermissionDataMap = successfulQueryResponse(results[1]);
             JSONArray rows = new JSONArray();
             if (rowPermissionDataMap.get("data") != null 
             		&& ((List)rowPermissionDataMap.get("data")).size() > 0 
@@ -1280,9 +1103,14 @@ public class DataServiceImpl implements DataService {
             		rows.add(_row);
             	}
             }
-            
+
 			// Query total record count
-			Integer totalCount = getCountByClassName(className, searchTerm, jsonRule, permission, domainId);
+			Integer totalCount;
+			try {
+				totalCount = getCountByClassName(className, searchTerm, jsonRule, permission, domainId);
+			} catch (Exception e) {
+				return failedQueryResponse(e);
+			}
             int totalPage = totalCount % pagecount == 0 ? totalCount / pagecount : totalCount / pagecount + 1;
             ret.put("data", rows);
     		ret.put("total_count", totalCount);
@@ -1293,7 +1121,7 @@ public class DataServiceImpl implements DataService {
 			ret.put("message", langService.get(lang, "Data.dataPermission.noPermission"));
 			ret.put("success", false);
 		}
-		
+
 		return ret;
 	}
 	
@@ -1369,8 +1197,8 @@ public class DataServiceImpl implements DataService {
 			        dsls.add(dsl);
 			        
 			        BusinessConfig businessConfig = businessConfigService.get(domainId);
-			        DslExecutionResult[] results = HttpRequestUtil.getM3Data(dataRagConfig, dataAdapterRegistry.create(businessConfig, jsonRule), JSON.toJSONString(dsls, Feature.WriteMapNullValue), sessionId, true, jsonRule, vectorResourceDao, permission, HttpRequestUtil.M3Mode.V1, domainId);
-			        Map<String, Object> rowPermissionDataMap = results[1].rawResponse();
+			        DslExecutionResult[] results = HttpRequestUtil.executeDsl(dataRagConfig, dataAdapterRegistry.create(businessConfig, jsonRule), JSON.toJSONString(dsls, Feature.WriteMapNullValue), sessionId, true, jsonRule, vectorResourceDao, permission, DslExecutionMode.OPTIMIZED, domainId);
+			        Map<String, Object> rowPermissionDataMap = successfulQueryResponse(results[1]);
 			        if (rowPermissionDataMap.get("data") != null 
 			        		&& ((List)rowPermissionDataMap.get("data")).size() > 0 
 			        		&& ((Map)((List)rowPermissionDataMap.get("data")).get(0)).get("answer") != null

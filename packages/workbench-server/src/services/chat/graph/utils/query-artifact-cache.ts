@@ -8,8 +8,12 @@ import {
   type QueryRun,
 } from "../../../data-query/query-run-store";
 import { createLogger } from "../../../../logging/logger";
+import type { ResultTruncation } from "@ontomato/contracts/query-execution";
 import type { FieldDisplayPlan } from "../../../data-query/adapter";
 import { currentDatasetRule } from "./current-dataset";
+import { getCheckpointer } from "../../../../infrastructure/connection";
+import { createReportEvidence, type ReportEvidence } from "../../report/evidence";
+import type { Dataset } from "../../../data-query/adapter";
 
 const logger = createLogger("query-artifact-cache");
 
@@ -62,6 +66,12 @@ function fieldDisplayPlanFromDataset(dataset: any): FieldDisplayPlan | undefined
   const plan = dataset?.fieldDisplayPlan;
   return plan && typeof plan === "object" && !Array.isArray(plan)
     ? (plan as FieldDisplayPlan)
+    : undefined;
+}
+
+function truncationFromDataset(dataset: any): ResultTruncation | undefined {
+  return dataset?.truncated
+    ? { truncated: true, rowLimit: dataset.rowLimit, truncationHint: dataset.truncationHint }
     : undefined;
 }
 
@@ -155,9 +165,38 @@ function extractRowsFromQueryRun(
     : undefined;
 }
 
+/** A completed run is usable with rows, or as a partial result without rows: zero rows there are not "no data". */
 export function hasUsableQueryRun(queryRun?: QueryRun | null): boolean {
-  const rows = extractRowsFromQueryRun(queryRun);
-  return queryRun?.status === "completed" && Array.isArray(rows) && rows.length > 0;
+  const datasets = queryRun?.datasetsPayload ?? queryRun?.dataPayload;
+  return queryRun?.status === "completed" && Array.isArray(datasets) && datasets.some((d) => Array.isArray(d?.data));
+}
+
+/** Reports retain all tables; visualization deliberately keeps its existing single-table policy. */
+export async function resolveAnalysisEvidence(state: GraphState, config?: any): Promise<ReportEvidence | undefined> {
+  const ref = state.queryArtifactRef ?? state.historicalQueryRef;
+  if (!ref) return undefined;
+  if (ref.threadId !== state.threadId) throw new Error("Evidence reference belongs to another thread.");
+  let fact = state.queryArtifactRef ? getQueryArtifactCache(config)?.getQueryResult(ref) : undefined;
+  let completed = !state.errors?.some((error) => error.node === "query");
+  let question = state.userQuestion;
+  if (!fact) {
+    const userId = config?.configurable?.user_id ?? state.userId;
+    const domainId = config?.configurable?.domainId;
+    const checkpointer = getCheckpointer();
+    if (!checkpointer || !userId || !domainId) throw new Error("Evidence access identity is unavailable.");
+    await checkpointer.verifyThreadAccess(ref.threadId, userId, domainId);
+    const run = await getQueryRunBySource(ref);
+    if (!run || (ref.queryRunId && ref.queryRunId !== run.id)) return undefined;
+    completed = run.status === "completed";
+    question = run.question ?? question;
+    fact = { datasets: run.datasetsPayload ?? run.dataPayload, error: run.error, abcCodes: run.abcCodes, abcDsls: run.abcDsls };
+  }
+  if (!Array.isArray(fact.datasets) || fact.datasets.length === 0) return undefined;
+  const snapshot = state.reportOntology;
+  const ontology = snapshot && snapshot.requestSeq === (config?.configurable?.requestSeq ?? state.requestSeq ?? 0)
+    ? { capturedAt: snapshot.capturedAt, markdown: snapshot.markdown } : undefined;
+  return createReportEvidence({ queryRunId: ref.queryRunId ?? buildQueryRunId(ref.threadId, ref.requestSeq, ref.sourceRef),
+    question, datasets: fact.datasets as Dataset[], completed, error: fact.error, abcCodes: fact.abcCodes, abcDsls: fact.abcDsls, ontology });
 }
 
 export async function resolveAnalysisData(
@@ -169,6 +208,7 @@ export async function resolveAnalysisData(
       source: "current_query" | "historical";
       queryResult?: QueryExecutionFact;
       fieldDisplayPlan?: FieldDisplayPlan;
+      truncation?: ResultTruncation;
     }
   | undefined
 > {
@@ -178,12 +218,14 @@ export async function resolveAnalysisData(
   const currentRows = rowsFromDataset(currentDataset);
   const currentDatasets = currentQueryResult?.datasets;
   const currentFieldDisplayPlan = fieldDisplayPlanFromDataset(currentDataset);
+  const currentTruncation = truncationFromDataset(currentDataset);
   if (currentRows && currentRows.length > 0) {
     return {
       data: currentRows,
       source: "current_query",
       queryResult: currentQueryResult,
       fieldDisplayPlan: currentFieldDisplayPlan,
+      truncation: currentTruncation,
     };
   }
   if (Array.isArray(currentDatasets) && currentDatasets.length > 0) {
@@ -192,6 +234,7 @@ export async function resolveAnalysisData(
       source: "current_query",
       queryResult: currentQueryResult,
       fieldDisplayPlan: currentFieldDisplayPlan,
+      truncation: currentTruncation,
     };
   }
 
@@ -199,11 +242,14 @@ export async function resolveAnalysisData(
     try {
       const queryRun = await getQueryRunBySource(state.historicalQueryRef);
       const historicalRows = extractRowsFromQueryRun(queryRun);
-      if (historicalRows && historicalRows.length > 0) {
+      const historicalDataset = latestDatasetFromQueryRun(queryRun);
+      const historicalTruncation = truncationFromDataset(historicalDataset);
+      if (historicalRows && (historicalRows.length > 0 || historicalTruncation)) {
         return {
           data: historicalRows,
           source: "historical",
-          fieldDisplayPlan: fieldDisplayPlanFromDataset(latestDatasetFromQueryRun(queryRun)),
+          fieldDisplayPlan: fieldDisplayPlanFromDataset(historicalDataset),
+          truncation: historicalTruncation,
         };
       }
     } catch (error) {

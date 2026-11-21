@@ -6,8 +6,8 @@ import { ChevronDown, X, MessageSquare } from "lucide-vue-next";
 import { useAgentChat, truncateTitle } from "../composables/useAgentChat";
 
 import { contextLabel, detectSessionContext, sessionContextLabel } from "../utils/session-context";
-import AgentMessage from "./agent-chat/AgentMessage.vue";
-import ChatInput from "./agent-chat/ChatInput.vue";
+import AgentMessage from "../../../components/agent-chat/AgentMessage.vue";
+import ChatInput from "../../../components/agent-chat/AgentChatInput.vue";
 import { useI18n } from "vue-i18n";
 
 const { t } = useI18n();
@@ -228,7 +228,7 @@ defineExpose({
           <div class="sidebar-empty-text">{{ t("diagnosis.enterProblem") }}</div>
         </div>
         <div v-for="(msg, i) in messages" :key="i" class="sidebar-msg-wrapper">
-          <AgentMessage :message="msg" :message-index="i" />
+          <AgentMessage :message="msg" />
         </div>
         <div v-if="isSending" class="sidebar-typing">
           <span class="typing-dot" />

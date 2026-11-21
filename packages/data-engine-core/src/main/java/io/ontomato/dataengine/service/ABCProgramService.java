@@ -12,9 +12,11 @@ import io.ontomato.dataengine.service.sys.bean.permission.UserDataPermission;
 
 public interface ABCProgramService {
 
-	public JSONArray execute(String sessionId, ABCHarnessProgram program, String userId, UserDataPermission curUserDataPermission, String lang, int timeoutMinutes, String domainId) throws Exception;
+	/** Returns {rows, PythonExecuteResult}, like the read-function variant; the result carries the run's partial-query status. */
+	public Object[] execute(String sessionId, ABCHarnessProgram program, String userId, UserDataPermission curUserDataPermission, String lang, int timeoutMinutes, String domainId) throws Exception;
 	
-	public JSONArray execute(String sessionId, ABCHarnessDashboard dashboard, String userId, UserDataPermission curUserDataPermission, String lang, int timeoutMinutes, String domainId) throws Exception;
+	/** Returns {rows, PythonExecuteResult}, like the read-function variant; the result carries the run's partial-query status. */
+	public Object[] execute(String sessionId, ABCHarnessDashboard dashboard, String userId, UserDataPermission curUserDataPermission, String lang, int timeoutMinutes, String domainId) throws Exception;
 	
 	public Object[] execute(String sessionId, Function function, String userId, UserDataPermission curUserDataPermission, String sandboxId, String lang, int timeoutMinutes, String domainId) throws Exception;
 	

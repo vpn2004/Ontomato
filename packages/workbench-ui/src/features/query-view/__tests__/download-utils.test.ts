@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { downloadCsvFromData, downloadDsl } from "../utils/downloadUtils";
+import { downloadCsvFromData, downloadJson } from "../utils/downloadUtils";
 
 describe("result downloads", () => {
   let blob: Blob;
@@ -36,7 +36,19 @@ describe("result downloads", () => {
 
   it("exports the selected dataset DSL without changing its content", async () => {
     const dsl = { problem: "Count people", answer: { steps: [{ output: { distinct: true } }] } };
-    downloadDsl(dsl, "Result");
+    downloadJson(dsl, "Result");
     expect(JSON.parse(await blob.text())).toEqual(dsl);
+  });
+
+  it("keeps a partial result's marker beside its rows in the saved file", async () => {
+    const partial = {
+      answer: [{ site: "A" }],
+      truncated: true,
+      rowLimit: 100000,
+      truncationHint: "Intermediate rows reached the processing cap.",
+    };
+    downloadJson(partial, "Result (partial)");
+    expect(blob.type).toBe("application/json;charset=utf-8");
+    expect(JSON.parse(await blob.text())).toEqual(partial);
   });
 });

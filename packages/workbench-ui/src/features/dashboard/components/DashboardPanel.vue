@@ -167,6 +167,7 @@ import {
   patchChartTitle,
   patchDeleteChart,
   patchChartOption,
+  refreshTruncation,
   patchChartConditions,
   patchMetricTitle,
   patchDeleteMetric,
@@ -783,12 +784,7 @@ async function handleChartConditionsChanged(payload) {
   // 3) Re-request data and update option
   try {
     // Prefer the getAnswerByDslConditionParam API (supports conditional filtering)
-    const {
-      data: rows,
-      rawData,
-      fields: mappedFields,
-      dsl: nextDsl,
-    } = await getAnswerByDslConditionParam({
+    const response = await getAnswerByDslConditionParam({
       dsl,
       abcProgram,
       conditions,
@@ -798,6 +794,8 @@ async function handleChartConditionsChanged(payload) {
       dataPlan,
       timeoutMs: abcProgram ? 300000 : 30000,
     });
+    const { data: rows, rawData, fields: mappedFields, dsl: nextDsl } = response;
+    const truncation = refreshTruncation(response);
 
     const chartRows = applyDataPlan(rawData, dataPlan);
     const usedFields =
@@ -810,7 +808,8 @@ async function handleChartConditionsChanged(payload) {
         chartType,
         [],
         usedFields,
-        nextDsl || dsl
+        nextDsl || dsl,
+        truncation
       );
       return;
     }
@@ -828,7 +827,8 @@ async function handleChartConditionsChanged(payload) {
       chartType,
       rows,
       usedFields,
-      nextDsl || dsl
+      nextDsl || dsl,
+      truncation
     );
     return;
   } catch {

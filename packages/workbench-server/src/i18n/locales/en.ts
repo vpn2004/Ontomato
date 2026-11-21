@@ -212,6 +212,7 @@ export const en = {
   "api.saveConfigFailed": "Failed to save configuration",
   "api.modelTestFailed": "Model test failed",
   "model.roleNotConfigured": "No model configured for role '{role}', please configure it in model settings",
+  "model.settingsReadRefused": "The data engine refused the model settings read (403): the workbench server's model settings service credential does not match the data engine's, or the current account has no business domain. This is a deployment configuration problem; signing in again does not fix it.",
   "model.role.query": "Query",
   "model.role.coding": "Coding and Computing",
   "model.role.general": "General",
@@ -294,7 +295,6 @@ export const en = {
     `Visualization generation failed: ${params?.error ?? ""}`,
   "viz.noHtmlGenerated": "No HTML generated",
   "viz.chartGenerationFailed": "Chart generation failed",
-  "viz.generationFailedNoHtml": "Visualization generation failed: no HTML generated",
 
   // Response node
   "response.generationComplete": "✓ Reply generation complete",
@@ -322,9 +322,9 @@ export const en = {
   "dataResolver.cannotGetData": "Unable to get data, please provide data or request mock data",
 
   // Default agent
-  "service.defaultAgentName": "General Agent",
+  "service.defaultAgentName": "Data Analysis Agent",
   "service.defaultAgentDescription":
-    "A general-purpose agent suitable for various business scenarios, capable of automatically decomposing question dimensions and generating professional analysis reports",
+    "An agent for business data analysis that automatically decomposes questions into analysis dimensions and generates professional reports",
   "api.noFileUploaded": "No file uploaded",
   "api.onlyZipSupported": "Only .zip files are supported",
   "api.testBatchRunning": "Test batch is running, please stop it first",
@@ -333,9 +333,6 @@ export const en = {
   "api.noReportToExport": "No analysis report to export",
 
   // Visualization messages
-  "viz.noValidConfigJson": "LLM did not return valid config JSON",
-  "viz.missingChartConfig": "LLM config missing required fields (chartType, title)",
-  "viz.missingAxisConfig": "LLM config missing required fields (xField, yField)",
   "viz.pieDataTooLarge": (params?: Record<string, any>) =>
     `Pie/rose charts not suitable for more than 10 data points (current: ${params?.count ?? 0}), please choose another chart type`,
   "viz.generating": (params?: Record<string, any>) => `Generating ${params?.type ?? ""}...`,
@@ -351,6 +348,9 @@ export const en = {
   "query.datasetFallbackTitle": (params?: Record<string, any>) => `Dataset ${params?.index ?? 1}`,
   "query.display.empty":
     "There is currently no data to display. Try adjusting the filters or retry later.",
+  "query.display.emptyPartial": "No rows were returned from the processed portion of this partial result.",
+  "query.sourceWindow": "Source: {total} matches; source rows {start}–{end} were read. Calculations describe this requested range.",
+  "query.partialSource": "⚠️ Partial source data ({source}): a {rowLimit}-row cap was reached, so this may not cover all matching data. {hint}",
   "query.display.groupColumn": "Group",
   "query.harness.processHeading": "Query process",
   "query.harness.dataHeading": "Data results",

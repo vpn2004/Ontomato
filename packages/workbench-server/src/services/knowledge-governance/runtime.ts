@@ -1,16 +1,20 @@
+import type { GovernanceWork } from "@ontomato/contracts/knowledge-governance";
 import type { AgentEvent, AgentState } from "../../core/agent-loop/types";
 import { runAgentLoop } from "../../core/agent-loop/agent-loop";
+import { toResponseEvent } from "../../core/agent-loop/chat-view";
 import { createHarnessRun } from "../../core/agent-loop/session-run";
 import {
   harnessSessions,
   HarnessSessionBusyError,
   type HarnessTurnStatus,
 } from "../../infrastructure/harness-sessions";
-import { renderPrompt, getPromptTemplate } from "../../core/prompts/loader";
+import { renderPrompt } from "../../core/prompts/loader";
 import { ModelNotConfiguredError, resolveModelForRole } from "../../config/model-resolver";
 import { runWithLogContext } from "../../logging/log-context";
 import { createLogger } from "../../logging/logger";
 import { HttpError } from "../../utils/errors";
+import { SessionResponseStream } from "../../utils/response-stream";
+import { createSseErrorEvent } from "../../utils/sse";
 import {
   governanceStore,
   publicGovernanceSession,
@@ -27,18 +31,26 @@ const compactionPrompts = {
   update: "knowledge-governance.compaction.update.user",
 };
 
-export class GovernanceRuntime {
-  private active = new Map<string, { controller: AbortController; done: Promise<void> }>();
+/** Saved business work, sent after each save so the page follows progress live. */
+type GovernanceWorkEvent = { type: "work"; work: GovernanceWork };
+export type GovernanceResponseStream = SessionResponseStream<GovernanceWorkEvent>;
 
-  async start(owner: GovernanceOwner, credentials: GovernanceCredentials, locale: string) {
+export class GovernanceRuntime {
+  // One entry per session, keyed to the Harness turn it streams. Held only while that turn
+  // runs; afterwards the settled history is the only source.
+  private active = new Map<
+    string,
+    { turnId: string; stream: GovernanceResponseStream; done?: Promise<void> }
+  >();
+
+  async start(
+    owner: GovernanceOwner,
+    credentials: GovernanceCredentials,
+    locale: string,
+    message: string
+  ) {
     const record = await governanceStore.create(owner);
-    return this.respond(
-      record.id,
-      owner,
-      credentials,
-      locale,
-      getPromptTemplate("knowledge-governance.main.start.user")
-    );
+    return this.respond(record.id, owner, credentials, locale, message);
   }
 
   async respond(
@@ -57,23 +69,34 @@ export class GovernanceRuntime {
         throw new HttpError(409, "Governance session is already running");
       throw error;
     }
+    // Registered in the same tick as admission, so any snapshot that reports this turn
+    // running can subscribe to it.
+    const stream: GovernanceResponseStream = new SessionResponseStream();
+    stream.append({ type: "response_started", message });
+    const entry: { turnId: string; stream: GovernanceResponseStream; done?: Promise<void> } = {
+      turnId,
+      stream,
+    };
+    this.active.set(id, entry);
+    const release = () => {
+      if (this.active.get(id) === entry) this.active.delete(id);
+    };
     try {
       // Admission may have waited for the prior turn; take its final business work now.
       record = await governanceStore.get(id, owner);
     } catch (error) {
       await harnessSessions.finishTurn(record.harnessSessionId, turnId, "failed");
+      stream.append(createSseErrorEvent(error));
+      release();
       throw error;
     }
-    const controller = new AbortController();
     const done = runWithLogContext(
       { domainId: owner.domainId, token: credentials.token, apiKey: credentials.apiKey },
-      () => this.run(record, turnId, credentials, locale, message, controller.signal)
+      () => this.run(record, turnId, credentials, locale, message, stream)
     );
-    this.active.set(id, { controller, done });
+    entry.done = done;
     void done
-      .finally(() => {
-        if (this.active.get(id)?.done === done) this.active.delete(id);
-      })
+      .finally(release)
       .catch((error) => {
         logger.error("Governance persistence failed", { sessionId: id, error: String(error) });
       });
@@ -81,9 +104,16 @@ export class GovernanceRuntime {
   }
 
   async stop(id: string, owner: GovernanceOwner) {
-    await governanceStore.get(id, owner);
-    this.active.get(id)?.controller.abort();
+    await governanceStore.authorize(id, owner);
+    this.active.get(id)?.stream.cancel();
     return { success: true };
+  }
+
+  /** Replayable events of that Harness turn; undefined once it settled or another turn runs. */
+  async responseStream(id: string, owner: GovernanceOwner, turnId: string) {
+    await governanceStore.authorize(id, owner);
+    const entry = this.active.get(id);
+    return entry?.turnId === turnId ? entry.stream : undefined;
   }
 
   async wait(id: string) {
@@ -96,19 +126,22 @@ export class GovernanceRuntime {
     credentials: GovernanceCredentials,
     locale: string,
     message: string,
-    signal: AbortSignal
+    stream: GovernanceResponseStream
   ) {
+    const signal = stream.controller.signal;
     let queue = Promise.resolve();
     const persist = () => {
       queue = queue.then(() => governanceStore.save(record, turnId));
       return queue;
     };
+    const persistWork = async () => {
+      await persist();
+      stream.append({ type: "work", work: structuredClone(record.work) });
+    };
     let terminal: Exclude<HarnessTurnStatus, "running">;
     try {
       signal.throwIfAborted();
-      record.draft = "";
       record.error = null;
-      record.activity = "working";
       const model = await resolveModelForRole("knowledgeGovernance");
       const modelConfig = {
         baseUrl: model.baseUrl,
@@ -121,27 +154,15 @@ export class GovernanceRuntime {
       const state: AgentState = {
         systemPrompt: "",
         messages: [],
-        tools: createGovernanceTools(record, credentials, persist),
+        tools: createGovernanceTools(record, credentials, persistWork),
         isStreaming: false,
       };
-      let lastDraftSaved = 0;
-      const recordEvent = (event: AgentEvent) => {
-        if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-          record.draft += event.assistantMessageEvent.delta || "";
-          if (Date.now() - lastDraftSaved < 800) return;
-          lastDraftSaved = Date.now();
-        } else if (event.type === "message_end") {
-          record.draft = "";
-        } else if (event.type === "tool_execution_start") {
-          record.activity = event.toolName;
-        } else if (event.type === "turn_end") {
-          record.activity = "working";
-        } else return;
-        void persist().catch(() => {
-          /* The run awaits this same queue and reports failure. */
-        });
+      // Governance conversations do not show model thinking.
+      const relay = (event: AgentEvent) => {
+        const streamEvent = toResponseEvent(event);
+        if (streamEvent && streamEvent.type !== "thinking") stream.append(streamEvent);
       };
-      await runAgentLoop(message, state, modelConfig, recordEvent, signal, {
+      await runAgentLoop(message, state, modelConfig, relay, signal, {
         session: await createHarnessRun(harnessSessions, {
           sessionId: record.harnessSessionId,
           turnId,
@@ -167,7 +188,6 @@ export class GovernanceRuntime {
             },
             locale
           );
-          await persist();
         },
       });
       const last = state.messages.at(-1);
@@ -185,17 +205,27 @@ export class GovernanceRuntime {
         logger.error("Governance response failed", { sessionId: record.id, error: String(error) });
       }
     }
-    record.draft = "";
-    record.activity = "";
+    let failure: unknown = null;
     try {
       await queue;
       await governanceStore.save(record, turnId);
     } catch (error) {
       terminal = "failed";
-      throw error;
-    } finally {
-      await harnessSessions.finishTurn(record.harnessSessionId, turnId, terminal);
+      failure = error;
     }
+    try {
+      await harnessSessions.finishTurn(record.harnessSessionId, turnId, terminal);
+    } catch (error) {
+      terminal = "failed";
+      failure ??= error;
+    }
+    // Sent after the turn is settled, so a subscriber reloading history sees the final state.
+    stream.append(
+      terminal === "failed"
+        ? createSseErrorEvent(record.error ?? failure)
+        : { type: "response_end", status: terminal }
+    );
+    if (failure) throw failure;
   }
 }
 

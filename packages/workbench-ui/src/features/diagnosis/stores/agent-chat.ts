@@ -1,9 +1,8 @@
+import type { AgentChatMessage, AgentResponseEvent } from "@ontomato/contracts/agent-chat";
 import type {
-  SessionHistoryMessage as AgentChatMessage,
   SessionHistorySnapshot as AgentHistorySnapshot,
   SessionInfo as AgentSession,
   SessionContext,
-  DiagnosisStreamEvent,
   SessionStopResult,
 } from "@ontomato/contracts/diagnosis";
 import type { HttpResponse } from "@ontomato/contracts/http";
@@ -15,14 +14,17 @@ import { ApiRequestError } from "../../../utils/api";
 import { diagnosisApi } from "../api";
 
 import {
-  parseDiagnosisStreamEvent,
-  reduceDiagnosisLiveTail,
-  type DiagnosisLiveTail,
-} from "../utils/agent-chat-stream";
+  joinAssistantTurns,
+  parseAgentResponseEvent,
+  readSseData,
+  reduceAgentLiveTail,
+  SseProtocolError,
+  type AgentLiveTail,
+} from "../../../utils/agent-chat-stream";
 
 interface SessionChatReadModel {
   history: AgentChatMessage[];
-  live: DiagnosisLiveTail;
+  live: AgentLiveTail<DiagnosisResponseStatus>;
   status: DiagnosisResponseStatus;
   draft: string;
 }
@@ -108,7 +110,7 @@ export const useDiagnosisChatStore = defineStore("diagnosis-chat", () => {
   );
   const messages = computed(() => {
     const state = sessionStates.value[currentSessionId.value];
-    return state ? [...state.history, ...state.live.messages] : [];
+    return state ? joinAssistantTurns([...state.history, ...state.live.messages]) : [];
   });
   const isSending = computed(() => {
     const status = sessionStates.value[currentSessionId.value]?.status;
@@ -255,9 +257,9 @@ export const useDiagnosisChatStore = defineStore("diagnosis-chat", () => {
     }
   }
 
-  function applyStreamEvent(sessionId: string, event: DiagnosisStreamEvent): boolean {
+  function applyStreamEvent(sessionId: string, event: AgentResponseEvent): boolean {
     const state = getSessionState(sessionId);
-    const live = reduceDiagnosisLiveTail(state.live, event);
+    const live = reduceAgentLiveTail(state.live, event);
     patchSessionState(sessionId, { live, status: live.status });
     setSessionResponseStatus(sessionId, live.status === "running" ? "running" : "idle");
     return (
@@ -272,43 +274,16 @@ export const useDiagnosisChatStore = defineStore("diagnosis-chat", () => {
     response: Response,
     subscription: StreamSubscription
   ): Promise<boolean> {
-    const reader = response.body?.getReader();
-    if (!reader) throw new Error(t("diagnosis.noResponse"));
-
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let pendingSeq: number | undefined;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (subscriptions.get(sessionId) !== subscription) return false;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-
-      for (const line of lines) {
-        if (line.startsWith("id: ")) {
-          const seq = Number(line.slice(4));
-          pendingSeq = Number.isFinite(seq) ? seq : undefined;
-          continue;
-        }
-        if (!line.startsWith("data: ")) continue;
-
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(line.slice(6));
-        } catch {
-          continue;
-        }
-        const event = parseDiagnosisStreamEvent(parsed);
-        if (!event) continue;
-        if (pendingSeq !== undefined)
-          subscription.lastSeq = Math.max(subscription.lastSeq, pendingSeq);
-        pendingSeq = undefined;
-        if (applyStreamEvent(sessionId, event)) return true;
-      }
-    }
-    return false;
+    return readSseData(
+      response,
+      (data, seq) => {
+        const event = parseAgentResponseEvent(data);
+        if (!event) return false;
+        if (seq !== undefined) subscription.lastSeq = Math.max(subscription.lastSeq, seq);
+        return applyStreamEvent(sessionId, event);
+      },
+      () => subscriptions.get(sessionId) === subscription
+    );
   }
 
   function startSubscription(
@@ -345,7 +320,11 @@ export const useDiagnosisChatStore = defineStore("diagnosis-chat", () => {
           if (terminal) break;
         } catch (error) {
           if (subscription.controller.signal.aborted) return;
-          if (error instanceof ApiRequestError && error.status === 404) {
+          // A broken stream would fail the same way again; fall back to durable history.
+          if (
+            (error instanceof ApiRequestError && error.status === 404) ||
+            error instanceof SseProtocolError
+          ) {
             unavailable = true;
             break;
           }

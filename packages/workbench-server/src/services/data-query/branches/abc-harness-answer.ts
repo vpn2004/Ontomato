@@ -1,3 +1,4 @@
+import { startStage, type StageOutcome } from "../../../logging/stage-timing";
 import { createModel } from "../../../config/model-factory";
 import { modelAgentName } from "../../../logging/model-agents";
 import { renderPrompt } from "../../../core/prompts/loader";
@@ -10,9 +11,11 @@ import {
   getContentBeforeDataPlaceholder,
   insertDisplayDataResults,
   stripThinkingTags,
+  joinMarkdownSections,
+  formatDataResultSection,
   type HarnessLabels,
 } from "./abc-harness-markdown";
-import { chunkText, pushStableContent } from "./abc-harness-stream";
+import { chunkText } from "./abc-harness-stream";
 
 function buildHarnessDataEvidence(datasets: Dataset[], locale?: string): string {
   return datasets
@@ -20,7 +23,7 @@ function buildHarnessDataEvidence(datasets: Dataset[], locale?: string): string 
       const displayRows = dataset.fieldDisplayPlan
         ? applyFieldDisplayPlan(dataset.data, dataset.fieldDisplayPlan, locale)
         : dataset.data;
-      const dataView = buildModelDataView(displayRows);
+      const dataView = buildModelDataView(displayRows, { truncation: dataset });
       const name =
         dataset.name || tForLocale(locale, "query.datasetFallbackTitle", { index: index + 1 });
 
@@ -70,6 +73,10 @@ export async function polishHarnessAnswer(params: {
     locale
   );
 
+  const finish = startStage("harness.answer.generate");
+  const started = performance.now();
+  let firstTokenMs: number | undefined;
+  let outcome: StageOutcome | undefined;
   try {
     const model = await createModel({ temperature: 0.2, agentName: modelAgentName("abcHarnessAnswer") });
     const stream = await model.stream([{ role: "user", content: prompt }], { signal });
@@ -79,33 +86,40 @@ export async function polishHarnessAnswer(params: {
     for await (const chunk of stream) {
       const text = chunkText(chunk.content);
       if (!text) continue;
+      firstTokenMs ??= Math.round(performance.now() - started);
       polished += text;
       const stablePrefix = getContentBeforeDataPlaceholder(polished);
       if (stablePrefix && stablePrefix !== lastPushedStablePrefix) {
         lastPushedStablePrefix = stablePrefix;
-        pushContent(stablePrefix, true);
+        pushContent(joinMarkdownSections([stablePrefix, formatDataResultSection(displayDataMessages, labels)]), true);
       }
     }
 
     polished = stripThinkingTags(polished);
     if (!polished) {
-      pushStableContent(fallbackContent, pushContent);
+      outcome = "fallback";
+      pushContent(fallbackContent, false);
       return fallbackContent;
     }
     const finalContent = insertDisplayDataResults(polished, displayDataMessages, labels);
     pushContent(finalContent, false);
+    outcome = "completed";
     return finalContent;
   } catch (error) {
     if (
       signal?.aborted ||
       (error instanceof Error && (error.name === "AbortError" || /abort/i.test(error.message)))
     ) {
+      outcome = "cancelled";
       throw error;
     }
     logger.warn(tApp("queryFixed.202"), {
       error: error instanceof Error ? error.message : String(error),
     });
-    pushStableContent(fallbackContent, pushContent);
+    outcome = "fallback";
+    pushContent(fallbackContent, false);
     return fallbackContent;
+  } finally {
+    finish(outcome ?? "failed", { firstTokenMs });
   }
 }

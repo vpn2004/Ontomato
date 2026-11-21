@@ -1,4 +1,4 @@
-import type { DiagnosisStreamEvent } from "@ontomato/contracts/diagnosis";
+import type { AgentResponseEvent } from "@ontomato/contracts/agent-chat";
 import { flushPromises, mount } from "@vue/test-utils";
 import ElementPlus from "element-plus";
 import { createPinia, setActivePinia } from "pinia";
@@ -27,7 +27,7 @@ vi.mock("../../../../../utils/api", () => ({
 
 const history = vi.hoisted(() => new Map<string, unknown[]>());
 
-function streamResponse(events: DiagnosisStreamEvent[]): Response {
+function streamResponse(events: AgentResponseEvent[]): Response {
   const body = events.map((event, index) => `id: ${index + 1}\ndata: ${JSON.stringify(event)}\n\n`);
   return new Response(body.join(""), { headers: { "content-type": "text/event-stream" } });
 }

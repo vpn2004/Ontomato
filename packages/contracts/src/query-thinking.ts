@@ -83,6 +83,15 @@ export interface QcState {
   status: "running" | "completed" | "failed" | "unsettled";
   steps: QcStepState[];
   result?: QcResultState;
+  phase?: QcPhaseEvent["phase"];
+  completedPrograms?: number;
+  totalPrograms?: number;
+}
+
+export interface QcPhaseEvent {
+  phase: "describing" | "assessing";
+  completedPrograms: number;
+  totalPrograms: number;
 }
 
 export interface QcStepEvent {

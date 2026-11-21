@@ -1,10 +1,15 @@
 package io.ontomato.dataengine.service.impl;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ExecutorCompletionService;
+import java.util.concurrent.Future;
+import io.ontomato.dataengine.dataAdapter.DataAdapterRegistry;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -41,6 +46,9 @@ public class CheckServiceV2Impl implements CheckServiceV2 {
 	
 	@Autowired
 	private BusinessConfigService businessConfigService;
+
+	@Autowired
+	private DataAdapterRegistry dataAdapterRegistry;
 	
 	@Autowired
     private AdminService adminService;
@@ -101,16 +109,14 @@ public class CheckServiceV2Impl implements CheckServiceV2 {
 			public void run() {
 				try {
 					// Call the quality checker
-					List<ABCHarnessProgramDescription> programDescriptions = new ArrayList<ABCHarnessProgramDescription>();
-					if (programs != null) {
-						for (int i = 0; i < programs.size(); i++) {
-							ABCHarnessProgram program = programs.get(i);
-							ABCHarnessProgramDescription programDescription = describeProgram(check.getSessionId(), i, check.getOriginQuestion(), program, classNames, check.getLang(), domainId);
-							programDescriptions.add(programDescription);
-						}
-					}
+					check.setPhase("describing");
+					check.setTotalPrograms(programs == null ? 0 : programs.size());
+					saveCheckTask(check);
+					List<ABCHarnessProgramDescription> programDescriptions = describePrograms(check, programs, classNames, domainId);
 					check.setProgramDescriptions(programDescriptions);
-					check(check, domainId);
+					check.setPhase("assessing");
+					saveCheckTask(check);
+					check(check, classNames, domainId);
 					
 					// Save
 					saveCheckTask(check);
@@ -157,26 +163,72 @@ public class CheckServiceV2Impl implements CheckServiceV2 {
 						return;
 					}
 					log.error(e.getMessage(), e);
+					if (!Boolean.TRUE.equals(check.getFinished())) {
+						// A terminal failure has no score; readers must not wait forever or accept it as a review.
+						check.setFinished(true);
+						check.setScore(null);
+						check.setConclusion(null);
+						check.setFittedQuestion(null);
+						saveCheckTask(check);
+					}
 				}
 			}
 		}).start();
 		
 	}
 	
-	private ABCHarnessProgramDescription describeProgram(String sessionId, int index, String originQuestion, ABCHarnessProgram program, List<String> classNames, String lang, String domainId) {
+	List<ABCHarnessProgramDescription> describePrograms(ABCHarnessCheck check, List<ABCHarnessProgram> programs,
+			List<String> classNames, String domainId) throws Exception {
+		if (programs == null || programs.isEmpty()) return List.of();
+		// At most two model requests per review; each has its own derived session and context.
+		var executor = Executors.newFixedThreadPool(Math.min(2, programs.size()));
+		var completed = new ExecutorCompletionService<IndexedDescription>(executor);
+		List<Future<IndexedDescription>> tasks = new ArrayList<>();
+		try {
+			for (int i = 0; i < programs.size(); i++) {
+				int index = i;
+				tasks.add(completed.submit(() -> new IndexedDescription(index, describeProgram(check.getSessionId(), index,
+					check.getOriginQuestion(), programs.get(index), classNames, check.getLang(), domainId))));
+			}
+			List<ABCHarnessProgramDescription> result = new ArrayList<>(Collections.nCopies(programs.size(), null));
+			for (int i = 0; i < programs.size(); i++) {
+				var item = completed.take().get();
+				result.set(item.index(), item.description());
+                // Preserve source indices, including unfinished slots, while publishing completed evidence.
+                check.setProgramDescriptions(new ArrayList<>(result));
+                saveCheckTask(check);
+			}
+			return result;
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			throw e;
+		} finally {
+			for (var task : tasks) task.cancel(true);
+			executor.shutdownNow();
+		}
+	}
+
+	private record IndexedDescription(int index, ABCHarnessProgramDescription description) {}
+
+	ABCHarnessProgramDescription describeProgram(String sessionId, int index, String originQuestion, ABCHarnessProgram program, List<String> classNames, String lang, String domainId) {
 		OriginalQuestion originalQuestion = new OriginalQuestion();
 		originalQuestion.setId(sessionId);
 		originalQuestion.setQuestion(originQuestion);
 		BusinessConfig businessConfig = businessConfigService.get(domainId);
 		Map<String, Object> jsonRule = adminService.getJSONRule(domainId);
-		String userMessage = UserMessageUtil.getABCProgramDescriberUserMessage(program, lang, langService, classNames, jsonRule);
+		String rules = dataAdapterRegistry.create(businessConfig, jsonRule).queryPlanningRules();
+		String userMessage = UserMessageUtil.getABCProgramDescriberUserMessage(program, lang, langService, classNames, jsonRule, rules);
 		String str = multiThreadAIChatService.chat(
 				MultiThreadAIChatService.ABC_PROGRAM_DESCRIBER,
 				originalQuestion,
 				BackendSessionEntrance.derive(sessionId, "program-describer-" + index),
 				userMessage,
-				ModelResolver.resolve(businessConfig, AgentRole.QUERY, langService),
+                ModelResolver.resolve(businessConfig, AgentRole.QUALITY_CHECK, langService),
 				domainId);
+		return parseDescription(program.getCode(), str);
+	}
+
+	static ABCHarnessProgramDescription parseDescription(String code, String str) {
 		if (str.startsWith("```markdown")) {
 			str = str.substring(11);
 			if (str.endsWith("```")) {
@@ -194,27 +246,36 @@ public class CheckServiceV2Impl implements CheckServiceV2 {
     	}
 		
 		ABCHarnessProgramDescription description = new ABCHarnessProgramDescription();
-		description.setCode(program.getCode());
+		if (logic.isBlank() || summary.isBlank() || !str.contains("</summary>")) {
+			throw new IllegalArgumentException("Incomplete program explanation");
+		}
+		description.setCode(code);
 		description.setMeaning(logic);
 		description.setSummary(summary);
 		return description;
 	}
 	
-	private void check(ABCHarnessCheck check, String domainId) {
+	private void check(ABCHarnessCheck check, List<String> classNames, String domainId) {
 		BusinessConfig businessConfig = businessConfigService.get(domainId);
+		Map<String, Object> jsonRule = adminService.getJSONRule(domainId);
+		String sourceRules = dataAdapterRegistry.create(businessConfig, jsonRule).queryPlanningRules();
 		OriginalQuestion originalQuestion = new OriginalQuestion();
 		originalQuestion.setId(check.getSessionId());
 		originalQuestion.setQuestion(check.getOriginQuestion());
 		String userMessage = UserMessageUtil.getQuestionCheckerV2UserMessage(check.getSessionId(), check.getOriginQuestion(), check.getProgramDescriptions(), 
 				knowledgeDao,
-				businessConfigService, check.getLang(), langService, domainId);
+				businessConfigService, check.getLang(), langService, domainId, classNames, jsonRule, sourceRules);
 		String str = multiThreadAIChatService.chat(
 				MultiThreadAIChatService.QUESTION_CHECKER_V2,
 				originalQuestion,
 				BackendSessionEntrance.derive(check.getSessionId(), "question-checker"),
 				userMessage,
-				ModelResolver.resolve(businessConfig, AgentRole.QUERY, langService),
+                ModelResolver.resolve(businessConfig, AgentRole.QUALITY_CHECK, langService),
 				domainId);
+		applyAssessment(check, str);
+	}
+
+	static void applyAssessment(ABCHarnessCheck check, String str) {
 		if (str.startsWith("```markdown")) {
 			str = str.substring(11);
 			if (str.endsWith("```")) {
@@ -243,10 +304,11 @@ public class CheckServiceV2Impl implements CheckServiceV2 {
 		if (fittedQuestion.endsWith("\n")) {
 			fittedQuestion = fittedQuestion.substring(0, fittedQuestion.length() - 1);
 		}
-		Double score = 0D;
-		try {
-			score = Double.parseDouble(scoreStr);
-		} catch (Exception e) {}
+		double score = Double.parseDouble(scoreStr.trim());
+		if (!Double.isFinite(score) || score < 0 || score > 100 || conclusion.isBlank()
+				|| fittedQuestion.isBlank() || !str.contains("</score>") || !str.contains("</fitted_question>")) {
+			throw new IllegalArgumentException("Incomplete quality assessment");
+		}
 		
 		check.setConclusion(conclusion);
 		check.setScore(score);

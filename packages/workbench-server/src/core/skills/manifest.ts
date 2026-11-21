@@ -51,6 +51,7 @@ const commonFrontmatterFields = {
   }),
   category: SkillCategorySchema,
   title: z.string().optional(),
+  defaultEnabled: z.boolean().optional(),
   tags: z.array(z.string()).default([]),
   useCases: z.array(z.string()).optional(),
   timeout: z.number().optional(),
@@ -182,6 +183,19 @@ export function readSkillMarkdown(skillMdPath: string): ParsedSkillMarkdown | nu
   return parseSkillMarkdown(fs.readFileSync(skillMdPath, "utf-8"));
 }
 
+// Card labels cannot replace instructions, package identity, or execution behavior.
+const SkillLabelsSchema = z.object({
+  title: z.string().trim().min(1),
+  description: z.string().trim().min(1),
+  tags: z.array(z.string()).optional(),
+}).strict();
+
+export function readSkillLabels(filePath: string) {
+  return z.record(SkillIdSchema, SkillLabelsSchema).parse(
+    JSON.parse(fs.readFileSync(filePath, "utf-8"))
+  );
+}
+
 export function writeSkillMarkdown(
   skillMdPath: string,
   manifest: SkillManifest,
@@ -189,6 +203,7 @@ export function writeSkillMarkdown(
 ): void {
   const frontmatter = {
     name: manifest.name,
+    defaultEnabled: manifest.defaultEnabled,
     description: manifest.description,
     type: manifest.type,
     category: manifest.category,

@@ -41,13 +41,13 @@ public class ABCProgramServiceImpl implements ABCProgramService {
 	private File baseWorkspace = new File("conf/abcProgramWorkspaces/");
 	
 	@Override
-	public JSONArray execute(String sessionId, ABCHarnessProgram program, String userId, UserDataPermission curUserDataPermission, String lang, int timeoutMinutes, String domainId) throws Exception {
+	public Object[] execute(String sessionId, ABCHarnessProgram program, String userId, UserDataPermission curUserDataPermission, String lang, int timeoutMinutes, String domainId) throws Exception {
 		PythonExecuteResult result = pythonExecuteService.runPythonCode(sessionId, program.getCode(), timeoutMinutes, lang, userId, domainId);
-		return dealPythonReturn(result.getResult(), result.getError(), program.getOutKeyRefs(), curUserDataPermission);
+		return new Object[] {dealPythonReturn(result.getResult(), result.getError(), program.getOutKeyRefs(), curUserDataPermission), result};
 	}
 	
 	@Override
-	public JSONArray execute(String sessionId, ABCHarnessDashboard dashboard, String userId, UserDataPermission curUserDataPermission, String lang, int timeoutMinutes, String domainId) throws Exception {
+	public Object[] execute(String sessionId, ABCHarnessDashboard dashboard, String userId, UserDataPermission curUserDataPermission, String lang, int timeoutMinutes, String domainId) throws Exception {
 		File parameterFile = new File(baseWorkspace, sessionId + ".json");
 		FileOutputStream fos = null;
 		try {
@@ -72,7 +72,7 @@ public class ABCProgramServiceImpl implements ABCProgramService {
 			}
 		}
 		PythonExecuteResult result = pythonExecuteService.runPythonCode(sessionId, dashboard.getCode(), timeoutMinutes, lang, userId, domainId, parameterFile.getAbsolutePath());
-		return dealPythonReturn(result.getResult(), result.getError(), dashboard.getOutKeyRefs(), curUserDataPermission);
+		return new Object[] {dealPythonReturn(result.getResult(), result.getError(), dashboard.getOutKeyRefs(), curUserDataPermission), result};
 	}
 	
 	@Override

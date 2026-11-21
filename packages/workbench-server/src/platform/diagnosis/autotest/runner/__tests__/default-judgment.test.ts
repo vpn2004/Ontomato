@@ -41,7 +41,7 @@ beforeAll(() => {
   installContentLayout({
     runtimeRoot,
     prompts: [{ from: path.join(workbenchServerResourceRoot, "prompts"), to: "." }],
-    skillTemplate: [],
+    publicSkillsRoot: path.join(os.tmpdir(), "no-public-skills"),
     runtimeResources: [],
   });
   syncDefaultPrompts();

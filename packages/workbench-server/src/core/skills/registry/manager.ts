@@ -1,4 +1,5 @@
-import { runtimeDataDir, skillTemplateSources, type ResourceCopy } from "../../../content/layout";
+import { runtimeDataDir, publicSkillsRoot, publicSkillLabelsPath, publicSkillTranslationsRoot } from "../../../content/layout";
+import { randomUUID } from "node:crypto";
 import { SkillScanner } from "../discovery/scanner";
 import { loadSkillContent } from "../discovery/loader";
 import type { SkillMeta, RuntimeConfig, SkillMatch, SkillQuery } from "../types";
@@ -21,6 +22,7 @@ const defaultConfig: Omit<RuntimeConfig, "skillsRoot"> = {
 
 interface SkillStates {
   disabledSkills: string[];
+  enabledSkills?: string[];
   lastUpdated: string;
 }
 
@@ -45,12 +47,12 @@ export class SkillResolutionError extends Error {
 export class SkillRegistryManager {
   private scanner: SkillScanner;
   private skills: SkillMeta[] | null = null;
-  private initialized: boolean = false;
   private disabledSkillIds: Set<string> = new Set();
+  private enabledSkillIds: Set<string> = new Set();
   private statesWatcherCleanup: (() => void) | null = null;
   private readonly skillStatesPath: string;
 
-  constructor(config: RuntimeConfig) {
+  constructor(config: RuntimeConfig, private readonly publicScanner?: SkillScanner) {
     this.scanner = new SkillScanner(config);
     this.skillStatesPath = path.join(config.skillsRoot, SkillStatesFile);
     this.loadDisabledSkills();
@@ -63,10 +65,12 @@ export class SkillRegistryManager {
         const content = fs.readFileSync(this.skillStatesPath, "utf-8");
         const states: SkillStates = JSON.parse(content);
         this.disabledSkillIds = new Set(states.disabledSkills ?? []);
+        this.enabledSkillIds = new Set(states.enabledSkills ?? []);
         logger.debug(`Loaded disabled skills: ${this.disabledSkillIds.size}`);
       }
     } catch {
       this.disabledSkillIds = new Set();
+      this.enabledSkillIds = new Set();
     }
   }
 
@@ -99,8 +103,6 @@ export class SkillRegistryManager {
   private initPromise: Promise<void> | null = null;
 
   async initialize(): Promise<void> {
-    if (this.initialized) return;
-
     if (this.initializing && this.initPromise) {
       await this.initPromise;
       return;
@@ -119,8 +121,18 @@ export class SkillRegistryManager {
 
   private async doInitialize(): Promise<void> {
     this.loadDisabledSkills();
-    this.skills = await this.scanner.scan();
-    this.initialized = true;
+    const publicSkills = this.publicScanner ? await this.publicScanner.scan() : [];
+    const publicIds = new Set(publicSkills.map((skill) => skill.id));
+    const domainSkills = await this.scanner.scan();
+    for (const skill of domainSkills) {
+      if (!publicIds.has(skill.id)) continue;
+      // Retire legacy copies once; the public package owns this ID from now on.
+      const trashRoot = path.join(path.dirname(this.skillStatesPath), ".trash");
+      await fs.promises.mkdir(trashRoot, { recursive: true });
+      await fs.promises.rename(skill.path, path.join(trashRoot, `${skill.id}-public-${randomUUID()}`));
+      this.scanner.clearCache();
+    }
+    this.skills = [...publicSkills, ...domainSkills.filter((skill) => !publicIds.has(skill.id))];
   }
 
   getSkills(query: SkillQuery = {}): SkillMeta[] {
@@ -140,20 +152,26 @@ export class SkillRegistryManager {
   }
 
   isSkillEnabled(skillId: string): boolean {
-    return !this.disabledSkillIds.has(skillId);
+    if (this.disabledSkillIds.has(skillId)) return false;
+    if (this.enabledSkillIds.has(skillId)) return true;
+    return this.skills?.find((skill) => skill.id === skillId)?.manifest.defaultEnabled !== false;
   }
 
   setSkillEnabled(skillId: string, enabled: boolean): void {
     if (enabled) {
       this.disabledSkillIds.delete(skillId);
+      this.enabledSkillIds.add(skillId);
     } else {
       this.disabledSkillIds.add(skillId);
+      this.enabledSkillIds.delete(skillId);
     }
     this.saveDisabledSkills();
   }
 
   removeSkillState(skillId: string): void {
-    if (this.disabledSkillIds.delete(skillId)) {
+    const wasDisabled = this.disabledSkillIds.delete(skillId);
+    const wasEnabled = this.enabledSkillIds.delete(skillId);
+    if (wasDisabled || wasEnabled) {
       this.saveDisabledSkills();
     }
   }
@@ -161,6 +179,7 @@ export class SkillRegistryManager {
   private saveDisabledSkills(): void {
     const states: SkillStates = {
       disabledSkills: [...this.disabledSkillIds].sort(),
+      enabledSkills: [...this.enabledSkillIds].sort(),
       lastUpdated: new Date().toISOString(),
     };
     fs.mkdirSync(path.dirname(this.skillStatesPath), { recursive: true });
@@ -361,7 +380,6 @@ export class SkillRegistryManager {
 
   clearCache(): void {
     this.scanner.clearCache();
-    this.initialized = false;
     this.skills = null;
     this.initializing = false;
     this.initPromise = null;
@@ -374,12 +392,17 @@ export class SkillRegistryManager {
 
 export class DomainSkillRegistryManager {
   private readonly registries = new Map<string, SkillRegistryManager>();
-  private readonly initializationFlights = new Map<string, Promise<string>>();
+  private readonly publicScanner: SkillScanner;
 
   constructor(
-    private readonly templateSources: readonly ResourceCopy[] = skillTemplateSources(),
-    private readonly domainsRoot = runtimeDataDir("domain-skills")
-  ) {}
+    skillsRoot = publicSkillsRoot(),
+    private readonly domainsRoot = runtimeDataDir("domain-skills"),
+    labelsPath = publicSkillLabelsPath()
+  ) {
+    this.publicScanner = new SkillScanner(
+      { ...defaultConfig, skillsRoot, enableCache: false }, true, labelsPath, publicSkillTranslationsRoot()
+    );
+  }
 
   getDomainSkillsRoot(domainId: string): string {
     const normalizedDomainId = domainId.trim();
@@ -390,26 +413,12 @@ export class DomainSkillRegistryManager {
     return path.join(this.domainsRoot, directoryName);
   }
 
-  async ensureDomainSkills(domainId: string): Promise<string> {
-    const existingFlight = this.initializationFlights.get(domainId);
-    if (existingFlight) return existingFlight;
-
-    const initialization = this.copyTemplateIfMissing(domainId);
-    this.initializationFlights.set(domainId, initialization);
-    try {
-      return await initialization;
-    } finally {
-      if (this.initializationFlights.get(domainId) === initialization) {
-        this.initializationFlights.delete(domainId);
-      }
-    }
-  }
-
   async forDomain(domainId: string): Promise<SkillRegistryManager> {
-    const skillsRoot = await this.ensureDomainSkills(domainId);
+    const skillsRoot = this.getDomainSkillsRoot(domainId);
+    await fs.promises.mkdir(skillsRoot, { recursive: true });
     let registry = this.registries.get(domainId);
     if (!registry) {
-      registry = new SkillRegistryManager({ ...defaultConfig, skillsRoot });
+      registry = new SkillRegistryManager({ ...defaultConfig, skillsRoot }, this.publicScanner);
       this.registries.set(domainId, registry);
     }
     await registry.initialize();
@@ -421,27 +430,6 @@ export class DomainSkillRegistryManager {
       registry.dispose();
     }
     this.registries.clear();
-  }
-
-  private async copyTemplateIfMissing(domainId: string): Promise<string> {
-    const skillsRoot = this.getDomainSkillsRoot(domainId);
-    if (fs.existsSync(skillsRoot)) return skillsRoot;
-
-    try {
-      await fs.promises.mkdir(this.domainsRoot, { recursive: true });
-      for (const { from, to } of this.templateSources) {
-        await fs.promises.cp(from, path.join(skillsRoot, to), {
-          recursive: true,
-          errorOnExist: true,
-          force: false,
-        });
-      }
-      logger.info("Initialized domain skills from template", { domainId, skillsRoot });
-      return skillsRoot;
-    } catch (error) {
-      await fs.promises.rm(skillsRoot, { recursive: true, force: true });
-      throw error;
-    }
   }
 }
 

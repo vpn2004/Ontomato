@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { ModelRole } from "@ontomato/contracts/model-settings";
+import type { ConfigurableModelRole } from "@ontomato/contracts/model-settings";
 import { Info, Users } from "lucide-vue-next";
 import { useI18n } from "vue-i18n";
 import { modelLabel, type ModelEntry, type RoleModels } from "../../types";
@@ -22,8 +22,8 @@ const emit = defineEmits<{
 }>();
 
 // Query engine roles are consumed by Java and agent roles by Node; both groups choose from all models.
-const roleGroups: { titleKey: string; roles: ModelRole[] }[] = [
-  { titleKey: "admin.modelRoleGroups.queryEngine", roles: ["query", "coding"] },
+const roleGroups: { titleKey: string; roles: ConfigurableModelRole[] }[] = [
+  { titleKey: "admin.modelRoleGroups.queryEngine", roles: ["query", "coding", "qualityCheck"] },
   {
     titleKey: "admin.modelRoleGroups.agents",
     roles: ["general", "diagnosis", "knowledgeGovernance"],
@@ -71,7 +71,7 @@ const unsetRole = () => null;
               v-model="roles[role]"
               clearable
               :value-on-clear="unsetRole"
-              :placeholder="t('admin.roleNotConfigured')"
+              :placeholder="t(role === 'qualityCheck' ? 'admin.qualityCheckInheritsQuery' : 'admin.roleNotConfigured')"
               :aria-label="t(`admin.modelRoleNames.${role}`)"
               :disabled="props.saving"
             >

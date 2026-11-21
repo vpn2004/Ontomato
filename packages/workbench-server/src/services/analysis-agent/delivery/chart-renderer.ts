@@ -75,8 +75,10 @@ ${normalizedHtml}
 
 export async function renderChartHtmlToDataUrl(
   html: string,
-  timeoutMs: number = 30_000
+  timeoutMs: number = 30_000,
+  options: { offline?: boolean; signal?: AbortSignal } = {}
 ): Promise<string> {
+  options.signal?.throwIfAborted();
   const browser = await getBrowser();
   const echartsScript = await getChartRuntimeScript();
 
@@ -85,8 +87,19 @@ export async function renderChartHtmlToDataUrl(
     deviceScaleFactor: 2,
   });
 
+  const cancel = () => { void chartPage.close().catch(() => {}); };
+  options.signal?.addEventListener("abort", cancel, {once: true});
   try {
-    const content = ensureChartDocument(inlineChartRuntime(html, echartsScript));
+    options.signal?.throwIfAborted();
+    if (options.offline) {
+      await chartPage.context().route("**/*", route => route.abort());
+      await chartPage.routeWebSocket("**/*", socket => socket.close());
+    }
+    let content = ensureChartDocument(inlineChartRuntime(html, echartsScript));
+    if (options.offline) {
+      const policy = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; frame-src 'none';">`;
+      content = content.replace(/<head[^>]*>/i, match => match + policy);
+    }
     await chartPage.setContent(content, {
       waitUntil: "load",
       timeout: timeoutMs,
@@ -127,8 +140,10 @@ export async function renderChartHtmlToDataUrl(
       animations: "disabled",
     });
 
+    options.signal?.throwIfAborted();
     return `data:image/png;base64,${screenshot.toString("base64")}`;
   } finally {
+    options.signal?.removeEventListener("abort", cancel);
     await chartPage.close();
   }
 }

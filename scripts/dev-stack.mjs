@@ -1,7 +1,7 @@
 // Product root full-stack development entry point: PG -> local Python MCP -> Java ready -> frontend Node trio.
 // Only relies on Node 24 built-ins, docker, and platform process/port queries (Unix uses ps/lsof/kill;
 // Windows uses built-in PowerShell/CIM); product differences come entirely from each product's own dev/postgres.compose.yml,
-// apps/data-engine/.env and .dev/conf; this tool does not know about edition.
+// the root .env and apps/data-engine/.dev/conf; this tool does not know about edition.
 // yaml is self-declared by the caller product root and parsed using that root; the tool has no fixed dependency location.
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -72,7 +72,7 @@ export function productContext(rootInput) {
     applicationTemplate: join(CORE_ROOT, "conf-defaults", "application.yml"),
     javaEntry: join(appDir, "dev.mjs"),
     devCommand: join(root, "scripts", "dev-command.mjs"),
-    javaEnvFile: join(appDir, ".env"),
+    javaEnvFile: join(root, ".env"),
     composeFile: join(root, "dev", "postgres.compose.yml"),
     backendLog: join(devRoot, "logs", "dev-backend.log"),
     mcpLog: join(devRoot, "logs", "dev-mcp.log"),
@@ -94,18 +94,18 @@ export function applicationServerPort(text, root) {
   if (typeof port === "string" && /^[0-9]+$/.test(port.trim())) return Number(port.trim());
   return undefined;
 }
-// Local .env literal overrides inherited environment; then falls back to local application.yml;
+// Process environment overrides the root .env; then falls back to local application.yml;
 // finally falls back to public template; never silently falls back on port.
 export function resolveJavaPort(ctx, inherited = process.env) {
   const fileVars = existsSync(ctx.javaEnvFile) ? readDotEnv(readFileSync(ctx.javaEnvFile, "utf8")) : {};
-  const vars = { ...inherited, ...fileVars };
+  const vars = { ...fileVars, ...inherited };
   if (vars.SERVER_PORT !== undefined) return integerLiteral(vars.SERVER_PORT, "SERVER_PORT");
   const field = join(ctx.devRoot, "conf", "application.yml");
   const file = existsSync(field) ? field : ctx.applicationTemplate;
-  if (!existsSync(file)) throw new Error(`Unable to determine Java port: missing application.yml; set SERVER_PORT explicitly in apps/data-engine/.env`);
+  if (!existsSync(file)) throw new Error(`Unable to determine Java port: missing application.yml; set SERVER_PORT explicitly in .env`);
   const port = applicationServerPort(readFileSync(file, "utf8"), ctx.root);
   if (port === undefined)
-    throw new Error(`application.yml server.port is not a valid integer (${file}); set SERVER_PORT explicitly in apps/data-engine/.env`);
+    throw new Error(`application.yml server.port is not a valid integer (${file}); set SERVER_PORT explicitly in .env`);
   return integerLiteral(port, "server.port");
 }
 // Pick the single http://127.0.0.1:<explicit-port>/sse entry for local compute service; remote entries are permitted. Errors report field locations.
@@ -170,10 +170,13 @@ export function classify(command, cwd, ctx) {
   if (cwd === ctx.devRoot) {
     const python = afterScript(command, ctx.venvPython);
     if (python !== undefined && afterScript(python, ctx.mcpScript) !== undefined) return "mcp";
-    // macOS framework Python (e.g. Homebrew) re-execs into the framework binary, so ps reports the
-    // resolved interpreter path instead of the venv symlink. Fall back to the MCP script path so the
-    // stack can still be owned on such installs.
-    if (hasArg(command, ctx.mcpScript)) return "mcp";
+    // macOS framework Python (e.g. Homebrew) re-execs into the framework binary
+    // (.../Python.app/Contents/MacOS/Python), so ps reports that interpreter instead of the venv
+    // symlink. Accept any Python interpreter running the MCP script as its first argument, but
+    // never a command that merely mentions the script path.
+    const end = command.indexOf(" ");
+    if (end > 0 && /^python[\d.]*$/i.test(basename(command.slice(0, end))) &&
+        afterScript(command.slice(end + 1), ctx.mcpScript) !== undefined) return "mcp";
     if (java !== undefined && hasArg(java, "io.ontomato.dataengine.RAGMain") &&
         (java.includes(`-cp ${ctx.devRoot}/conf:`) || java.includes(`-classpath ${ctx.devRoot}/conf:`))) return "ragmain";
   }
@@ -290,7 +293,7 @@ function assertNoForeign(port, snapshot, label) {
   if (foreignListeners(port, snapshot.group).length) throw new Error(`${label} port ${port} is already occupied by another process (this tool does not stop foreign processes)`);
 }
 function composeEnv(ctx, dbPort) {
-  const env = { ...process.env, DB_PORT: String(dbPort), DEV_STACK_ROOT: ctx.root, DEV_STACK_PRODUCT: ctx.product };
+  const env = { ...process.env, POSTGRES_PORT: String(dbPort), DEV_STACK_ROOT: ctx.root, DEV_STACK_PRODUCT: ctx.product };
   for (const key of ["COMPOSE_FILE", "COMPOSE_PROJECT_NAME", "COMPOSE_PROFILES", "COMPOSE_ENV_FILES"]) delete env[key];
   return env;
 }
@@ -364,7 +367,7 @@ async function waitForTcp(port, deadline) {
 function javaReady(port) {
   return new Promise((done) => {
     const request = get(
-      { host: "127.0.0.1", port, path: "/getABCTaskCountInQueue", headers: { "Accept-Language": "en" }, timeout: 3000 },
+      { host: "127.0.0.1", port, path: "/health", timeout: 3000 },
       (response) => {
         let body = "";
         response.setEncoding("utf8");
@@ -373,7 +376,7 @@ function javaReady(port) {
           if (response.statusCode !== 200) return done(false);
           try {
             const parsed = JSON.parse(body);
-            done(parsed?.success === true && Number.isInteger(parsed?.data) && parsed.data >= 0);
+            done(parsed?.success === true);
           } catch {
             done(false);
           }
@@ -420,7 +423,7 @@ function requireAll(entries) {
   for (const [path, label] of entries) if (!existsSync(path)) throw new Error(`Missing ${path} (${label})`);
 }
 async function up(ctx) {
-  const dbPort = integerLiteral(process.env.DB_PORT ?? "5432", "DB_PORT");
+  const dbPort = integerLiteral(process.env.POSTGRES_PORT ?? "5432", "POSTGRES_PORT");
   const javaPort = resolveJavaPort(ctx);
   const mcpPort = resolveMcpPort(ctx);
   requireAll([[ctx.composeFile, "dev compose"], [ctx.javaEntry, "Java entry"], [ctx.javaEnvFile, "Java .env"], [ctx.mcpScript, "MCP script"]]);
@@ -567,7 +570,7 @@ async function stopGroup(ctx, roles, label, notes, failures) {
   }
 }
 async function down(ctx) {
-  const dbPort = integerLiteral(process.env.DB_PORT ?? "5432", "DB_PORT");
+  const dbPort = integerLiteral(process.env.POSTGRES_PORT ?? "5432", "POSTGRES_PORT");
   const notes = [];
   const failures = [];
   for (const [label, roles] of [["Frontend", FRONTEND_ROLES], ["Java entry", ["java-helper"]], ["Java residual", ["maven", "ragmain"]], ["MCP", ["mcp"]]]) {
@@ -587,7 +590,7 @@ async function down(ctx) {
   if (failures.length) throw new Error(failures.join("; "));
 }
 function status(ctx) {
-  const dbPort = integerLiteral(process.env.DB_PORT ?? "5432", "DB_PORT");
+  const dbPort = integerLiteral(process.env.POSTGRES_PORT ?? "5432", "POSTGRES_PORT");
   const javaPort = resolveJavaPort(ctx);
   const mcpPort = resolveMcpPort(ctx);
   process.stdout.write(`[dev] Project ${ctx.project}\n[dev] Root ${ctx.root}\n`);
@@ -689,6 +692,7 @@ export async function main(argv = process.argv.slice(2)) {
   const [rootInput, command = "up"] = argv;
   if (!rootInput || !PRODUCT_COMMANDS.includes(command)) throw new Error("Usage: scripts/dev-stack.mjs <product-root> [up|down|status|logs]");
   const ctx = productContext(rootInput);
+  if (existsSync(ctx.javaEnvFile)) process.loadEnvFile(ctx.javaEnvFile);
   if (command === "up") await up(ctx);
   else if (command === "down") await down(ctx);
   else if (command === "status") status(ctx);

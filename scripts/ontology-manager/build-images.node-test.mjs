@@ -6,7 +6,6 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -16,7 +15,6 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { exportImage } from "../build-support.mjs";
 import { buildManagerImage } from "./build-images.mjs";
 
 // This proves only that the builder hands Docker the agreed context and CLI
@@ -31,7 +29,6 @@ function text(path, value) {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, value);
 }
-const json = (path, value) => text(path, `${JSON.stringify(value)}\n`);
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 // Local identity only; the user's Git configuration is never touched.
@@ -94,6 +91,8 @@ function fixture(t) {
     "apps/workbench/src/server.ts": "export {};\n",
     "packages/core/package.json": '{"name":"@ontomato/core"}\n',
     "packages/core/src/core.ts": "export {};\n",
+    "packages/contracts/package.json": '{"name":"@ontomato/contracts"}\n',
+    "packages/contracts/src/index.ts": "export {};\n",
   });
   repository(privateRoot, {
     "package.json": '{"name":"enterprise","private":true}\n',
@@ -159,8 +158,7 @@ if (args[0] === "version") {
   const labels = image.Config.Labels;
   if (mode === "os") image.Os = "windows";
   if (mode === "arch") image.Architecture = image.Architecture === "arm64" ? "amd64" : "arm64";
-  if (mode === "kind") labels["io.runtime.kind"] = "app";
-  if (mode === "component") labels["io.runtime.component"] = "other";
+  if (mode === "component") labels["io.ontomato.component"] = "other";
   if (mode === "version") labels["org.opencontainers.image.version"] = "0.0.0";
   process.stdout.write(JSON.stringify([image]));
 } else if (args[0] === "save") {
@@ -232,8 +230,6 @@ function assertRecipeMatches(argv, listing) {
     JSON.parse(readFileSync(join(listing.context, manifest.path), "utf8")).name,
     application,
   );
-  assert.match(recipe, /^RUN --mount=type=cache,id=pnpm-store,target=\/pnpm\/store pnpm install --frozen-lockfile --filter "\$\{APPLICATION\}\.\.\."$/m);
-  assert.match(recipe, /^COPY --from=web-builder \/build\/workspace\/\$\{WORKSPACE\}\/apps\/ontology-manager\/dist /m);
 }
 
 test("help returns early; the architecture and flags come only from Make", async () => {
@@ -243,45 +239,26 @@ test("help returns early; the architecture and flags come only from Make", async
   await assert.rejects(() => buildManagerImage({}, ["--arch", "arm64", "--pack-app"]), /Unknown argument/);
 });
 
-test("the recipe pins the workbench Node builder, a default pnpm version on the build platform and the same Nginx version tag upstream", () => {
-  const recipe = readFileSync(join(REPO, RECIPE, "Dockerfile"), "utf8");
-  const workbench = readFileSync(join(REPO, "docker/workbench/Dockerfile.app"), "utf8");
-  const pinned = /^ARG NODE_BUILDER_IMAGE=(\S+@sha256:[a-f0-9]{64})$/m;
-  assert.equal(recipe.match(pinned)[1], workbench.match(pinned)[1]);
-  assert.match(recipe, /^FROM --platform=\$BUILDPLATFORM \$\{NODE_BUILDER_IMAGE\} AS web-builder$/m);
-  assert.match(recipe, /^ARG PNPM_VERSION=\d+\.\d+\.\d+$/m);
-  assert.match(recipe, /^RUN npm install -g pnpm@\$\{PNPM_VERSION\}$/m);
-  assert.match(recipe, /^FROM docker\.io\/library\/nginx:1\.27-alpine@sha256:[a-f0-9]{64}$/m);
-  assert.doesNotMatch(recipe, /corepack|--prod\b|--filter-prod/);
-});
 
-test("the public entry builds ontomato-ontology-manager from its two owners and packs it", (t) => {
+
+test("the public entry builds ontomato-ontology-manager from its owners", (t) => {
   const { dir, publicRoot } = fixture(t);
   const docker = fakeDocker(t, dir);
-  const out = execFileSync("node", ["apps/ontology-manager/build.mjs", "--arch", "arm64", "--pack"], {
+  const out = execFileSync("node", ["apps/ontology-manager/build.mjs", "--arch", "arm64"], {
     cwd: publicRoot,
     encoding: "utf8",
   });
   const head = git(publicRoot, "rev-parse", "HEAD");
   const tag = out.match(/^\[build\] manager (\S+)$/m)[1];
   assert.match(tag, new RegExp(`^ontomato-ontology-manager:${VERSION}-\\d{8}-\\d{6}-g${head.slice(0, 12)}-arm64$`));
-  // The pack path comes from the file system; the build line only names it.
-  const tars = readdirSync(join(publicRoot, ".build/pack"));
-  assert.equal(tars.length, 1);
-  const tar = join(publicRoot, ".build/pack", tars[0]);
-  assert.equal(tars[0], `ontomato-ontology-manager-${tag.slice(tag.indexOf(":") + 1)}.tar.gz`);
-  assert.equal(existsSync(tar), true);
-  assert.equal(out.includes(`[build] pack ${tar}`), true);
-
   const calls = docker.calls();
-  assert.deepEqual(calls.map((argv) => argv[0]), ["buildx", "version", "image", "save"]);
+  assert.deepEqual(calls.map((argv) => argv[0]), ["buildx", "version", "image"]);
   const build = calls[0];
   assert.deepEqual(build.slice(0, 5), ["buildx", "build", "--provenance=false", "--platform", "linux/arm64"]);
   assert.equal(build.includes("--load"), true);
   assert.equal(build.includes("--push"), false);
   assert.deepEqual(buildArg(build, "WORKSPACE"), ["ontomato"]);
   assert.deepEqual(buildArg(build, "APPLICATION"), ["@ontomato/ontology-manager-app"]);
-  assert.deepEqual(calls[3], ["save", tag, "ontomato-ontology-manager:deploy-arm64"]);
 
   const listing = docker.context();
   assert.equal(listing.context, join(publicRoot, ".build/contexts/ontology-manager/arm64"));
@@ -294,6 +271,8 @@ test("the public entry builds ontomato-ontology-manager from its two owners and 
       "workspace/ontomato/apps/ontology-manager/src/main.ts",
       "workspace/ontomato/apps/workbench/package.json",
       "workspace/ontomato/package.json",
+      "workspace/ontomato/packages/contracts/package.json",
+      "workspace/ontomato/packages/contracts/src/index.ts",
       "workspace/ontomato/packages/core/package.json",
       "workspace/ontomato/packages/ontology-manager/package.json",
       "workspace/ontomato/packages/ontology-manager/src/index.ts",
@@ -319,11 +298,11 @@ test("the public entry builds ontomato-ontology-manager from its two owners and 
     );
   assertRecipeMatches(build, listing);
 
-  // The manager image carries the version, component and kind only.
+  // The running image retains the same build identity as its readable tag.
   assert.deepEqual(docker.labels(), {
     "org.opencontainers.image.version": VERSION,
-    "io.runtime.component": "ontomato-ontology-manager",
-    "io.runtime.kind": "manager",
+    "io.ontomato.component": "ontomato-ontology-manager",
+    "io.ontomato.build": tag.split(":")[1].replace(/-arm64$/, ""),
   });
   assert.equal(existsSync(join(publicRoot, "apps/ontology-manager/runtime-lock.json")), false);
 });
@@ -359,6 +338,7 @@ test("an enterprise build takes its own app plus the public owners and stamps th
       "workspace/ontomato/apps/ontology-manager/src/main.ts",
       "workspace/ontomato/apps/workbench/package.json",
       "workspace/ontomato/package.json",
+      "workspace/ontomato/packages/contracts/package.json",
       "workspace/ontomato/packages/core/package.json",
       "workspace/ontomato/packages/ontology-manager/package.json",
       "workspace/ontomato/packages/ontology-manager/src/index.ts",
@@ -368,11 +348,11 @@ test("an enterprise build takes its own app plus the public owners and stamps th
   );
   assertRecipeMatches(build, listing);
 
-  // A dirty public source still marks the stamp; the labels stay the version, component and kind only.
+  // A dirty public source still marks the stamp and its image metadata.
   assert.deepEqual(docker.labels(), {
     "org.opencontainers.image.version": VERSION,
-    "io.runtime.component": "ontology-manager",
-    "io.runtime.kind": "manager",
+    "io.ontomato.component": "ontology-manager",
+    "io.ontomato.build": build[build.indexOf("-t") + 1].split(":")[1].replace(/-amd64$/, ""),
   });
   const [tag, alias] = build.filter((arg, i) => build[i - 1] === "-t");
   assert.match(tag, new RegExp(`^ontology-manager:${VERSION}-\\d{8}-\\d{6}-g${enterpriseHead.slice(0, 12)}-dirty-amd64$`));
@@ -383,11 +363,11 @@ test("an enterprise build takes its own app plus the public owners and stamps th
 test("a built image with a missing or wrong platform or identity label is rejected", async (t) => {
   const repos = fixture(t);
   const docker = fakeDocker(t, repos.dir);
-  for (const mode of ["missing", "os", "arch", "kind", "component", "version"]) {
+  for (const mode of ["missing", "os", "arch", "component", "version"]) {
     process.env.FAKE_MODE = mode;
     docker.reset();
     await assert.rejects(
-      () => buildManagerImage(enterpriseApp(repos), ["--arch", "arm64", "--pack"]),
+      () => buildManagerImage(enterpriseApp(repos), ["--arch", "arm64"]),
       /Built image identity mismatch: ontology-manager:/,
       mode,
     );
@@ -395,17 +375,20 @@ test("a built image with a missing or wrong platform or identity label is reject
   }
 });
 
-test("packing writes the archive and reports it on the build line", async (t) => {
-  const { dir } = fixture(t);
-  const docker = fakeDocker(t, dir);
-  const logs = [];
-  t.mock.method(console, "log", (line) => logs.push(line));
-  const file = join(dir, "pack", "ontology-manager.tar.gz");
-  await exportImage(["ontology-manager:x-arm64", "ontology-manager:deploy-arm64"], file);
-  assert.deepEqual(logs, [`[build] pack ${file}`]);
-  assert.equal(existsSync(file), true);
-  assert.deepEqual(
-    docker.calls().find((argv) => argv[0] === "save"),
-    ["save", "ontology-manager:x-arm64", "ontology-manager:deploy-arm64"],
-  );
+// The DataRAG proxy the entrypoint renders clears the model runtime service credential, so a
+// browser-supplied one never reaches DataRAG. The real assignment is evaluated by sh; no Nginx runs.
+test("the rendered DataRAG proxy clears the model runtime credential header", () => {
+  const entrypoint = readFileSync(join(REPO, RECIPE, "docker-entrypoint.sh"), "utf8");
+  const assignment = entrypoint.match(/^API_LOCATION="[\s\S]*?^}"$/m)[0];
+  const rendered = execFileSync("sh", ["-c", `${assignment}\nprintf '%s' "$API_LOCATION"`], {
+    encoding: "utf8",
+    env: { PATH: process.env.PATH, ONTOLOGY_API_BASE: "/api", DATARAG_ORIGIN: "http://datarag:18087" },
+  });
+  assert.match(rendered, /^location \/api\/data-query\/ \{\n {2}proxy_pass http:\/\/datarag:18087\/;\n/);
+  assert.match(rendered, /^ {2}proxy_set_header X-Ontomato-Model-Runtime-Token "";$/m);
+  assert.match(rendered, /\n\}$/);
 });
+
+// Synthetic local-build fixtures must not inherit the outer CI build identity.
+delete process.env.CI_PIPELINE_ID;
+delete process.env.GITHUB_RUN_ID;

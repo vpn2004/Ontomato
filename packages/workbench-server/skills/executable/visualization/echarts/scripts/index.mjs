@@ -1,65 +1,3 @@
-const LIGHT_THEME = {
-  // bgColor: "#ffffff",
-
-  textColor: "#1F2329",
-  textColorRegular: "#4E5969",
-
-  borderColor: "#E5E6EB",
-  splitLineColor: "#F0F2F5",
-
-  tooltipBg: "rgba(17, 24, 39, 0.92)",
-  tooltipBorder: "#5B3FFF",
-  tooltipText: "#ffffff",
-
-  primaryColor: "#5B3FFF",
-
-  colors: [
-    "#5B3FFF", // primary purple
-    "#36CFC9", // cyan
-    "#FF9F43", // orange
-    "#06B6D4", // blue-cyan
-    "#F56C6C", // red
-    "#7C66FF", // light purple
-    "#00B894", // green
-    "#FFD93D", // yellow
-    "#6C5CE7", // blue-purple
-    "#FD79A8", // pink
-  ],
-
-  visualMapColor: ["#E8F5FF", "#7FD3FF", "#36CFC9", "#5B3FFF", "#7C66FF", "#4328D9"],
-};
-
-const DARK_THEME = {
-  // bgColor: "#0F1117",
-
-  textColor: "#F5F7FA",
-  textColorRegular: "#C9CDD4",
-
-  borderColor: "#2B2F36",
-  splitLineColor: "#23262F",
-
-  tooltipBg: "rgba(255,255,255,0.96)",
-  tooltipBorder: "#5B3FFF",
-  tooltipText: "#1F2329",
-
-  primaryColor: "#7C66FF",
-
-  colors: [
-    "#7C66FF", // light purple
-    "#36CFC9", // cyan
-    "#FFB65C", // orange
-    "#22D3EE", // blue-cyan
-    "#FF7875", // red
-    "#A48CFF", // lighter purple
-    "#00D9B3", // green
-    "#FFE168", // yellow
-    "#897FFC", // blue-purple
-    "#FF99C8", // pink
-  ],
-
-  visualMapColor: ["#1A2D3D", "#2D6B8C", "#36CFC9", "#7C66FF", "#A48CFF", "#D9D0FF"],
-};
-
 function wrapLabel(text, maxCharsPerLine = 6, maxLines = 2) {
   const str = String(text ?? "").trim();
   if (!str) return "";
@@ -128,19 +66,7 @@ function isNumericYField(data, yField) {
 }
 
 function createAreaGradient(primaryColor, isDark = false) {
-  const map = {
-    "#5B3FFF": ["rgba(91,63,255,0.42)", "rgba(91,63,255,0.12)", "rgba(91,63,255,0.02)"],
-
-    "#7C66FF": ["rgba(124,102,255,0.46)", "rgba(124,102,255,0.14)", "rgba(124,102,255,0.02)"],
-
-    "#36CFC9": ["rgba(54,207,201,0.40)", "rgba(54,207,201,0.10)", "rgba(54,207,201,0.02)"],
-  };
-
-  const colors = map[primaryColor] || [
-    "rgba(91,63,255,0.42)",
-    "rgba(91,63,255,0.12)",
-    "rgba(91,63,255,0.02)",
-  ];
+  const colors = [0.42, 0.12, 0.02].map((alpha) => colorWithAlpha(primaryColor, alpha));
 
   return {
     type: "linear",
@@ -168,15 +94,7 @@ function createAreaGradient(primaryColor, isDark = false) {
 }
 
 function createBarGradient(color, isDark = false) {
-  const presets = {
-    "#5B3FFF": ["#a79cf7", "#5B3FFF"],
-    "#7C66FF": ["#A48CFF", "#7C66FF"],
-    "#36CFC9": ["#8aeae4", "#36CFC9"],
-    "#FF9F43": ["#ffd294", "#FF9F43"],
-    "#F56C6C": ["#FF9C9C", "#F56C6C"],
-  };
-
-  const pair = presets[color] || [color, color];
+  const pair = [colorWithAlpha(color, 0.55), color];
 
   return {
     type: "linear",
@@ -327,6 +245,8 @@ function generateBasicChartOption(chartType, title, xField, yField, seriesField,
   if (chartType === "pie") {
     return {
       ...baseOption,
+      xAxis: { show: false },
+      yAxis: { show: false },
       legend: { ...baseOption.legend, orient: "horizontal", left: "center", bottom: 20 },
       series: [
         {
@@ -372,8 +292,7 @@ function generateBasicChartOption(chartType, title, xField, yField, seriesField,
             width: 4,
             color: theme.primaryColor,
             shadowBlur: 12,
-            shadowColor:
-              theme.bgColor === "#ffffff" ? "rgba(91,63,255,0.25)" : "rgba(91,63,255,0.5)",
+            shadowColor: theme.shadowColor,
           },
           areaStyle: {
             color: createAreaGradient(theme.primaryColor),
@@ -454,7 +373,7 @@ function generateBasicChartOption(chartType, title, xField, yField, seriesField,
                     width: 3,
                     color,
                     shadowBlur: 10,
-                    shadowColor: color + "66",
+                    shadowColor: colorWithAlpha(color, 0.4),
                   }
                 : undefined,
 
@@ -504,7 +423,7 @@ function generateBasicChartOption(chartType, title, xField, yField, seriesField,
         emphasis: {
           itemStyle: {
             shadowBlur: 12,
-            shadowColor: "rgba(91,63,255,0.35)",
+            shadowColor: theme.shadowColor,
           },
         },
 
@@ -523,8 +442,7 @@ function generateBasicChartOption(chartType, title, xField, yField, seriesField,
 
                 shadowBlur: 12,
 
-                shadowColor:
-                  theme.bgColor === "#ffffff" ? "rgba(91,63,255,0.25)" : "rgba(91,63,255,0.45)",
+                shadowColor: theme.shadowColor,
               }
             : undefined,
       },
@@ -929,7 +847,7 @@ function buildTreeData(data, theme, xField = "name", yField = "value") {
 
 function generateTreemapOption(data, title, theme, xField, yField) {
   const treeData = buildTreeData(data, theme, xField, yField);
-  const treemapTextColor = "#ffffff";
+  const treemapTextColor = theme.onPrimary;
   return {
     backgroundColor: theme.bgColor,
     title: {
@@ -1165,12 +1083,46 @@ function generateSankeyOption(data, title, theme) {
   };
 }
 
+function generateTimelineOption(data, config, theme) {
+  const events = data.map((row, index) => {
+    const raw = row[config.dateField];
+    const time = raw == null || raw === "" ? NaN : Date.parse(String(raw));
+    const undated = { zh: "日期未提供", ja: "日付なし", fr: "Date indisponible", de: "Datum nicht verfügbar", it: "Data non disponibile", ar: "التاريخ غير متاح" };
+    return { row, index, time, date: Number.isFinite(time) ? String(raw).slice(0, 10) : undated[String(config.locale || '').split('-')[0]] || "Undated" };
+  }).sort((a, b) => (Number.isFinite(b.time) ? b.time : -Infinity) - (Number.isFinite(a.time) ? a.time : -Infinity) || a.index - b.index);
+  return {
+    backgroundColor: theme.bgColor,
+    title: { text: config.title, left: "center", textStyle: { color: theme.textColor, fontSize: 16 } },
+    grid: { top: config.showTitle === false ? 12 : 65, left: 8, right: 12, bottom: 12 },
+    xAxis: { type: "value", show: false, min: 0, max: 1 },
+    yAxis: { type: "category", show: false, inverse: true, boundaryGap: true, data: events.map((_, index) => index) },
+    tooltip: { trigger: "item", renderMode: "richText", formatter: params => {
+      const event = events[params.dataIndex];
+      return [event.date, event.row[config.xField], event.row[config.descriptionField]].filter(Boolean).join("\n");
+    } },
+    series: [
+      { type: "line", symbol: "none", silent: true, lineStyle: { color: theme.borderColor, width: 2 }, data: events.map((_, index) => [0, index]) },
+      { type: "scatter", symbolSize: 10, itemStyle: { color: theme.primaryColor }, data: events.map((_, index) => [0, index]), label: {
+        show: true, position: "right", distance: 16, color: theme.textColor, fontSize: 12,
+        formatter: params => { const event = events[params.dataIndex]; return `${event.date}\n${wrapLabel(event.row[config.xField], 24, 2)}\n${event.row[config.descriptionField] || ""}`; }, lineHeight: 19,
+      } },
+    ],
+  };
+}
+
 function renderEcharts(data, config, theme) {
   const { chartType, title, xField, yField, seriesField, indicators } = config;
   const renderers = {
     bar: () => generateBasicChartOption("bar", title, xField, yField, seriesField, data, theme),
     line: () => generateBasicChartOption("line", title, xField, yField, seriesField, data, theme),
     pie: () => generateBasicChartOption("pie", title, xField, yField, seriesField, data, theme),
+    donut: () => {
+      const option = generateBasicChartOption("pie", title, xField, yField, seriesField, data, theme);
+      option.series[0].radius = ["42%", "68%"];
+      option.series[0].roseType = false;
+      return option;
+    },
+    timeline: () => generateTimelineOption(data, config, theme),
     scatter: () =>
       generateBasicChartOption("scatter", title, xField, yField, seriesField, data, theme),
     area: () => generateBasicChartOption("area", title, xField, yField, seriesField, data, theme),
@@ -1184,12 +1136,70 @@ function renderEcharts(data, config, theme) {
   };
   const renderer = renderers[chartType];
   if (!renderer) throw new Error(`Unsupported chart type: ${chartType}`);
-  return renderer();
+  const option = renderer();
+  if (config.showTitle === false) {
+    option.title = { show: false };
+    if (option.grid && chartType !== "timeline") option.grid.top = 32;
+    if (option.legend) option.legend.top = 4;
+  }
+  return option;
 }
 
-function generateHTML(lightOption, darkOption) {
-  const lightOptionJson = JSON.stringify(lightOption, null, 2);
-  const darkOptionJson = JSON.stringify(darkOption, null, 2);
+function colorWithAlpha(color, alpha) {
+  const channels = color.match(/[\d.]+/g);
+  if (color.startsWith("rgb") && channels?.length >= 3) {
+    return `rgba(${channels.slice(0, 3).join(",")},${alpha})`;
+  }
+  const hex = color.replace("#", "");
+  const expanded = hex.length === 3 ? [...hex].map((c) => c + c).join("") : hex;
+  const rgb = [0, 2, 4].map((offset) => parseInt(expanded.slice(offset, offset + 2), 16));
+  return `rgba(${rgb.join(",")},${alpha})`;
+}
+
+function readTheme(root) {
+  const view = root.ownerDocument.defaultView;
+  const style = view.getComputedStyle(root);
+  // Resolve CSS colors to RGB so canvas gradients also support rgb(), hsl() and color-mix().
+  const probe = root.ownerDocument.createElement("span");
+  root.appendChild(probe);
+  const color = (name, fallback = style.color) => {
+    probe.style.color = style.getPropertyValue(name).trim() || fallback;
+    return view.getComputedStyle(probe).color;
+  };
+  try {
+    const primary = color("--el-color-primary");
+    const theme = {
+      bgColor: color("--el-bg-color", "Canvas"),
+      pageColor: color("--el-bg-color-page", "Canvas"),
+      textColor: color("--el-text-color-primary"),
+      textColorRegular: color("--el-text-color-regular"),
+      borderColor: color("--el-border-color"),
+      splitLineColor: color("--el-border-color-light"),
+      tooltipBg: color("--el-bg-color-overlay", "Canvas"),
+      tooltipBorder: color("--el-border-color"),
+      tooltipText: color("--el-text-color-primary"),
+      onPrimary: color("--on-primary", "Canvas"),
+      primaryColor: primary,
+      colors: [primary, ...["success", "warning", "danger", "info"].map((name) => color("--el-color-" + name)),
+        ...[3, 5, 7].map((level) => color("--el-color-primary-light-" + level, primary))],
+      visualMapColor: [9, 7, 5, 3].map((level) => color("--el-color-primary-light-" + level, primary)),
+      shadowColor: colorWithAlpha(primary, 0.25),
+    };
+    theme.visualMapColor.push(primary, color("--el-color-primary-dark-2", primary));
+    return theme;
+  } finally {
+    probe.remove();
+  }
+}
+
+function generateHTML(data, config) {
+  const serialize = (value) => JSON.stringify(value).replace(/</g, "\\u003c");
+  const runtime = [wrapLabel, clampNumber, computeBarCategoryAxisLayout, toFiniteNumber,
+    isNumericChartValue, isNumericYField, createAreaGradient, createBarGradient,
+    simplifyTimeLabel, normalizeTimeText, generateBasicChartOption, generateRadarOption,
+    validateRadarInput, generateGaugeOption, generateHeatmapOption, generateFunnelOption,
+    buildTreeData, generateTreemapOption, generateSunburstOption, generateSankeyOption,
+    generateTimelineOption, renderEcharts, colorWithAlpha, readTheme].map((fn) => fn.toString()).join("\n");
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -1198,9 +1208,8 @@ function generateHTML(lightOption, darkOption) {
   <script src="/api/echart/echarts.min.js"></script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    :root { --bg-color: color-mix(in srgb, #FFFFFF 30%, #F4F7FE 70%); --text-color: #303133; --border-color: #DCDFE6; }
-    @media (prefers-color-scheme: dark) { :root { --bg-color: color-mix(in srgb, #111322 30%, #0A0B16 70%);--text-color: #E5EAF3; --border-color: #4C4D4F; } }
-    html.dark { --bg-color: color-mix(in srgb, #111322 30%, #0A0B16 70%); --text-color: #E5EAF3; --border-color: #4C4D4F; }
+    :root { --bg-color: Canvas; }
+    html, body { width: 100%; height: 100%; }
     body {
   font-family:
     Inter,
@@ -1223,13 +1232,10 @@ function generateHTML(lightOption, darkOption) {
 }
    .chart-container {
   width: 100%;
-  height: 100vh;
-  max-width: 1000px;
+   height: 100%;
+   min-width: 0;
 
-  background:
-    radial-gradient(circle at top left, rgba(91,63,255,0.08), transparent 30%),
-    radial-gradient(circle at top right, rgba(54,207,201,0.06), transparent 28%),
-    var(--card-bg);
+  background: var(--bg-color);
 
   display: flex;
   align-items: center;
@@ -1246,21 +1252,34 @@ function generateHTML(lightOption, darkOption) {
   renderer: "canvas",
   useDirtyRect: true,
 });
-    function getIsDark() {
-      try { if (parent && parent.document && parent.document.documentElement) return parent.document.documentElement.classList.contains('dark'); } catch (e) {}
-      return window.matchMedia('(prefers-color-scheme: dark)').matches;
+    ${runtime}
+    const data = ${serialize(data)};
+    const config = ${serialize(config)};
+    let themeRoot = document.documentElement;
+    try {
+      if (parent !== window && window.frameElement) themeRoot = window.frameElement;
+    } catch (e) {}
+    let previousTheme = '';
+    function updateTheme() {
+      const theme = readTheme(themeRoot);
+      const signature = JSON.stringify(theme);
+      if (signature === previousTheme) return;
+      previousTheme = signature;
+      document.documentElement.style.setProperty('--bg-color', theme.bgColor);
+      chart.setOption(renderEcharts(data, config, theme), true);
     }
-    const lightOption = ${lightOptionJson};
-    const darkOption = ${darkOptionJson};
-    chart.setOption(getIsDark() ? darkOption : lightOption);
-    chart.resize({
-  animation: {
-    duration: 300,
-  },
-});
-    try { if (parent && parent.document) { new MutationObserver(() => chart.setOption(getIsDark() ? darkOption : lightOption, true)).observe(parent.document.documentElement, { attributes: true, attributeFilter: ['class'] }); } } catch (e) {}
-    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => { if (!parent || !parent.document) chart.setOption(e.matches ? darkOption : lightOption, true); });
+    updateTheme();
+    new MutationObserver(updateTheme).observe(themeRoot, {
+      attributes: true, attributeFilter: ['class', 'style', 'data-theme']
+    });
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', updateTheme);
+    // Stylesheet changes and inherited custom properties can change without root mutations.
+    const themeTimer = window.setInterval(updateTheme, 500);
+    window.addEventListener('pagehide', () => window.clearInterval(themeTimer), { once: true });
     window.addEventListener('resize', () => chart.resize());
+    const resizeObserver = new ResizeObserver(() => chart.resize());
+    resizeObserver.observe(chartDom);
+    window.addEventListener('pagehide', () => { resizeObserver.disconnect(); chart.dispose(); }, { once: true });
   </script>
 </body>
 </html>`;
@@ -1288,7 +1307,10 @@ export async function execute(input) {
     };
   }
 
-  if (!["sankey", "radar", "gauge"].includes(chartType) && (!xField || !yField)) {
+  if (chartType === "timeline" && (!xField || !input.dateField)) {
+    return { html: "<p>Timeline requires xField and dateField</p>", meta: { error: true } };
+  }
+  if (!["sankey", "radar", "gauge", "timeline"].includes(chartType) && (!xField || !yField)) {
     return {
       html: "<div style='padding:20px;text-align:center;color:#666;'>Missing required parameters: xField, yField</div>",
       meta: { error: true, missingParams: { xField, yField } },
@@ -1379,7 +1401,7 @@ export async function execute(input) {
   }
 
   if (
-    !["sankey", "radar", "gauge", "heatmap"].includes(chartType) &&
+    !["sankey", "radar", "gauge", "heatmap", "timeline"].includes(chartType) &&
     !isNumericYField(processedData, yField)
   ) {
     return {
@@ -1450,11 +1472,9 @@ export async function execute(input) {
     }
   }
 
-  const config = { chartType, title, xField, yField, seriesField, indicators };
+  const config = { chartType, title, xField, yField, seriesField, indicators, dateField: input.dateField, descriptionField: input.descriptionField, showTitle: input.showTitle, locale: input.locale };
 
-  const lightOption = renderEcharts(processedData, config, LIGHT_THEME);
-  const darkOption = renderEcharts(processedData, config, DARK_THEME);
-  const html = generateHTML(lightOption, darkOption);
+  const html = generateHTML(processedData, config);
 
   console.log(`[echarts] chartType=${chartType}, x=${xField}, y=${yField}, title=${title}`);
 

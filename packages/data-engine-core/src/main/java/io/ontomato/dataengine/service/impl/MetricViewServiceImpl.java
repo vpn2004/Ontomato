@@ -1,5 +1,6 @@
 package io.ontomato.dataengine.service.impl;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -11,9 +12,12 @@ import java.util.UUID;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
+import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
+import com.alibaba.fastjson2.JSONWriter.Feature;
 import io.ontomato.dataengine.bean.OriginalQuestion;
+import io.ontomato.dataengine.bean.PythonExecuteResult;
 import io.ontomato.dataengine.bean.abcHarness.ABCHarnessProgramOutKeyRef;
 import io.ontomato.dataengine.bean.function.Function;
 import io.ontomato.dataengine.bean.function.Parameter;
@@ -29,6 +33,7 @@ import io.ontomato.dataengine.dao.FunctionDao;
 import io.ontomato.dataengine.dao.KnowledgeDao;
 import io.ontomato.dataengine.dao.MetricViewDao;
 import io.ontomato.dataengine.dao.SubQueryWorkspaceDao;
+import io.ontomato.dataengine.dataAdapter.DslRowLimit;
 import io.ontomato.dataengine.service.ABCProgramService;
 import io.ontomato.dataengine.service.AdminService;
 import io.ontomato.dataengine.service.AgentWorkspaceService;
@@ -41,7 +46,9 @@ import io.ontomato.dataengine.service.ai.MultiThreadAIChatService;
 import io.ontomato.dataengine.service.sys.bean.permission.UserDataPermission;
 import io.ontomato.dataengine.tools.MetricViewSubmitTools;
 import io.ontomato.dataengine.util.DBSchemaUtil;
+import io.ontomato.dataengine.util.SystemUtils;
 import io.ontomato.dataengine.util.UserMessageUtil;
+import io.ontomato.dataengine.util.ZipBundleUtil;
 
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
@@ -322,10 +329,58 @@ public class MetricViewServiceImpl implements MetricViewService {
 	}
 	
 	@Override
+	public byte[] exportMetricViews(String lang) throws Exception {
+		List<MetricView> metricViews = queryList(null, null, null, null, null);
+		String json = JSON.toJSONString(metricViews, Feature.WriteMapNullValue);
+		return ZipBundleUtil.zip("metricViews.json", json.getBytes(StandardCharsets.UTF_8));
+	}
+
+	@Override
+	public JSONObject importMetricViews(byte[] zipData, String lang) throws Exception {
+		byte[] jsonBytes = ZipBundleUtil.unzipFirstJson(zipData);
+		JSONArray array = JSON.parseArray(new String(jsonBytes, StandardCharsets.UTF_8));
+		User user = SystemUtils.getCurUser();
+		String domainId = user == null ? null : user.getDomainId();
+		int successCount = 0;
+		JSONArray failures = new JSONArray();
+		for (int i = 0; i < array.size(); i++) {
+			String metricViewId = null;
+			try {
+				JSONObject json = array.getJSONObject(i);
+				metricViewId = json.getString("id");
+				MetricView metricView = json.to(MetricView.class);
+				Function function = metricView.getFunction();
+				if (function == null || function.getId() == null) {
+					throw new Exception("MetricView " + metricViewId + " has no embedded function");
+				}
+				if (domainId != null) {
+					metricView.setDomainId(domainId);
+					function.setDomainId(domainId);
+				}
+				functionDao.save(function);
+				metricViewDao.save(metricView);
+				successCount++;
+			} catch (Exception e) {
+				log.error("Failed to import metricView {}: {}", metricViewId, e.getMessage(), e);
+				JSONObject failure = new JSONObject();
+				failure.put("index", i);
+				failure.put("id", metricViewId);
+				failure.put("message", e.getMessage());
+				failures.add(failure);
+			}
+		}
+		JSONObject ret = new JSONObject();
+		ret.put("success", failures.isEmpty());
+		ret.put("successCount", successCount);
+		ret.put("failureCount", failures.size());
+		ret.put("failures", failures);
+		return ret;
+	}
+
+	@Override
 	public MetricViewContent test(MetricView metricView, String lang, User user, UserDataPermission permission, int timeoutMinutes) throws Exception {
 		Object[] o = abcProgramService.execute(UUID.randomUUID().toString(), metricView.getFunction(), user.getId(), permission, null, lang, timeoutMinutes, user.getDomainId());
-		JSONArray rows = (JSONArray)o[0];
-		MetricViewContent metricViewContent = generateContent(rows, metricView.getName(), metricView, lang);
+		MetricViewContent metricViewContent = generateContent((JSONArray)o[0], (PythonExecuteResult)o[1], metricView.getName(), metricView, lang);
 		return metricViewContent;
 	}
 
@@ -430,8 +485,7 @@ public class MetricViewServiceImpl implements MetricViewService {
 							staticMetricView.setOriginCheckResult(metricView.getOriginCheckResult());
 							
 							Object[] o = abcProgramService.execute(BackendSessionEntrance.derive(sessionId, "hot-exec-" + i), staticMetricView.getFunction(), user.getId(), permission, null, lang, timeoutMinutes, user.getDomainId());;
-							JSONArray rows = (JSONArray)o[0];
-							MetricViewContent metricViewContent = generateContent(rows, staticMetricView.getName(), staticMetricView, lang);
+							MetricViewContent metricViewContent = generateContent((JSONArray)o[0], (PythonExecuteResult)o[1], staticMetricView.getName(), staticMetricView, lang);
 							metricViewContents.add(metricViewContent);
 							
 							if (!test) {
@@ -478,7 +532,7 @@ public class MetricViewServiceImpl implements MetricViewService {
 		return metricViewContents;
 	}
 	
-	private MetricViewContent generateContent(JSONArray rows, String question, MetricView metricView, String lang) {
+	private MetricViewContent generateContent(JSONArray rows, PythonExecuteResult execution, String question, MetricView metricView, String lang) {
 		int maxSize = 100;
 		MetricViewContent metricViewContent = new MetricViewContent();
 		Function function = metricView.getFunction();
@@ -515,6 +569,12 @@ public class MetricViewServiceImpl implements MetricViewService {
 			md += "|\n";
 			md += langService.get(lang, "QuestionCard.totalNum") + ": " + rows.size() + ", " + langService.get(lang, "QuestionCard.showNum") + maxSize + ", " + langService.get(lang, "QuestionCard.canGetByUrl") + ".\n";
 		}
+		JSONObject answerPayload = new JSONObject();
+		answerPayload.put("answer", rows);
+		execution.markCompleteness(answerPayload);
+		if (answerPayload.containsKey(DslRowLimit.TRUNCATED)) {
+			md += "\n> " + answerPayload.getString(DslRowLimit.TRUNCATION_HINT) + "\n";
+		}
 		metricViewContent.setMd(md);
 		
 		metricViewContent.setOriginQuestion(metricView.getOriginQuestion());
@@ -532,8 +592,6 @@ public class MetricViewServiceImpl implements MetricViewService {
 		abcProgram.put("outKeyRefs", function.getReturnDef().getOutKeyRefs());
 		abcProgram.put("parameters", function.getParameters());
 
-		JSONObject answerPayload = new JSONObject();
-		answerPayload.put("answer", rows);
 		JSONArray data = new JSONArray();
 		data.add(answerPayload);
 
@@ -560,13 +618,13 @@ public class MetricViewServiceImpl implements MetricViewService {
 	}
 	
 	@Override
-	public JSONArray execute(String id, JSONObject param, String lang, User user, UserDataPermission permission, int timeoutMinutes) throws Exception {
+	public Object[] execute(String id, JSONObject param, String lang, User user, UserDataPermission permission, int timeoutMinutes) throws Exception {
 		MetricView metricView = queryById(id);
 		return testExecute(metricView, param, lang, user, permission, timeoutMinutes);
 	}
 	
 	@Override
-	public JSONArray testExecute(MetricView metricView, JSONObject param, String lang, User user, UserDataPermission permission, int timeoutMinutes) throws Exception {
+	public Object[] testExecute(MetricView metricView, JSONObject param, String lang, User user, UserDataPermission permission, int timeoutMinutes) throws Exception {
 		if (metricView != null) {
 			if (MetricView.STATUS_PUBLISHED.equals(metricView.getStatus())) {
 				Function function = metricView.getFunction();
@@ -577,9 +635,7 @@ public class MetricViewServiceImpl implements MetricViewService {
 					}
 				}
 				
-				Object[] o = abcProgramService.execute(UUID.randomUUID().toString(), function, user.getId(), permission, null, lang, timeoutMinutes, user.getDomainId());
-				JSONArray data = (JSONArray)o[0];
-				return data;
+				return abcProgramService.execute(UUID.randomUUID().toString(), function, user.getId(), permission, null, lang, timeoutMinutes, user.getDomainId());
 			} else {
 				throw new Exception(langService.get(lang, "MetricView.notPublished"));
 			}

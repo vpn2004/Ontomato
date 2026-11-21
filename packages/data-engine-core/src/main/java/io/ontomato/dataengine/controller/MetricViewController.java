@@ -1,6 +1,8 @@
 package io.ontomato.dataengine.controller;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.ResponseEntity;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -9,6 +11,7 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseBody;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.ArrayList;
@@ -17,6 +20,7 @@ import java.util.List;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
+import io.ontomato.dataengine.bean.PythonExecuteResult;
 import io.ontomato.dataengine.bean.function.Parameter;
 import io.ontomato.dataengine.bean.metricView.MetricView;
 import io.ontomato.dataengine.bean.metricView.MetricViewContent;
@@ -87,6 +91,10 @@ public class MetricViewController {
 			User user = SystemUtils.getCurUser();
 			MetricView metricView = param.to(MetricView.class);
 			metricView.setDomainId(user.getDomainId());
+			// The saved Function belongs to the caller's domain whatever the request says; the DAO keys the vector write by it.
+			if (metricView.getFunction() != null) {
+				metricView.getFunction().setDomainId(user.getDomainId());
+			}
 			metricViewService.save(metricView, lang);
 			ret.put("success", true);
 		} catch (Exception e) {
@@ -142,6 +150,35 @@ public class MetricViewController {
 			List<MetricView> metricViews = metricViewService.queryList(type, status, null, className, user.getDomainId());
 			ret.put("success", true);
 			ret.put("data", metricViews);
+		} catch (Exception e) {
+			log.error(e.getMessage(), e);
+			ret.put("success", false);
+			ret.put("message", e.getMessage());
+		}
+		return ret;
+	}
+
+	@GetMapping("/metricView/export")
+	public ResponseEntity<byte[]> exportMetricViews(@RequestHeader(value = ControllerConst.LANG_HEADER_KEY, required = false) String lang) {
+		try {
+			byte[] data = metricViewService.exportMetricViews(lang);
+			return ResponseEntity.ok()
+					.header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"metricViews.zip\"")
+					.contentType(MediaType.APPLICATION_OCTET_STREAM)
+					.body(data);
+		} catch (Exception e) {
+			log.error(e.getMessage(), e);
+			return ResponseEntity.internalServerError().build();
+		}
+	}
+
+	@PostMapping("/metricView/import")
+	@ResponseBody
+	public JSONObject importMetricViews(@RequestHeader(value = ControllerConst.LANG_HEADER_KEY, required = false) String lang,
+			@RequestParam("file") MultipartFile file) {
+		JSONObject ret = new JSONObject();
+		try {
+			ret = metricViewService.importMetricViews(file.getBytes(), lang);
 		} catch (Exception e) {
 			log.error(e.getMessage(), e);
 			ret.put("success", false);
@@ -289,9 +326,10 @@ public class MetricViewController {
 			if (timeoutMinutes <= 0) {
 				timeoutMinutes = 1;
 			}
-			JSONArray data = metricViewService.execute(id, p, lang, user, curUserDataPermission, timeoutMinutes);
+			Object[] o = metricViewService.execute(id, p, lang, user, curUserDataPermission, timeoutMinutes);
 			ret.put("success", true);
-			ret.put("data", data);
+			ret.put("data", o[0]);
+			((PythonExecuteResult)o[1]).markCompleteness(ret);
 		} catch (Exception e) {
 			log.error(e.getMessage(), e);
 			ret.put("success", false);
@@ -314,9 +352,10 @@ public class MetricViewController {
 			if (timeoutMinutes <= 0) {
 				timeoutMinutes = 1;
 			}
-			JSONArray data = metricViewService.testExecute(metricView, p, lang, user, curUserDataPermission, timeoutMinutes);
+			Object[] o = metricViewService.testExecute(metricView, p, lang, user, curUserDataPermission, timeoutMinutes);
 			ret.put("success", true);
-			ret.put("data", data);
+			ret.put("data", o[0]);
+			((PythonExecuteResult)o[1]).markCompleteness(ret);
 		} catch (Exception e) {
 			log.error(e.getMessage(), e);
 			ret.put("success", false);

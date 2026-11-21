@@ -2,8 +2,9 @@
 import { computed, nextTick, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
-import { ArrowLeft, BookOpen, FileText, Send, Square } from "lucide-vue-next";
-import { renderAgentMarkdown } from "../../utils/agent-markdown";
+import { ArrowLeft, BookOpen, ChevronRight, FileText, History, Plus, X } from "lucide-vue-next";
+import AgentChatInput from "../../components/agent-chat/AgentChatInput.vue";
+import AgentMessage from "../../components/agent-chat/AgentMessage.vue";
 import { useGovernance } from "./useGovernance";
 import { governanceReturnPath } from "./return-path";
 
@@ -12,15 +13,18 @@ const router = useRouter(),
   route = useRoute();
 const {
   session,
+  messages,
+  running,
   rounds,
   loading,
   sending,
   stopping,
   error,
+  streamLost,
   source,
   select,
-  start,
-  respond,
+  reload,
+  send,
   stop,
   readSource,
 } = useGovernance();
@@ -28,57 +32,70 @@ const input = ref(""),
   panel = ref<"report" | "sources" | null>(null);
 const conversation = ref<HTMLElement | null>(null);
 const panelElement = ref<HTMLElement | null>(null);
-const running = computed(() => session.value?.status === "running");
+const busy = computed(() => running.value || sending.value);
+// Review counts appear only once the Agent has recorded an actual review scope.
 const progress = computed(() => {
   const work = session.value?.work;
-  return work?.knowledgeTotal === null || !work
-    ? t("governance.preparing")
-    : t("governance.progress", {
-        done: work.reviewedKnowledgeIds.length,
-        total: work.knowledgeTotal,
-      });
+  return work && work.knowledgeTotal !== null
+    ? t("governance.progress", { done: work.reviewedKnowledgeIds.length, total: work.knowledgeTotal })
+    : "";
 });
+const issueCount = computed(() => session.value?.work.issues.length ?? 0);
+// Clarifying replies are offered only when the Agent has finished a turn and waits for the user.
+const awaitingReply = computed(
+  () =>
+    !busy.value &&
+    session.value?.status === "idle" &&
+    messages.value[messages.value.length - 1]?.role === "assistant"
+);
 watch(
   () => route.params.sessionId,
   (id) => {
-    input.value = "";
-    panel.value = null;
-    void select(typeof id === "string" && id ? id : undefined);
+    const next = typeof id === "string" && id ? id : undefined;
+    // The route catching up to the round just created keeps the draft and panel.
+    if (next !== session.value?.id) {
+      input.value = "";
+      panel.value = null;
+    }
+    void select(next);
   },
   { immediate: true }
 );
-watch(
-  () => [session.value?.messages.length, session.value?.draft],
-  async () => {
-    const element = conversation.value;
-    const nearEnd =
-      !element || element.scrollHeight - element.scrollTop - element.clientHeight < 160;
-    await nextTick();
-    if (nearEnd && conversation.value)
-      conversation.value.scrollTop = conversation.value.scrollHeight;
-  }
-);
-watch(panel, async (value) => {
-  if (!value || !window.matchMedia("(max-width: 800px)").matches) return;
+watch(messages, async () => {
+  const element = conversation.value;
+  const nearEnd = !element || element.scrollHeight - element.scrollTop - element.clientHeight < 160;
   await nextTick();
-  panelElement.value?.scrollIntoView({ block: "start" });
+  if (nearEnd && conversation.value) conversation.value.scrollTop = conversation.value.scrollHeight;
+});
+// Opening the panel moves focus into it (on narrow screens it hides the conversation);
+// closing returns focus to whatever opened it.
+let opener: HTMLElement | null = null;
+watch(panel, async (value, previous) => {
+  if (value && !previous) {
+    opener = document.activeElement as HTMLElement | null;
+    await nextTick();
+    panelElement.value?.querySelector<HTMLElement>('[aria-pressed="true"]')?.focus();
+  } else if (!value && previous) {
+    await nextTick();
+    if (opener?.isConnected) opener.focus();
+    opener = null;
+  }
 });
 // Switching sessions keeps the from query so Back still returns to the entry page.
-function sessionLocation(sessionId: string) {
-  return { name: "KnowledgeGovernance", params: { sessionId }, query: { from: route.query.from } };
+function sessionLocation(sessionId?: string) {
+  return {
+    name: "KnowledgeGovernance",
+    params: sessionId ? { sessionId } : {},
+    query: { from: route.query.from },
+  };
 }
-async function begin() {
-  const id = await start();
-  if (id) await router.push(sessionLocation(id));
-}
-async function send(text = input.value) {
-  if (await respond(text)) input.value = "";
-}
-function onKey(event: KeyboardEvent) {
-  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
-    event.preventDefault();
-    void send();
-  }
+// Typed text and suggestions are the same user message; the first one creates the round.
+async function submit(text: string, fromInput: boolean) {
+  const id = await send(text);
+  if (!id) return;
+  // Clear only what was sent; text typed while the request was pending stays as the draft.
+  if (fromInput && input.value.startsWith(text)) input.value = input.value.slice(text.length);
+  if (route.params.sessionId !== id) await router.push(sessionLocation(id));
 }
 function showSource(id: string) {
   panel.value = "sources";
@@ -92,195 +109,200 @@ function closeHistory(event: MouseEvent) {
 <template>
   <section class="kg-page">
     <header class="kg-header">
-      <div class="kg-heading">
-        <button
-          class="kg-icon"
-          :aria-label="t('governance.back')"
-          @click="router.push(governanceReturnPath(route.query))"
-        >
-          <ArrowLeft :size="18" />
-        </button>
-        <h1>{{ t("governance.title") }}</h1>
-      </div>
+      <button
+        class="kg-ghost kg-ghost--icon"
+        :aria-label="t('governance.back')"
+        @click="router.push(governanceReturnPath(route.query))"
+      >
+        <ArrowLeft :size="18" />
+      </button>
+      <h1>{{ t("governance.title") }}</h1>
       <div class="kg-toolbar">
-        <template v-if="session">
-          <button class="kg-button" :disabled="sending || running" @click="begin">
-            {{ t("governance.start") }}
-          </button>
-          <button
-            class="kg-button"
-            :aria-pressed="panel === 'sources'"
-            @click="panel = panel === 'sources' ? null : 'sources'"
-          >
-            <BookOpen :size="16" />
-            {{ t("governance.sources") }}
-          </button>
-          <button
-            class="kg-button"
-            :aria-pressed="panel === 'report'"
-            @click="panel = panel === 'report' ? null : 'report'"
-          >
-            <FileText :size="16" />
-            {{ t("governance.report") }} ({{ session.work.issues.length }})
-          </button>
-        </template>
+        <button
+          v-if="session"
+          class="kg-ghost"
+          :disabled="busy"
+          @click="router.push(sessionLocation())"
+        >
+          <Plus :size="16" />
+          <span class="kg-ghost__label">{{ t("governance.start") }}</span>
+        </button>
         <details v-if="rounds.length" class="kg-history">
-          <summary class="kg-button">{{ t("governance.rounds") }}</summary>
+          <summary class="kg-ghost">
+            <History :size="16" />
+            <span class="kg-ghost__label">{{ t("governance.rounds") }}</span>
+          </summary>
           <nav @click="closeHistory">
             <RouterLink
               v-for="round in rounds"
               :key="round.id"
               :to="sessionLocation(round.id)"
+              :aria-current="round.id === session?.id ? 'page' : undefined"
             >
-              {{ new Date(round.createdAt).toLocaleString() }} ·
-              {{ t(`governance.${round.status}`) }}
+              <span>{{ new Date(round.createdAt).toLocaleString() }}</span>
+              <small>{{ t(`governance.${round.status}`) }}</small>
             </RouterLink>
           </nav>
         </details>
+        <button
+          v-if="session"
+          class="kg-ghost"
+          :aria-pressed="panel !== null"
+          @click="panel = panel ? null : 'report'"
+        >
+          <FileText :size="16" />
+          <span class="kg-ghost__label">{{ t("governance.report") }}</span>
+          <span v-if="issueCount" class="kg-count">{{ issueCount }}</span>
+        </button>
       </div>
     </header>
-    <p v-if="error" role="alert" class="kg-error">{{ error }}</p>
-    <p v-if="loading" role="status">{{ t("governance.loading") }}</p>
-    <div v-else-if="!session" class="kg-welcome">
-      <BookOpen :size="36" />
-      <h2>{{ t("governance.title") }}</h2>
-      <p>{{ t("governance.subtitle") }}</p>
-      <p>{{ t("governance.welcome") }}</p>
-      <button class="kg-button kg-primary" :disabled="sending" @click="begin">
-        {{ t("governance.start") }}
-      </button>
-    </div>
-    <template v-else>
-      <div class="kg-body">
-        <main class="kg-chat">
+    <p v-if="error" role="alert" class="kg-banner">{{ error }}</p>
+    <p v-if="loading" role="status" class="kg-loading">{{ t("governance.loading") }}</p>
+    <div v-else :class="['kg-body', { 'kg-body--panel': session && panel }]">
+      <main class="kg-chat">
+        <div
+          ref="conversation"
+          class="kg-scroll"
+          role="log"
+          :aria-label="t('governance.discussion')"
+        >
           <div class="kg-thread">
-            <div
-              ref="conversation"
-              class="kg-messages"
-              role="log"
-              :aria-label="t('governance.discussion')"
-            >
-              <article
-                v-for="message in session.messages"
-                :key="message.id"
-                :class="['kg-message', message.role]"
-              >
-                <span class="kg-speaker">
-                  {{ message.role === "user" ? t("governance.you") : t("governance.title") }}
-                </span>
-                <div class="kg-markdown" v-html="renderAgentMarkdown(message.text)" />
-              </article>
-              <article v-if="session.draft" class="kg-message assistant">
-                <div class="kg-markdown" v-html="renderAgentMarkdown(session.draft)" />
-              </article>
-              <p v-if="running" class="kg-working" role="status">{{ t("governance.working") }}</p>
-              <p v-if="session.status === 'stopped'" class="kg-notice">
-                {{ t("governance.stoppedHint") }}
-              </p>
-              <p v-if="session.error" role="alert" class="kg-error">
-                {{ t("governance.failedHint") }}
-              </p>
+            <div v-if="!session && !messages.length" class="kg-welcome">
+              <h2>{{ t("governance.welcomeTitle") }}</h2>
+              <p>{{ t("governance.welcomeBody") }}</p>
+              <div class="kg-suggestions">
+                <button
+                  v-for="key in ['startCheck', 'findConflicts']"
+                  :key="key"
+                  type="button"
+                  :disabled="busy"
+                  @click="submit(t(`governance.${key}`), false)"
+                >
+                  {{ t(`governance.${key}`) }}
+                </button>
+              </div>
             </div>
-            <p class="kg-status" aria-live="polite">
-              <span :class="{ 'kg-pulse': running }">{{ t(`governance.${session.status}`) }}</span>
-              <span>{{ progress }}</span>
+            <AgentMessage v-for="(message, index) in messages" :key="index" :message="message" />
+            <!-- Proposed changes live in the report; the thread points to them where they appear. -->
+            <button
+              v-if="issueCount || progress"
+              type="button"
+              class="kg-result"
+              @click="panel = 'report'"
+            >
+              <FileText :size="18" class="kg-result__icon" />
+              <span class="kg-result__text">
+                <strong>
+                  {{ issueCount ? t("governance.findings", issueCount) : t("governance.report") }}
+                </strong>
+                <small v-if="progress">{{ progress }}</small>
+              </span>
+              <ChevronRight :size="16" />
+            </button>
+            <p v-if="running" class="kg-working" role="status">
+              <span class="kg-dots" aria-hidden="true"><i /><i /><i /></span>
+              {{ stopping ? t("governance.stopping") : t("governance.working") }}
             </p>
-            <form class="kg-composer" @submit.prevent="send()">
-              <div class="kg-quick">
-                <button
-                  type="button"
-                  :disabled="running || sending"
-                  @click="send(t('governance.explain'))"
-                >
-                  {{ t("governance.explain") }}
-                </button>
-                <button
-                  type="button"
-                  :disabled="running || sending"
-                  @click="send(t('governance.defer'))"
-                >
-                  {{ t("governance.defer") }}
-                </button>
-                <button
-                  v-if="session.status === 'stopped' || session.status === 'failed'"
-                  type="button"
-                  :disabled="running || sending"
-                  @click="send(t('governance.continue'))"
-                >
+            <p v-if="streamLost" class="kg-note kg-note--alert" role="status">
+              {{ t("governance.disconnected") }}
+              <button type="button" class="kg-link" @click="reload">{{ t("common.retry") }}</button>
+            </p>
+            <template v-else-if="session && !busy">
+              <p v-if="session.error" role="alert" class="kg-note kg-note--alert">
+                {{ t("governance.failedHint") }}
+                <button type="button" class="kg-link" @click="submit(t('governance.continue'), false)">
                   {{ t("governance.continue") }}
                 </button>
-              </div>
-              <label class="kg-sr" for="kg-answer">{{ t("governance.answer") }}</label>
-              <textarea
-                id="kg-answer"
-                v-model="input"
-                :placeholder="t('governance.placeholder')"
-                :disabled="running || sending"
-                rows="3"
-                maxlength="20000"
-                @keydown="onKey"
-              />
-              <div class="kg-compose-bottom">
-                <small>{{ t("governance.saved") }}</small>
-                <button
-                  v-if="running"
-                  class="kg-button"
-                  type="button"
-                  :disabled="stopping"
-                  @click="stop"
-                >
-                  <Square :size="15" />
-                  {{ t(stopping ? "governance.stopping" : "governance.stop") }}
+              </p>
+              <p v-else-if="session.status === 'stopped'" class="kg-note">
+                {{ t("governance.stoppedHint") }}
+                <button type="button" class="kg-link" @click="submit(t('governance.continue'), false)">
+                  {{ t("governance.continue") }}
                 </button>
-                <button
-                  v-else
-                  class="kg-button kg-primary"
-                  type="submit"
-                  :disabled="sending || !input.trim()"
-                >
-                  <Send :size="15" />
-                  {{ t("governance.send") }}
-                </button>
-              </div>
-            </form>
+              </p>
+            </template>
           </div>
-        </main>
-        <aside
-          v-if="panel"
-          ref="panelElement"
-          class="kg-panel"
-          :aria-label="t(`governance.${panel}`)"
-        >
-          <header>
-            <h2>{{ t(`governance.${panel}`) }}</h2>
-            <button class="kg-button" @click="panel = null">{{ t("governance.close") }}</button>
-          </header>
+        </div>
+        <div class="kg-composer">
+          <div v-if="awaitingReply" class="kg-replies">
+            <button
+              v-for="key in ['explain', 'defer']"
+              :key="key"
+              type="button"
+              @click="submit(t(`governance.${key}`), false)"
+            >
+              {{ t(`governance.${key}`) }}
+            </button>
+          </div>
+          <AgentChatInput
+            v-model="input"
+            :is-sending="busy"
+            :placeholder="t('governance.placeholder')"
+            :maxlength="20000"
+            @send="submit(input, true)"
+            @stop="stop"
+          />
+          <small>{{ t("governance.saved") }}</small>
+        </div>
+      </main>
+      <aside
+        v-if="session && panel"
+        ref="panelElement"
+        class="kg-panel"
+        :aria-label="t(`governance.${panel}`)"
+      >
+        <header>
+          <button
+            v-for="tab in ['report', 'sources'] as const"
+            :key="tab"
+            type="button"
+            class="kg-tab"
+            :aria-pressed="panel === tab"
+            @click="panel = tab"
+          >
+            {{ t(`governance.${tab}`) }}
+          </button>
+          <button
+            type="button"
+            class="kg-ghost kg-ghost--icon kg-close"
+            :aria-label="t('governance.close')"
+            @click="panel = null"
+          >
+            <X :size="16" />
+          </button>
+        </header>
+        <div class="kg-panel__body">
           <template v-if="panel === 'report'">
-            <p class="kg-notice">{{ t("governance.reportHint") }}</p>
+            <p class="kg-hint">{{ t("governance.reportHint") }}</p>
+            <p v-if="progress" class="kg-hint">{{ progress }}</p>
             <p v-if="session.work.summary" class="kg-summary">{{ session.work.summary }}</p>
-            <p v-if="!session.work.issues.length">{{ t("governance.noIssues") }}</p>
+            <p v-if="!issueCount" class="kg-hint">{{ t("governance.noIssues") }}</p>
             <article v-for="issue in session.work.issues" :key="issue.id" class="kg-issue">
               <div class="kg-tags">
                 <span>{{ t(`governance.${issue.category}`) }}</span>
-                <span>{{ t(`governance.${issue.status}`) }}</span>
+                <span :class="`kg-tag--${issue.status}`">{{ t(`governance.${issue.status}`) }}</span>
               </div>
               <h3>{{ issue.title }}</h3>
               <dl>
                 <dt>{{ t("governance.problem") }}</dt>
                 <dd>{{ issue.problem }}</dd>
-                <dt>{{ t("governance.before") }}</dt>
-                <dd>{{ issue.before }}</dd>
+                <template v-if="issue.before">
+                  <dt>{{ t("governance.before") }}</dt>
+                  <dd>{{ issue.before }}</dd>
+                </template>
                 <dt>{{ t("governance.after") }}</dt>
-                <dd>{{ issue.after }}</dd>
+                <dd class="kg-after">{{ issue.after }}</dd>
                 <dt>{{ t("governance.basis") }}</dt>
                 <dd>{{ issue.basis }}</dd>
               </dl>
               <button
                 v-for="id in issue.sourceIds"
                 :key="id"
-                class="kg-source-link"
+                type="button"
+                class="kg-source"
                 @click="showSource(id)"
               >
+                <BookOpen :size="14" />
                 {{
                   session.work.sources.find((item) => item.id === id)?.title ||
                   t("governance.sources")
@@ -289,26 +311,34 @@ function closeHistory(event: MouseEvent) {
             </article>
           </template>
           <template v-else>
-            <p v-if="!session.work.sources.length">{{ t("governance.noSources") }}</p>
+            <p v-if="!session.work.sources.length" class="kg-hint">
+              {{ t("governance.noSources") }}
+            </p>
             <button
               v-for="item in session.work.sources"
               :key="item.id"
-              class="kg-source-link"
+              type="button"
+              class="kg-source"
+              :aria-current="source?.source.id === item.id ? 'true' : undefined"
               @click="readSource(item.id)"
             >
+              <BookOpen :size="14" />
               {{ item.title }}
             </button>
             <section v-if="source" class="kg-original">
               <h3>{{ source.source.title }}</h3>
-              <p v-if="!source.page">{{ t("governance.evidenceHint") }}</p>
-              <p v-else-if="!source.page.items.length">{{ t("governance.sourceMissing") }}</p>
+              <p v-if="!source.page" class="kg-hint">{{ t("governance.evidenceHint") }}</p>
+              <p v-else-if="!source.page.items.length" class="kg-hint">
+                {{ t("governance.sourceMissing") }}
+              </p>
               <template v-else>
-                <p v-for="item in source.page.items" :key="item.id" class="kg-original-text">
+                <blockquote v-for="item in source.page.items" :key="item.id">
                   {{ item.text }}
-                </p>
+                </blockquote>
                 <button
                   v-if="source.page.next"
-                  class="kg-button"
+                  type="button"
+                  class="kg-link"
                   @click="readSource(source.source.id, source.page.next.offset)"
                 >
                   {{ t("governance.more") }}
@@ -316,74 +346,25 @@ function closeHistory(event: MouseEvent) {
               </template>
             </section>
           </template>
-        </aside>
-      </div>
-    </template>
+        </div>
+      </aside>
+    </div>
   </section>
 </template>
 
 <style scoped>
 .kg-page {
-  min-width: 0;
-  color: var(--el-text-color-primary);
   display: flex;
   flex-direction: column;
   height: 100%;
+  min-width: 0;
   min-height: 0;
-  padding: 16px 24px;
-  gap: 12px;
-  box-sizing: border-box;
-}
-.kg-header,
-.kg-heading,
-.kg-toolbar,
-.kg-status,
-.kg-compose-bottom,
-.kg-panel > header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.kg-header,
-.kg-compose-bottom,
-.kg-panel > header {
-  justify-content: space-between;
-}
-.kg-header,
-.kg-toolbar,
-.kg-status,
-.kg-compose-bottom,
-.kg-tags {
-  flex-wrap: wrap;
-}
-.kg-header {
-  position: relative;
-  z-index: 2;
-  gap: 12px;
-}
-.kg-heading {
-  min-width: 0;
-  flex: 1 1 160px;
-}
-.kg-toolbar {
-  justify-content: flex-end;
-  max-width: 100%;
-}
-h1 {
-  font-size: 20px;
-  margin: 0;
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-h2 {
-  font-size: 18px;
-}
-h3 {
-  font-size: 16px;
+  color: var(--el-text-color-primary);
 }
 button,
 summary {
   font: inherit;
+  color: inherit;
   cursor: pointer;
 }
 button:disabled {
@@ -394,33 +375,73 @@ button:focus-visible,
 summary:focus-visible,
 a:focus-visible {
   outline: 2px solid var(--el-color-primary);
-  outline-offset: 3px;
+  outline-offset: 2px;
 }
-.kg-button,
-.kg-icon {
+
+/* Header: one quiet row; the conversation is the page. */
+.kg-header {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 52px;
+  padding: 6px 16px;
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+h1 {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kg-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.kg-ghost {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
   gap: 6px;
-  border: 1px solid var(--el-border-color);
-  border-radius: 7px;
-  padding: 8px 12px;
-  background: var(--el-bg-color);
-  color: inherit;
-  white-space: normal;
-  max-width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  font-size: 13px;
+  color: var(--el-text-color-regular);
+  white-space: nowrap;
 }
-.kg-icon {
-  padding: 8px;
+.kg-ghost--icon {
+  width: 32px;
+  padding: 0;
+  justify-content: center;
 }
-.kg-primary {
+.kg-ghost:hover:not(:disabled),
+.kg-ghost[aria-pressed="true"],
+.kg-history[open] > summary {
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-primary);
+}
+.kg-count {
+  min-width: 18px;
+  padding: 0 5px;
+  box-sizing: border-box;
+  border-radius: 9px;
   background: var(--el-color-primary);
-  color: var(--el-color-white);
-  border-color: var(--el-color-primary);
+  color: var(--on-primary);
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
 }
-.kg-button[aria-pressed="true"] {
-  border-color: var(--el-color-primary);
-  color: var(--el-color-primary);
+.kg-history {
+  position: relative;
 }
 .kg-history summary {
   list-style: none;
@@ -430,267 +451,412 @@ a:focus-visible {
 }
 .kg-history nav {
   position: absolute;
-  z-index: 3;
-  top: calc(100% + 4px);
+  top: calc(100% + 6px);
   inset-inline-end: 0;
-  box-sizing: border-box;
+  z-index: 3;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  width: min(320px, 100%);
-  max-height: min(240px, 40vh);
+  width: min(300px, calc(100vw - 32px));
+  max-height: min(320px, 50vh);
   overflow: auto;
-  padding: 6px;
-  background: var(--el-bg-color);
-  border: 1px solid var(--el-border-color);
-  border-radius: 8px;
+  padding: 4px;
+  box-sizing: border-box;
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 10px;
+  background: var(--el-bg-color-overlay, var(--el-bg-color));
+  box-shadow: 0 8px 24px var(--shadow-md);
 }
 .kg-history a {
-  color: var(--el-color-primary);
-  overflow-wrap: anywhere;
-  padding: 6px 4px;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--el-text-color-primary);
+  text-decoration: none;
 }
-.kg-welcome {
-  margin: auto;
-  max-width: 480px;
-  padding: 36px;
-  text-align: center;
-  line-height: 1.8;
+.kg-history a:hover,
+.kg-history a[aria-current="page"] {
+  background: var(--el-fill-color-light);
 }
-.kg-status {
+.kg-history small {
+  color: var(--el-text-color-secondary);
+  white-space: nowrap;
+}
+.kg-banner {
   margin: 0;
-  font-size: 12px;
+  padding: 8px 16px;
+  font-size: 13px;
+  color: var(--el-color-danger);
+  background: var(--el-color-danger-light-9);
+  overflow-wrap: anywhere;
+}
+.kg-loading {
+  padding: 24px;
+  font-size: 13px;
   color: var(--el-text-color-secondary);
 }
-.kg-pulse {
-  color: var(--el-color-primary);
-}
-.kg-summary {
-  font-size: 13px;
-  margin: 8px 0 0;
-  padding: 10px 14px;
-  line-height: 1.6;
-  background: var(--el-fill-color-light);
-  border-radius: 8px;
-}
+
+/* Conversation column: one reading width shared by thread and composer. */
 .kg-body {
+  position: relative;
   flex: 1;
   display: flex;
   min-height: 0;
-  gap: 20px;
 }
 .kg-chat {
   flex: 1;
   min-width: 0;
   display: flex;
-  justify-content: center;
-  min-height: 0;
-}
-.kg-thread {
-  width: 100%;
-  max-width: 760px;
-  min-width: 0;
-  min-height: 0;
-  display: flex;
   flex-direction: column;
 }
-.kg-messages {
+.kg-scroll {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 8px 0;
 }
-.kg-message {
-  padding: 16px 0;
+.kg-thread,
+.kg-composer {
+  width: 100%;
+  max-width: 768px;
+  margin: 0 auto;
+  padding: 0 24px;
+  box-sizing: border-box;
+}
+.kg-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-height: 100%;
+  padding-block: 24px;
   overflow-wrap: anywhere;
 }
-.kg-message.user {
-  background: var(--el-fill-color-light);
-  padding: 14px 18px;
-  border-radius: 12px;
-  margin: 12px 0;
+.kg-welcome {
+  margin-block: auto;
+  text-align: center;
 }
-.kg-speaker {
-  font-size: 12px;
+.kg-welcome h2 {
+  margin: 0 0 8px;
+  font-size: 22px;
   font-weight: 600;
+}
+.kg-welcome p {
+  max-width: 520px;
+  margin: 0 auto 20px;
+  font-size: 14px;
+  line-height: 1.65;
   color: var(--el-text-color-secondary);
 }
-.kg-markdown {
-  line-height: 1.75;
-  font-size: 14px;
+.kg-suggestions,
+.kg-replies {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
-.kg-markdown :deep(pre) {
+.kg-suggestions {
+  justify-content: center;
+}
+.kg-suggestions button,
+.kg-replies button {
   max-width: 100%;
-  overflow: auto;
+  padding: 7px 14px;
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 18px;
+  background: var(--el-bg-color);
+  font-size: 13px;
+  color: var(--el-text-color-regular);
+  text-align: start;
 }
-.kg-markdown :deep(table) {
-  display: block;
-  overflow: auto;
+.kg-replies button {
+  padding: 4px 12px;
+  font-size: 12.5px;
 }
-.kg-markdown :deep(a) {
+.kg-suggestions button:hover:not(:disabled),
+.kg-replies button:hover {
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-primary);
+}
+.kg-result {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: min(100%, 420px);
+  padding: 10px 14px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 10px;
+  background: var(--el-fill-color-blank, var(--el-bg-color));
+  text-align: start;
+}
+.kg-result:hover {
+  border-color: var(--el-border-color);
+  background: var(--el-fill-color-lighter);
+}
+.kg-result__icon {
+  flex-shrink: 0;
   color: var(--el-color-primary);
 }
-.kg-markdown :deep(img) {
-  max-width: 100%;
+.kg-result__text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+}
+.kg-result strong {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.kg-result small,
+.kg-working,
+.kg-note,
+.kg-hint,
+.kg-composer > small {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
 }
 .kg-working,
-.kg-notice,
-.kg-compose-bottom small {
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-  line-height: 1.6;
+.kg-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
 }
-.kg-error {
-  font-size: 13px;
+.kg-note--alert {
   color: var(--el-color-danger);
-  overflow-wrap: anywhere;
+}
+.kg-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: inherit;
+  color: var(--el-color-primary);
+}
+.kg-link:hover {
+  text-decoration: underline;
+}
+.kg-dots {
+  display: inline-flex;
+  gap: 3px;
+}
+.kg-dots i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: kg-dot 1.2s ease-in-out infinite;
+}
+.kg-dots i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.kg-dots i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+@keyframes kg-dot {
+  0%,
+  80%,
+  100% {
+    opacity: 0.3;
+  }
+  40% {
+    opacity: 1;
+  }
 }
 .kg-composer {
-  position: relative;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  margin-top: 8px;
-  padding: 10px 12px;
-  border: 1px solid var(--el-border-color);
-  border-radius: 12px;
-  background: var(--el-bg-color);
+  padding-bottom: 12px;
 }
-.kg-composer:has(textarea:focus-visible) {
-  outline: 2px solid var(--el-color-primary-light-5);
-  outline-offset: 1px;
-}
-.kg-quick {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.kg-quick button {
-  max-width: 100%;
-  font-size: 12px;
-  color: var(--el-text-color-regular);
-  border: 1px solid var(--el-border-color);
-  background: var(--el-bg-color);
-  border-radius: 16px;
-  padding: 5px 10px;
-}
-.kg-sr {
-  position: absolute;
-  width: 1px;
-  height: 1px;
+.kg-composer :deep(.chat-input-wrapper) {
   padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-  border: 0;
+  border-top: 0;
 }
-textarea {
-  width: 100%;
-  box-sizing: border-box;
-  resize: vertical;
-  min-height: 72px;
-  max-height: 200px;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  color: inherit;
-  padding: 0;
-  margin: 0;
-  font: inherit;
+.kg-composer > small {
+  font-size: 11.5px;
+  text-align: center;
 }
-textarea:focus {
-  outline: none;
-}
+
+/* Report and sources share one side panel; on narrow screens it covers the conversation. */
 .kg-panel {
-  width: 390px;
+  display: flex;
+  flex-direction: column;
+  width: 400px;
   max-width: 45%;
   min-width: 0;
-  overflow-y: auto;
-  padding: 0 16px;
-  border-left: 1px solid var(--el-border-color-lighter);
+  border-inline-start: 1px solid var(--el-border-color-lighter);
+  background: var(--el-bg-color);
 }
 .kg-panel > header {
-  position: sticky;
-  top: 0;
-  background: var(--el-bg-color);
-  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+.kg-tab {
+  height: 30px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+}
+.kg-tab[aria-pressed="true"] {
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-primary);
+  font-weight: 600;
+}
+.kg-close {
+  margin-inline-start: auto;
+}
+.kg-panel__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 20px 24px;
+  overflow-wrap: anywhere;
+}
+.kg-panel__body > .kg-hint {
+  margin: 0 0 8px;
+}
+.kg-summary {
+  margin: 8px 0 4px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--el-fill-color-lighter);
+  font-size: 13px;
+  line-height: 1.6;
 }
 .kg-issue {
-  padding: 18px 0;
+  padding: 16px 0;
   border-bottom: 1px solid var(--el-border-color-lighter);
-  overflow-wrap: anywhere;
+}
+.kg-issue:last-child {
+  border-bottom: 0;
 }
 .kg-tags {
   display: flex;
-  gap: 8px;
-  font-size: 11px;
-  color: var(--el-text-color-secondary);
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 11.5px;
 }
 .kg-tags span {
-  border: 1px solid var(--el-border-color);
-  border-radius: 4px;
-  padding: 3px 6px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-secondary);
+}
+.kg-tags .kg-tag--pending {
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning);
+}
+.kg-tags .kg-tag--confirmed {
+  background: var(--el-color-success-light-9);
+  color: var(--el-color-success);
+}
+.kg-issue h3,
+.kg-original h3 {
+  margin: 10px 0 4px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+dl {
+  margin: 0;
 }
 dt {
-  color: var(--el-text-color-secondary);
+  margin-top: 10px;
   font-size: 12px;
-  margin-top: 12px;
+  color: var(--el-text-color-secondary);
 }
 dd {
-  margin: 4px 0 0;
+  margin: 2px 0 0;
   font-size: 13px;
   line-height: 1.6;
   white-space: pre-wrap;
 }
-.kg-source-link {
-  display: block;
-  text-align: left;
-  color: var(--el-color-primary);
-  background: none;
-  border: 0;
-  padding: 7px 0;
-  font-size: 12px;
-  overflow-wrap: anywhere;
+dd.kg-after {
+  padding: 6px 10px;
+  border-inline-start: 3px solid var(--el-color-primary);
+  border-radius: 0 6px 6px 0;
+  background: var(--el-color-primary-light-9);
 }
-.kg-original-text {
+.kg-source {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+  margin-top: 6px;
+  padding: 4px 6px;
+  margin-inline-start: -6px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  font-size: 12.5px;
+  color: var(--el-color-primary);
+  text-align: start;
+}
+.kg-source svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.kg-source:hover,
+.kg-source[aria-current="true"] {
+  background: var(--el-fill-color-light);
+}
+.kg-original {
+  margin-top: 16px;
+  padding-top: 8px;
+  border-top: 1px solid var(--el-border-color-lighter);
+}
+.kg-original blockquote {
+  margin: 8px 0;
+  padding: 2px 0 2px 12px;
+  border-inline-start: 3px solid var(--el-border-color);
+  font-size: 13px;
+  line-height: 1.7;
   white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  font-size: 12px;
-  line-height: 1.65;
+  color: var(--el-text-color-regular);
 }
 @media (max-width: 800px) {
-  .kg-page {
-    padding: 12px;
-  }
   .kg-header {
-    align-items: flex-start;
+    padding-inline: 8px;
   }
-  .kg-body {
-    flex-direction: column;
-    overflow-y: auto;
+  .kg-ghost__label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
-  .kg-chat {
-    flex: 1 0 400px;
+  .kg-ghost:not(.kg-ghost--icon) {
+    padding: 0 8px;
+  }
+  .kg-thread,
+  .kg-composer {
+    padding-inline: 16px;
+  }
+  /* The covered conversation leaves the tab order and accessibility tree until the panel closes. */
+  .kg-body--panel .kg-chat {
+    visibility: hidden;
   }
   .kg-panel {
+    position: absolute;
+    inset: 0;
+    z-index: 3;
     width: auto;
     max-width: none;
-    border-left: 0;
-    border-top: 1px solid var(--el-border-color);
-    padding: 0 8px;
-    overflow: visible;
-  }
-  .kg-panel > header {
-    position: static;
-  }
-  .kg-compose-bottom small {
-    max-width: 65%;
+    border: 0;
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  * {
-    scroll-behavior: auto;
+  .kg-dots i {
+    animation: none;
   }
 }
 </style>

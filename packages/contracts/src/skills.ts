@@ -7,6 +7,7 @@ export interface SkillInfo {
   description?: string;
   tags: string[];
   enabled: boolean;
+  isPublic: boolean;
   path: string;
   version: string;
   outputType?: string;

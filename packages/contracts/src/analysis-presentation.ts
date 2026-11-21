@@ -19,6 +19,11 @@ export interface AnalysisEvidenceQuestion {
   dataCount?: number;
   error?: string;
   execution?: QueryExecutionDisplayFact;
+  /**
+   * The execution omits the result copies persisted with its query run (rows, datasets, previews,
+   * full content, table); the full facts are read per question through the task's question execution API.
+   */
+  executionDeferred?: true;
 }
 
 export interface AnalysisActivity {
@@ -69,6 +74,12 @@ export interface AnalysisActivity {
   probeTool?: "probe_classes" | "probe_class_data";
   probeArguments?: Record<string, unknown>;
   dispatchId?: string;
+  /**
+   * The supervisor tool call that produced this activity, as it appears in the turn's public
+   * messages. Display identity only; absent for worker-side activities (their calls belong to the
+   * worker trace) and for records saved before it was recorded.
+   */
+  toolCallId?: string;
 }
 
 export interface AnalysisSection {

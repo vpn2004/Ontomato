@@ -4,6 +4,7 @@ import { deleteThreadTurnRuns, startStandardTurnRun } from "../turn-run/turn-run
 import { deleteThreadChatRenderSnapshots } from "./chat-snapshot-store";
 import { deleteThreadExecutionEvents } from "./execution-event-store";
 import { HttpError } from "../../utils/errors";
+import { deleteReportSessions } from "./report/store";
 
 export async function createThreadPlaceholder(
   threadId: string,
@@ -62,6 +63,7 @@ export const startStandardTurn = (input: Parameters<typeof startStandardTurnRun>
   startStandardTurnRun(input);
 
 export async function deleteThreadBusinessData(threadId: string): Promise<void> {
+  await deleteReportSessions(threadId);
   await deleteThreadTurnRuns(threadId);
   await deleteThreadExecutionEvents(threadId);
   await deleteThreadChatRenderSnapshots(threadId);

@@ -111,6 +111,7 @@ public class ABCProgramDashboardMakerSkillTools {
 			} else {
 				ret = "Execution print output is empty";
 			}
+			ret += pythonExecuteResult.partialResultNotice();
 		} catch (Exception e) {
 			log.error(e.getMessage(), e);
 			ret = "Execution error: " + e.getMessage();

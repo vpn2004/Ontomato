@@ -50,6 +50,9 @@ function datasetMarkdown(dataset: any, index: number): string {
   return [
     tApp("queryFixed.118", { v0: (index + 1), v1: (text(dataset?.title) || tApp("queryFixed.132")) }),
     tApp("queryFixed.119", { v0: (rows.length) }),
+    dataset?.truncated === true
+      ? tApp("queryFixed.281", { rowLimit: dataset.rowLimit, hint: dataset.truncationHint })
+      : "",
     columns.length > 0 ? tApp("queryFixed.120", { v0: (columns.slice(0, 12).join(", ")) }) : "",
     rows.length > 0 ? tApp("queryFixed.121", { v0: (truncateText(JSON.stringify(rows.slice(0, 2)), 500)) }) : "",
   ]

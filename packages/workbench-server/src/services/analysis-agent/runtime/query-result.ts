@@ -1,4 +1,8 @@
-import type { QueryFactDatasetPreview as QueryResultDatasetPreview } from "@ontomato/contracts/query-execution";
+import type { ResultSourceWindows } from "@ontomato/contracts/result-window";
+import type {
+  QueryFactDatasetPreview as QueryResultDatasetPreview,
+  ResultTruncation,
+} from "@ontomato/contracts/query-execution";
 import type { Dataset, FieldDisplayPlan } from "../../data-query/adapter";
 import { toQueryExecutionFact } from "../../data-query/query-fact";
 import type { QueryRun } from "../../data-query/query-run-store";
@@ -10,7 +14,8 @@ export type QueryResultRow = Record<string, unknown>;
 export type QueryResultData = QueryResultRow[] | QueryResultRow[][];
 export type QueryResultDsl = unknown | unknown[];
 
-export interface QueryResultDatasetEntry extends Omit<QueryResultDatasetPreview, "markdownTable"> {
+export interface QueryResultDatasetEntry
+  extends Omit<QueryResultDatasetPreview, "markdownTable">, Partial<ResultTruncation>, ResultSourceWindows {
   index: number;
   data: QueryResultRow[];
   dsl?: unknown;
@@ -65,7 +70,8 @@ export function expandQueryResultDatasetEntries(options: {
     return datasets
       .map((dataset, index) => {
         const rows = Array.isArray(dataset?.data) ? dataset.data : [];
-        if (rows.length === 0) return null;
+        // A partial dataset stays evidence even without rows: zero rows do not prove "no data".
+        if (rows.length === 0 && !dataset.truncated && !dataset.sourceWindows?.length) return null;
         return {
           index,
           title:
@@ -79,6 +85,10 @@ export function expandQueryResultDatasetEntries(options: {
           markdownTable: datasetPreviews?.[index]?.markdownTable,
           dataCount: rows.length,
           fieldDisplayPlan: dataset.fieldDisplayPlan,
+          truncated: dataset.truncated,
+          rowLimit: dataset.rowLimit,
+          truncationHint: dataset.truncationHint,
+          sourceWindows: dataset.sourceWindows,
         } satisfies QueryResultDatasetEntry;
       })
       .filter(Boolean) as QueryResultDatasetEntry[];

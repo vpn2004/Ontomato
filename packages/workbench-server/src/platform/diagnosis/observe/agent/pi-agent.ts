@@ -17,7 +17,7 @@ import {
   type HarnessTurnStatus,
 } from "../../../../infrastructure/harness-sessions";
 import { messagesToSessionHistory } from "./session-history-view";
-import { SessionResponseStream } from "./session-stream";
+import { SessionResponseStream } from "../../../../utils/response-stream";
 import { diagnosisSessions } from "./diagnosis-sessions";
 import { DIAGNOSIS_COMPACTION_PROMPT_KEYS, diagnosisSummaryNote } from "./compaction/index";
 import { bindResponseAgent, createManagedSession, type ManagedSession } from "./session-runtime";

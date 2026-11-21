@@ -233,7 +233,7 @@ public class CheckServiceImpl implements CheckService {
 				}
 			} catch (Exception e) {}
 			BusinessConfig businessConfig = businessConfigService.get(domainId);
-			String userMessage = UserMessageUtil.getDslDescriberUserMessage(sessionId, inputDslStr, classes, dataAdapterRegistry.create(businessConfig, null), jsonRule, lang, langService);
+			String userMessage = UserMessageUtil.getDslDescriberUserMessage(sessionId, inputDslStr, classes, dataAdapterRegistry.create(businessConfig, jsonRule), jsonRule, lang, langService);
 			
 			OriginalQuestion originalQuestion = new OriginalQuestion();
 			originalQuestion.setId(sessionId);

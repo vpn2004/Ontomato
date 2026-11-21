@@ -57,6 +57,9 @@ export interface ModelConfig {
   modelName: string;
   /** Platform-owned output cap for this resolved model. */
   maxTokens?: number;
+  /** Optional per-call budget; the owning run's cancellation and total budget still apply. */
+  timeoutMs?: number;
+  maxRetries?: number;
   /** Validated provider-specific request fields forwarded to ChatOpenAI. */
   modelKwargs?: Record<string, unknown>;
   /** Omitted when the caller does not want this loop's calls logged. */

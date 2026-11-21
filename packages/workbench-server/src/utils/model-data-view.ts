@@ -1,6 +1,10 @@
+import type { ResultSourceWindows } from "@ontomato/contracts/result-window";
+import type { ResultTruncation } from "@ontomato/contracts/query-execution";
+
 const DEFAULT_MAX_CHARS = 6000;
 
-export interface ModelDataView<T> {
+/** A sampled view of rows; the truncation marker is present only when the rows are a partial result. */
+export interface ModelDataView<T> extends Partial<ResultTruncation>, ResultSourceWindows {
   totalRows: number;
   includedRows: number;
   omittedRows: number;
@@ -29,6 +33,10 @@ function createView<T>(rows: readonly T[], headCount: number, tailCount: number)
 /**
  * Builds one model-facing view for one tabular dataset.
  *
+ * `isComplete` tells the model whether it sees the whole answer. Rows of a partial result never are,
+ * so their view has `isComplete: false` and carries the data engine's truncation marker; the row
+ * counts still describe only the given rows, and `rowLimit` is the cap that was reached, not a total.
+ *
  * Complete datasets are returned as-is. Oversized datasets retain contiguous
  * rows from both ends, balancing the two sides by serialized character size.
  * Rows are never split. Partial views always preserve both boundaries. If that
@@ -36,12 +44,27 @@ function createView<T>(rows: readonly T[], headCount: number, tailCount: number)
  */
 export function buildModelDataView<T>(
   rows: readonly T[],
-  { maxChars = DEFAULT_MAX_CHARS }: { maxChars?: number } = {}
+  {
+    maxChars = DEFAULT_MAX_CHARS,
+    truncation,
+  }: { maxChars?: number; truncation?: Partial<ResultTruncation> & ResultSourceWindows } = {}
 ): ModelDataView<T> {
   if (!Number.isSafeInteger(maxChars) || maxChars <= 0) {
     throw new RangeError("maxChars must be a positive safe integer");
   }
+  const view = { ...sampleRows(rows, maxChars), ...(truncation?.sourceWindows?.length ? { sourceWindows: truncation.sourceWindows } : {}) };
+  return truncation?.truncated
+    ? {
+        ...view,
+        isComplete: false,
+        truncated: true,
+        rowLimit: truncation.rowLimit,
+        truncationHint: truncation.truncationHint,
+      }
+    : view;
+}
 
+function sampleRows<T>(rows: readonly T[], maxChars: number): ModelDataView<T> {
   const complete = createView(rows, rows.length, 0);
   if (JSON.stringify(complete).length <= maxChars || rows.length <= 1) {
     return complete;

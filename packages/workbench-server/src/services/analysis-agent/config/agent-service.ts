@@ -1,4 +1,4 @@
-import type { AnalysisAgent } from "@ontomato/contracts/analysis-agent";
+import type { AgentLineupEntry, AnalysisAgent } from "@ontomato/contracts/analysis-agent";
 import pg from "pg";
 import { createLogger } from "../../../logging/logger";
 import {
@@ -13,6 +13,8 @@ import { renderPrompt } from "../../../core/prompts/loader";
 import { SkillCategory, SkillType } from "../../../core/skills/constants";
 import { skillRegistryManager } from "../../../core/skills/registry/manager";
 import { t, tApp } from "../../../i18n";
+import { DEFAULT_ANALYSIS_GRAPH_SCOPE, normalizeAnalysisGraphScope } from "./graph-scope";
+import { placeQaAgent, resolveLineupSortOrders } from "./agent-lineup";
 
 const logger = createLogger("analysis-agent-service");
 
@@ -55,7 +57,10 @@ interface AnalysisAgentRow {
   enabled_skill_ids: string[] | null;
   enabled_visualization_skill_ids: string[] | null;
   enabled_mcp_service_names: string[] | null;
+  enabled_action_ids: string[] | null;
+  enabled_metric_view_ids: string[] | null;
   class_names: string[] | null;
+  graph_scope: unknown;
   is_enabled: boolean;
   sort_order: number;
   created_at: string;
@@ -88,32 +93,21 @@ export class AnalysisAgentService {
       await client.query("BEGIN");
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`seed-agent-${domainId}`]);
       const existing = await client.query(
-        `SELECT id, name FROM ${qualifiedTable("analysis_agents")}
-         WHERE sort_order = $1 AND domain_id = $2 LIMIT 1`,
-        [DEFAULT_AGENT_SORT_ORDER, domainId]
+        `SELECT id FROM ${qualifiedTable("analysis_agents")}
+         WHERE domain_id = $1 LIMIT 1`,
+        [domainId]
       );
-      const name = defaultAgentName();
-      const description = defaultAgentDescription();
-
-      if ((existing.rowCount ?? 0) > 0) {
-        const row = existing.rows[0];
-        if (row.name !== name) {
-          await client.query(
-            `UPDATE ${qualifiedTable("analysis_agents")}
-             SET name = $1, description = $2, updated_at = $3
-             WHERE id = $4 AND domain_id = $5`,
-            [name, description, Date.now(), row.id, domainId]
-          );
-        }
-      } else {
+      if ((existing.rowCount ?? 0) === 0) {
+        const name = defaultAgentName();
+        const description = defaultAgentDescription();
         const now = Date.now();
         await client.query(
           `INSERT INTO ${qualifiedTable("analysis_agents")}
            (id, name, description, analysis_dimension_prompt, summarizer_prompt,
             conclusion_maker_prompt, enabled_skill_ids, enabled_visualization_skill_ids,
-            enabled_mcp_service_names, class_names, is_enabled, sort_order, domain_id,
-            report_deliverable_enabled, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+             enabled_mcp_service_names, class_names, is_enabled, sort_order, domain_id,
+             report_deliverable_enabled, graph_scope, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
           [
             uuidv4(),
             name,
@@ -129,6 +123,7 @@ export class AnalysisAgentService {
             DEFAULT_AGENT_SORT_ORDER,
             domainId,
             true,
+            DEFAULT_ANALYSIS_GRAPH_SCOPE,
             now,
             now,
           ]
@@ -165,6 +160,57 @@ export class AnalysisAgentService {
     return result.rows.map(mapAgentRow);
   }
 
+  /** All agents of the domain, enabled or not, with the built-in Q&A agent placed among them. */
+  async listAgentLineup(domainId: string): Promise<AgentLineupEntry[]> {
+    const agents = await this.listAgents(domainId);
+    const qa = await this.pool.query<{ sort_order: number }>(
+      `SELECT sort_order FROM ${qualifiedTable("qa_agent_sort_orders")} WHERE domain_id = $1`,
+      [domainId]
+    );
+    return placeQaAgent(agents, qa.rows[0]?.sort_order ?? null);
+  }
+
+  /** The only writer of agent order: one request saves the whole lineup, Q&A included. */
+  async saveAgentLineup(domainId: string, order: readonly string[]): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`agent-lineup-${domainId}`]);
+      const current = await client.query<{ id: string }>(
+        `SELECT id FROM ${qualifiedTable("analysis_agents")} WHERE domain_id = $1 FOR UPDATE`,
+        [domainId]
+      );
+      const { qaSortOrder, agentSortOrders } = resolveLineupSortOrders(
+        order,
+        current.rows.map((row) => row.id)
+      );
+      await client.query(
+        `UPDATE ${qualifiedTable("analysis_agents")} AS agent
+         SET sort_order = lineup.sort_order
+         FROM unnest($2::text[], $3::int[]) AS lineup(id, sort_order)
+         WHERE agent.domain_id = $1 AND agent.id = lineup.id`,
+        [
+          domainId,
+          agentSortOrders.map((entry) => entry.id),
+          agentSortOrders.map((entry) => entry.sortOrder),
+        ]
+      );
+      await client.query(
+        `INSERT INTO ${qualifiedTable("qa_agent_sort_orders")} (domain_id, sort_order, updated_at)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (domain_id) DO UPDATE
+           SET sort_order = EXCLUDED.sort_order, updated_at = EXCLUDED.updated_at`,
+        [domainId, qaSortOrder, Date.now()]
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async getAgent(id: string, domainId?: string): Promise<AnalysisAgent | null> {
     const result = await this.pool.query(
       `SELECT * FROM ${qualifiedTable("analysis_agents")} WHERE id = $1 AND domain_id = $2`,
@@ -174,7 +220,10 @@ export class AnalysisAgentService {
   }
 
   async createAgent(
-    agent: Omit<AnalysisAgent, "id" | "createdAt" | "updatedAt" | "reportDeliverableEnabled"> & {
+    agent: Omit<
+      AnalysisAgent,
+      "id" | "createdAt" | "updatedAt" | "reportDeliverableEnabled" | "sortOrder"
+    > & {
       reportDeliverableEnabled?: boolean;
     },
     domainId: string
@@ -185,7 +234,10 @@ export class AnalysisAgentService {
         ? await this.getDefaultVisualizationSkillIds(domainId)
         : agent.enabledVisualizationSkillIds;
     const enabledMcpServiceNames = normalizeStringList(agent.enabledMcpServiceNames);
+    const enabledActionIds = normalizeStringList(agent.enabledActionIds);
+    const enabledMetricViewIds = normalizeStringList(agent.enabledMetricViewIds);
     const classNames = normalizeStringList(agent.classNames);
+    const graphScope = normalizeAnalysisGraphScope(agent.graphScope);
     await this.validateSkillSelections(enabledSkillIds, SkillCategory.ANALYSIS, domainId);
     await this.validateSkillSelections(
       enabledVisualizationSkillIds,
@@ -201,8 +253,9 @@ export class AnalysisAgentService {
         analysis_dimension_prompt, summarizer_prompt,
         conclusion_maker_prompt, enabled_skill_ids, enabled_visualization_skill_ids,
         enabled_mcp_service_names, class_names, is_enabled, sort_order, domain_id,
-        report_deliverable_enabled, hot_report_enabled, summary_position, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)`,
+         report_deliverable_enabled, hot_report_enabled, summary_position, graph_scope, created_at, updated_at,
+         enabled_action_ids, enabled_metric_view_ids)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)`,
       [
         id,
         agent.name,
@@ -220,15 +273,18 @@ export class AnalysisAgentService {
         enabledMcpServiceNames,
         classNames,
         agent.isEnabled !== false ? true : false,
-        agent.sortOrder ?? 0,
+        DEFAULT_AGENT_SORT_ORDER,
         domainId,
         agent.reportDeliverableEnabled ?? true,
         agent.hotReportEnabled ?? true,
         isAnalysisReportSummaryPosition(agent.summaryPosition)
           ? agent.summaryPosition
           : DEFAULT_ANALYSIS_REPORT_SUMMARY_POSITION,
+        graphScope,
         now,
         now,
+        enabledActionIds,
+        enabledMetricViewIds,
       ]
     );
     logger.info(tApp("analysis.config.agent-service.3", { id: id, name: agent.name }));
@@ -241,7 +297,8 @@ export class AnalysisAgentService {
     domainId?: string
   ): Promise<AnalysisAgent | null> {
     if (updates.enabledSkillIds !== undefined) {
-      await this.validateSkillSelections(updates.enabledSkillIds, SkillCategory.ANALYSIS, domainId);
+      const existing = await this.getAgent(id, domainId);
+      await this.validateSkillSelections(updates.enabledSkillIds, SkillCategory.ANALYSIS, domainId, existing?.enabledSkillIds);
     }
     if (updates.enabledVisualizationSkillIds !== undefined) {
       await this.validateSkillSelections(
@@ -253,8 +310,17 @@ export class AnalysisAgentService {
     if (updates.enabledMcpServiceNames !== undefined) {
       updates.enabledMcpServiceNames = normalizeStringList(updates.enabledMcpServiceNames);
     }
+    if (updates.enabledActionIds !== undefined) {
+      updates.enabledActionIds = normalizeStringList(updates.enabledActionIds);
+    }
+    if (updates.enabledMetricViewIds !== undefined) {
+      updates.enabledMetricViewIds = normalizeStringList(updates.enabledMetricViewIds);
+    }
     if (updates.classNames !== undefined) {
       updates.classNames = normalizeStringList(updates.classNames);
+    }
+    if (updates.graphScope !== undefined) {
+      updates.graphScope = normalizeAnalysisGraphScope(updates.graphScope);
     }
 
     const now = Date.now();
@@ -294,6 +360,14 @@ export class AnalysisAgentService {
       vals.push(updates.enabledMcpServiceNames);
       sets.push(`enabled_mcp_service_names = $${idx++}`);
     }
+    if (updates.enabledActionIds !== undefined) {
+      vals.push(updates.enabledActionIds);
+      sets.push(`enabled_action_ids = $${idx++}`);
+    }
+    if (updates.enabledMetricViewIds !== undefined) {
+      vals.push(updates.enabledMetricViewIds);
+      sets.push(`enabled_metric_view_ids = $${idx++}`);
+    }
     if (updates.loopPrompt !== undefined) {
       vals.push(updates.loopPrompt);
       sets.push(`loop_prompt = $${idx++}`);
@@ -330,13 +404,13 @@ export class AnalysisAgentService {
       vals.push(updates.classNames);
       sets.push(`class_names = $${idx++}`);
     }
+    if (updates.graphScope !== undefined) {
+      vals.push(updates.graphScope);
+      sets.push(`graph_scope = $${idx++}`);
+    }
     if (updates.isEnabled !== undefined) {
       vals.push(updates.isEnabled);
       sets.push(`is_enabled = $${idx++}`);
-    }
-    if (updates.sortOrder !== undefined) {
-      vals.push(updates.sortOrder);
-      sets.push(`sort_order = $${idx++}`);
     }
 
     if (sets.length === 1) return this.getAgent(id, domainId);
@@ -391,7 +465,8 @@ export class AnalysisAgentService {
   private async validateSkillSelections(
     skillIds: string[],
     category: (typeof SkillCategory)[keyof typeof SkillCategory],
-    domainId?: string
+    domainId?: string,
+    previousSkillIds: readonly string[] = []
   ): Promise<void> {
     if (!Array.isArray(skillIds) || skillIds.some((skillId) => typeof skillId !== "string")) {
       throw new InvalidAgentSkillSelectionError(tApp("analysis.config.agent-service.8"));
@@ -409,6 +484,9 @@ export class AnalysisAgentService {
       const skill = catalog.get(skillId);
       if (!skill) {
         throw new InvalidAgentSkillSelectionError(tApp("analysis.config.agent-service.9", { skillId: skillId }));
+      }
+      if (skillId === "generate-ppt" && !registry.isSkillEnabled(skillId) && !previousSkillIds.includes(skillId)) {
+        throw new InvalidAgentSkillSelectionError(tApp("skills.resolve.disabled", {id: skillId}));
       }
       if (skill.manifest.category !== category) {
         throw new InvalidAgentSkillSelectionError(
@@ -457,7 +535,10 @@ function mapAgentRow(row: AnalysisAgentRow): AnalysisAgent {
     enabledSkillIds: row.enabled_skill_ids || [],
     enabledVisualizationSkillIds: row.enabled_visualization_skill_ids || [],
     enabledMcpServiceNames: row.enabled_mcp_service_names || [],
+    enabledActionIds: row.enabled_action_ids || [],
+    enabledMetricViewIds: row.enabled_metric_view_ids || [],
     classNames: row.class_names || [],
+    graphScope: normalizeAnalysisGraphScope(row.graph_scope),
     isEnabled: row.is_enabled,
     sortOrder: row.sort_order ?? 0,
     createdAt: parseInt(row.created_at, 10),

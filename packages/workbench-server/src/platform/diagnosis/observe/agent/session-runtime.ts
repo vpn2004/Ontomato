@@ -6,7 +6,7 @@ import type { DiagnosisCallerIdentity } from "./tools/caller-identity";
 import { createDiagnosisRuntimeCapabilities } from "./runtime-registry";
 import { sessionSystemPrompt } from "./prompt-context";
 import { createDispatchAgentTool } from "./tools/dispatch-agent-tool";
-import type { SessionResponseStream } from "./session-stream";
+import type { SessionResponseStream } from "../../../../utils/response-stream";
 
 export interface ManagedSession {
   sessionId: string;

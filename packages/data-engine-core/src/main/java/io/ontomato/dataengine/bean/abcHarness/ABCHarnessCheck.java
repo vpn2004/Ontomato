@@ -16,5 +16,7 @@ public class ABCHarnessCheck {
 	private String lang;
 	private Long createTimestamp;
 	private Boolean finished;
+	private String phase;
+	private Integer totalPrograms;
 	
 }

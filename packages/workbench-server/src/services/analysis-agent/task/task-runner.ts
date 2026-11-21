@@ -55,6 +55,8 @@ export interface AnalysisTaskRunRequest {
   verifiedIdentity?: Pick<RequestIdentity, "userId" | "domainId">;
   /** The user API key for the MCP entry; page and scheduler use the token on the task row */
   apiKey?: string;
+  /** Name of the verified caller of a regular-session turn, given to the agent */
+  userName?: string;
   /** External cancellation trigger provided by the entry; the AbortController stays with the orchestrator */
   cancelSignal?: AbortSignal;
   /** Abort timeout in milliseconds; on expiry treated as cancellation, with the reason written into the terminal state */
@@ -177,6 +179,7 @@ async function executeRun(
       agentId: task.agentId,
       token: task.token || "",
       apiKey: request.apiKey,
+      userName: request.userName,
       onEvent: (event) => emitRunEvent(task.id, entry, event),
       signal: controller.signal,
       conversationTurn: request.conversationTurn,
@@ -187,8 +190,10 @@ async function executeRun(
         analysisDimensionPrompt: agent.analysisDimensionPrompt,
         enabledSkillIds: agent.enabledSkillIds,
         enabledVisualizationSkillIds: agent.enabledVisualizationSkillIds,
-        reportDeliverableEnabled: agent.reportDeliverableEnabled,
-      },
+         reportDeliverableEnabled: agent.reportDeliverableEnabled,
+        graphScope: task.graphScopeSnapshot || agent.graphScope,
+        classNames: task.classNamesSnapshot || agent.classNames,
+       },
     });
 
     if (controller.signal.aborted && artifacts?.runState.status !== "completed")
@@ -323,7 +328,10 @@ async function persistTermination(
   entry: ActiveAnalysisRun
 ): Promise<void> {
   const identity = entry.identity;
-  const task = await getAnalysisTaskService().getTask(request.task.id, request.task.domainId);
+  const task = await getAnalysisTaskService().getTask(request.task.id, request.task.domainId, {
+    payload: "full",
+    runs: "meta",
+  });
   // Only while the current task row still belongs to this run does it hold this run's written body and acceptance sequence;
   // once superseded, the run neither borrows the new run's body/sequence nor rewrites the terminal state the new run has already settled.
   const belongsToRun = task

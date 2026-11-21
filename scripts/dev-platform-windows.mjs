@@ -8,7 +8,8 @@
 // to reuse Unix cwd logic; command lines are parsed per Windows quoting/escaping rules
 // (https://learn.microsoft.com/en-us/cpp/c-language/parsing-c-command-line-arguments).
 import { spawnSync } from "node:child_process";
-import { join } from "node:path";
+import { readFileSync, statSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 
 // Windows path comparison: case-insensitive, / and \ equivalent, duplicate and trailing separators collapsed; spaces are path content, not delimiters.
 export function windowsPathKey(value) {
@@ -92,7 +93,19 @@ function flagValue(argv, flag) {
 }
 // Only an exact classpath entry matching this checkout's .dev/conf counts as RAGMain, preventing -cp prefix collisions or textual mentions.
 function classpathHasDir(argv, dir) {
-  const value = flagValue(argv, "-cp") ?? flagValue(argv, "-classpath");
+  let value = flagValue(argv, "-cp") ?? flagValue(argv, "-classpath");
+  // Spring Boot writes long Windows classpaths as one quoted, escaped argument in a temporary file.
+  // Relative files have an unknown JVM working directory; unreadable or unfamiliar formats are not claimed.
+  if (value?.startsWith("@")) {
+    const file = value.slice(1);
+    try {
+      if (!isAbsolute(file) || statSync(file).size > 1024 * 1024) return false;
+      value = JSON.parse(readFileSync(file, "utf8").trim());
+      if (typeof value !== "string") return false;
+    } catch {
+      return false;
+    }
+  }
   return value !== undefined && value.split(";").some((entry) => windowsPathEquals(entry, dir));
 }
 function mavenProjectRoot(argv) {
@@ -253,7 +266,7 @@ export function windowsListeningPids(port) {
 // no taskkill /IM, no kill by name/port, and no recursive killing of unknown descendants.
 // exited/reused can be safely skipped; failed indicates unconfirmed identity or stop failure.
 const STOP = PS_HEADER + `
-$targets = @([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:DEV_STACK_WIN_TARGETS)) | ConvertFrom-Json)
+$targets = ConvertFrom-Json -InputObject ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:DEV_STACK_WIN_TARGETS)))
 $stopped = @(); $exited = @(); $reused = @(); $failed = @()
 foreach ($target in $targets) {
   $id = [int]$target.pid

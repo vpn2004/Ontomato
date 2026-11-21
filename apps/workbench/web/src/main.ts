@@ -4,8 +4,8 @@ import "./theme.css";
 import "@ontomato/workbench-ui/styles/style.css";
 import "./narrow-dialogs.css";
 import "@ontomato/workbench-ui/styles/admin-common.css";
-import en from "element-plus/es/locale/lang/en";
-import publicEn from "@ontomato/workbench-ui/locales/en";
+import { workbenchI18n } from "@ontomato/workbench-ui/i18n";
+import { language } from "./language";
 import {
   adminGroups,
   AdminLayout,
@@ -56,23 +56,15 @@ const adminLayout: AdminLayoutConfig = {
 };
 
 startWorkbenchWeb({
-  language: {
-    supported: ["en"],
-    defaultLocale: "en",
-    initialLocale: "en",
-    switchEnabled: false,
-    save: null,
-    messages: { en: publicEn },
-    elementLocale: () => en,
-  },
+  language,
   auth: anonymousAuthHost,
   errorPunctuation: { detailSeparator: ":", listSeparator: ";" },
   ontologyManagerEntry: {
     themeMessage: "ontomato-theme",
-    localeMessage: null,
-    frameTitle: "Ontology Manager",
-    missingUrlTitle: "Ontology manager address not configured",
-    missingUrlDescription: "Please set ONTOLOGY_MANAGER_URL in the Ontomato service and redeploy.",
+    localeMessage: "ontomato-locale",
+    get frameTitle() { return workbenchI18n().global.locale.value === "zh-CN" ? "本体管理器" : "Ontology Manager"; },
+    get missingUrlTitle() { return workbenchI18n().global.locale.value === "zh-CN" ? "尚未配置本体管理器地址" : "Ontology manager address not configured"; },
+    get missingUrlDescription() { return workbenchI18n().global.locale.value === "zh-CN" ? "请在 Ontomato 服务中设置 ONTOLOGY_MANAGER_URL 并重新部署。" : "Please set ONTOLOGY_MANAGER_URL in the Ontomato service and redeploy."; },
   },
   content: workbenchContent,
   // The open-source /observe has no permission gate: the turn diagnosis entry is visible to all users.

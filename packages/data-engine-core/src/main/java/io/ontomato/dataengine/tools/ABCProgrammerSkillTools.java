@@ -29,6 +29,8 @@ import io.ontomato.dataengine.service.BusinessConfigService;
 import io.ontomato.dataengine.service.PythonExecuteService;
 import io.ontomato.dataengine.service.sys.bean.permission.UserDataPermission;
 import io.ontomato.dataengine.util.DBSchemaUtil;
+import io.ontomato.dataengine.util.DslRuleUtil;
+import io.ontomato.dataengine.dataAdapter.DataAdapterRegistry;
 
 import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
@@ -43,6 +45,9 @@ public class ABCProgrammerSkillTools {
 	
 	@Autowired
 	private BusinessConfigService businessConfigService;
+
+	@Autowired
+	private DataAdapterRegistry dataAdapterRegistry;
 	
 	@Autowired
 	private ABCHarnessTaskService abcHarnessTaskService;
@@ -107,6 +112,7 @@ public class ABCProgrammerSkillTools {
 			} else {
 				ret = "Execution print output is empty";
 			}
+			ret += pythonExecuteResult.partialResultNotice();
 		} catch (Exception e) {
 			log.error(e.getMessage(), e);
 			ret = "Execution error: " + e.getMessage();
@@ -150,19 +156,12 @@ public class ABCProgrammerSkillTools {
 				try {
 					List<ABCHarnessProgramOutKeyRef> okrs = new ArrayList<ABCHarnessProgramOutKeyRef>();
 					for (int i = 0; i < outKeyRefs.size(); i++) {
-						Map colRef = outKeyRefs.get(i);
-						ABCHarnessProgramOutKeyRef okr = new ABCHarnessProgramOutKeyRef();
-						okr.setKey((String)colRef.get("key"));
-						okr.setClassName(DBSchemaUtil.normalizeClassName((String)colRef.get("className"), classDefs));
-						okr.setAttrName((String)colRef.get("attrName"));
-						okr.setAsGroupBy((Boolean)colRef.get("asGroupBy"));
-						okr.setStatCal((Boolean)colRef.get("statCal"));
-						okrs.add(okr);
+						okrs.add(applyOutKeyRef(outKeyRefs.get(i), i, classDefs));
 					}
 					program.setOutKeyRefs(okrs);
 				} catch (Exception e) {
 					log.error(e.getMessage(), e);
-					throw new Exception("Error in the output attribute sources");
+					throw new Exception("Error in the output attribute sources: " + e.getMessage());
 				}
 				
 				Map<String, Set<String>> classAttrMap = new HashMap<String, Set<String>>();
@@ -207,6 +206,7 @@ public class ABCProgrammerSkillTools {
 				retMessage.put("data", answer);
 				retMessage.put("code", program.getCode());
 				retMessage.put("outKeyRefs", program.getOutKeyRefs());
+				execution.markCompleteness(retMessage);
 				
 				ABCHarnessTaskMessage message = new ABCHarnessTaskMessage();
 				message.setSessionId(sessionId);
@@ -237,6 +237,143 @@ public class ABCProgrammerSkillTools {
 			abcHarnessTaskService.pushMessage(message);
 		} catch (Exception e) {
 			log.error(e.getMessage(), e);
+		}
+	}
+
+	/**
+	 * Build the sub-query shape the DSL rule/example builders expect, from the class names the
+	 * programmer is about to use. All C-step features are requested; the attribute types of the
+	 * named classes decide which condition rules (text/vector/timeseries) are actually included.
+	 */
+	/** Map one model-supplied output key reference onto a typed {@link ABCHarnessProgramOutKeyRef}. */
+	static ABCHarnessProgramOutKeyRef applyOutKeyRef(Map colRef, int index, List<Map<String, Object>> classDefs) {
+		ABCHarnessProgramOutKeyRef okr = new ABCHarnessProgramOutKeyRef();
+		okr.setKey((String) colRef.get("key"));
+		okr.setClassName(DBSchemaUtil.normalizeClassName((String) colRef.get("className"), classDefs));
+		okr.setAttrName((String) colRef.get("attrName"));
+		okr.setAsGroupBy(asBoolean(colRef.get("asGroupBy"), "asGroupBy", index));
+		okr.setStatCal(asBoolean(colRef.get("statCal"), "statCal", index));
+		return okr;
+	}
+
+	/**
+	 * Read a flag from the model's output strictly enough to catch a real typo, but tolerantly enough to
+	 * accept the string and number forms a model emits ("true", "1"). A value that is neither a boolean
+	 * nor one of those forms fails with the exact {@code outputKeyRefs[i].<key>} named, instead of a bare
+	 * cast error that does not say which field was wrong.
+	 */
+	static boolean asBoolean(Object value, String key, int index) {
+		if (value == null) {
+			return false;
+		}
+		if (value instanceof Boolean b) {
+			return b;
+		}
+		if (value instanceof Number n) {
+			return n.doubleValue() != 0d;
+		}
+		String s = String.valueOf(value).trim();
+		if ("true".equalsIgnoreCase(s) || "1".equals(s) || "yes".equalsIgnoreCase(s)) {
+			return true;
+		}
+		if (s.isEmpty() || "false".equalsIgnoreCase(s) || "0".equals(s) || "no".equalsIgnoreCase(s)) {
+			return false;
+		}
+		throw new IllegalArgumentException("outputKeyRefs[" + index + "]." + key
+				+ " must be a boolean (true/false), but was \"" + s + "\"");
+	}
+
+    @Tool("Prepare a query in one call: get the requested classes' attributes, their direct relationships, "
+            + "the DSL syntax, a worked example and current source constraints from one domain snapshot. "
+            + "Prefer this to separate schema, relationship, syntax and example calls. "
+            + "Request only the classes needed now; use the existing exploration tools for missing definitions later.")
+    public String getQueryContext(@P("non-empty array of object class names needed for the next query") List<String> classNames) {
+        try {
+            if (classNames == null || classNames.isEmpty()) throw new IllegalArgumentException("Specify the classes needed for the next query");
+            var context = AgentCallContext.current();
+            Map<String, Object> jsonRule = jsonRuleDao.query(context.getDomainId());
+            List<Map<String, Object>> defs = (List<Map<String, Object>>) jsonRule.get("classDef");
+            List<String> names = classNames.stream().map(name -> {
+                if (name == null || name.isBlank()) throw new IllegalArgumentException("Class names must not be blank");
+                String normalized = DBSchemaUtil.normalizeClassName(name.trim(), defs);
+                if (defs.stream().noneMatch(def -> normalized.equals(def.get("className")))) {
+                    throw new IllegalArgumentException("Unknown object class: " + name);
+                }
+                return normalized;
+            }).distinct().toList();
+            Map<String, Object> selected = new java.util.LinkedHashMap<>(jsonRule);
+            selected.put("classDef", defs.stream().filter(def -> names.contains(def.get("className"))).toList());
+            Map<String, Object> direct = new java.util.LinkedHashMap<>();
+            ((Map<String, Map<String, Object>>) jsonRule.get("relationship_rule")).forEach((key, rel) -> {
+                if (names.contains(rel.get("fromclass")) || names.contains(rel.get("toclass"))) direct.put(key, rel);
+            });
+            selected.put("relationship_rule", direct);
+            var schema = DBSchemaUtil.getDBSchema(selected, null, false);
+            var adapter = dataAdapterRegistry.create(businessConfigService.get(context.getDomainId()), jsonRule);
+            String example = adapter.queryPlanningExample(names);
+            if (example == null || example.isBlank()) example = DslRuleUtil.generateDslExample(dslScope(names), jsonRule);
+            return "# Requested object definitions\n" + schema.get(DBSchemaUtil.KEY_CLASS_DEF)
+                    + "\n# Direct relationships (fetch missing endpoint attributes when needed)\n" + schema.get(DBSchemaUtil.KEY_RELATIONSHIP_DEF)
+                    + "\n# DSL syntax\n" + DslRuleUtil.generateDslRule(dslScope(names), jsonRule)
+                    + "\n# Worked example (not a query result)\n" + example
+                    + "\n# Current source constraints\n" + adapter.queryPlanningRules();
+        } catch (Exception e) {
+            log.error("Failed to prepare query context", e);
+            return "Failed to prepare query context: " + e.getMessage() + ". The separate exploration tools remain available.";
+        }
+    }
+
+    private static JSONObject dslScope(List<String> classNames) {
+		JSONObject subQuery = new JSONObject();
+		JSONArray classes = new JSONArray();
+		if (classNames != null) {
+			for (String className : classNames) {
+				if (className != null && !className.trim().isEmpty()) {
+					classes.add(className.trim());
+				}
+			}
+		}
+		subQuery.put("classes", classes);
+		subQuery.put("DSL_relationship", true);
+		subQuery.put("DSL_C_Step_group_by", true);
+		subQuery.put("DSL_C_Step_function", true);
+		subQuery.put("DSL_C_Step_four_basic_math", true);
+		subQuery.put("DSL_C_Step_sort", true);
+		subQuery.put("C_Step", "on demand");
+		return subQuery;
+	}
+
+	@Tool("Get the Ontology DSL syntax rules that apply to the object classes you are about to use. "
+			+ "Call this before writing DSL; do not rely on memory for the rule text.\n"
+			+ "Input: object class name array\n"
+			+ "Output: the DSL rule text for those classes' attribute types")
+	public String getDslSyntax(@P("object class name array") List<String> classNames) {
+		try {
+			AgentCallContext callContext = AgentCallContext.current();
+			Map<String, Object> jsonRule = jsonRuleDao.query(callContext.getDomainId());
+			var adapter = dataAdapterRegistry.create(businessConfigService.get(callContext.getDomainId()), jsonRule);
+			return DslRuleUtil.generateDslRule(dslScope(classNames), jsonRule) + "\n\n" + adapter.queryPlanningRules();
+		} catch (Exception e) {
+			log.error(e.getMessage(), e);
+			return "Failed to get the DSL syntax rules: " + e.getMessage();
+		}
+	}
+
+	@Tool("Get a complete Ontology DSL syntax example scoped to the object classes you are about to use. "
+			+ "Call this when you need a full worked example; do not rely on memory for the example.\n"
+			+ "Input: object class name array\n"
+			+ "Output: a DSL example using only the constructs available for those classes")
+	public String getDslExample(@P("object class name array") List<String> classNames) {
+		try {
+			AgentCallContext callContext = AgentCallContext.current();
+			Map<String, Object> jsonRule = jsonRuleDao.query(callContext.getDomainId());
+			var adapter = dataAdapterRegistry.create(businessConfigService.get(callContext.getDomainId()), jsonRule);
+			String example = adapter.queryPlanningExample(classNames);
+			if (example == null || example.isBlank()) example = DslRuleUtil.generateDslExample(dslScope(classNames), jsonRule);
+			return example + "\n\n" + adapter.queryPlanningRules();
+		} catch (Exception e) {
+			log.error(e.getMessage(), e);
+			return "Failed to get the DSL example: " + e.getMessage();
 		}
 	}
 	

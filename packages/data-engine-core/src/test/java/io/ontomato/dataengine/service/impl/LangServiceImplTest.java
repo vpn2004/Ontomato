@@ -23,7 +23,7 @@ import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
 
 /**
- * The open-source edition installs only the English pack: any other or no requested language reads it,
+ * The app installs English and Simplified Chinese packs: unknown or no requested language reads English,
  * a pack without a key falls back to English, and an unknown key yields the key itself.
  */
 class LangServiceImplTest {
@@ -34,7 +34,7 @@ class LangServiceImplTest {
     Path temp;
 
     @Test
-    void theEnglishOnlyPackAnswersEveryRequestedLanguage() throws Exception {
+    void theInstalledPacksAnswerTheirRequestedLanguages() throws Exception {
         Files.createDirectories(temp.resolve("lang"));
         try (Stream<Path> files = Files.list(LANG)) {
             for (Path file : files.toList()) {
@@ -43,7 +43,10 @@ class LangServiceImplTest {
         }
         BiFunction<String, String, String> lang = langService(temp);
         Map<String, String> english = pack(LANG.resolve("en.json"));
-        for (String requested : Arrays.asList(null, "en", "zh-CN", "unknown")) {
+        Map<String, String> chinese = pack(LANG.resolve("zh-CN.json"));
+        assertEquals(english.keySet(), chinese.keySet());
+        chinese.forEach((key, value) -> assertEquals(value, lang.apply("zh-CN", key), key));
+        for (String requested : Arrays.asList(null, "en", "unknown")) {
             english.forEach((key, value) -> assertEquals(value, lang.apply(requested, key), requested + " " + key));
             assertEquals("No.such.key", lang.apply(requested, "No.such.key"));
         }

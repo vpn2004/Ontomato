@@ -18,6 +18,7 @@ import io.ontomato.dataengine.bean.DslConsanguinity;
 import io.ontomato.dataengine.bean.abcQuestion.ABCSubQueryTask;
 import io.ontomato.dataengine.config.DataRagConfig;
 import io.ontomato.dataengine.dao.ABCSubQueryTaskDao;
+import io.ontomato.dataengine.dataAdapter.DslRowLimit;
 import io.ontomato.dataengine.service.AfterCalculateService;
 import io.ontomato.dataengine.service.BackendSessionEntrance;
 import io.ontomato.dataengine.service.CheckService;
@@ -122,13 +123,17 @@ public class ABCAfterCalculateSubQueryExecutor implements Runnable {
 							evaluation.setUserMessage(afterCalculateLogic);
 							evaluation.setPass(false);
 						} else {
+							markPartialDependency(subQueryTasks.subList(0, subQueryTasks.size() - 1), expData0);
 							if (allDslResultIsNull) {
 								JSONObject result = new JSONObject();
-								result.put("result", "No data matching your request");
+								boolean partial = Boolean.TRUE.equals(expData0.getBoolean(DslRowLimit.TRUNCATED));
+								result.put("result", partial
+										? "No matching data was found in the processed portion; the full result is unknown"
+										: "No data matching your request");
 								JSONArray results = new JSONArray();
 								results.add(result);
 								expData0.put("answer", results);
-								afterCalculateLogic = "The dependent sub-queries failed to query out matching data";
+								afterCalculateLogic = result.getString("result");
 								evaluation.setCalculatorType(AfterCalculatorEvaluation.NOT_CALL_TYPE);
 								evaluation.setUserMessage(afterCalculateLogic);
 								evaluation.setPass(false);
@@ -224,6 +229,33 @@ public class ABCAfterCalculateSubQueryExecutor implements Runnable {
 				break;
 			}
 		}
+	}
+
+	/**
+	 * The calculation reads every dependency's cached rows, which are built from its row-permission
+	 * answer, so a partial dependency makes the calculated answer (including an empty one) partial too.
+	 * The first partial dependency's limit and hint are carried.
+	 */
+	static void markPartialDependency(List<ABCSubQueryTask> dependencies, JSONObject answer) {
+		JSONArray sourceWindows = new JSONArray();
+		for (ABCSubQueryTask dependency : dependencies) {
+			JSONArray data = dependency.getRowPermissionDataMap().getJSONArray("data");
+			if (data == null) continue;
+			for (int i = 0; i < data.size(); i++) {
+				JSONObject datum = data.getJSONObject(i);
+				JSONArray windows = datum.getJSONArray("sourceWindows");
+				if (windows != null) for (Object window : windows) if (!sourceWindows.contains(window)) sourceWindows.add(window);
+				JSONObject window = datum.getJSONObject("resultWindow");
+				if (window != null && !sourceWindows.contains(window)) sourceWindows.add(window);
+				if (sourceWindows.size() > 256) throw new IllegalStateException("Query source window evidence budget exceeded");
+				if (!Boolean.TRUE.equals(answer.getBoolean(DslRowLimit.TRUNCATED)) && Boolean.TRUE.equals(datum.getBoolean(DslRowLimit.TRUNCATED))) {
+					answer.put(DslRowLimit.TRUNCATED, true);
+					answer.put(DslRowLimit.ROW_LIMIT, datum.getInteger(DslRowLimit.ROW_LIMIT));
+					answer.put(DslRowLimit.TRUNCATION_HINT, datum.getString(DslRowLimit.TRUNCATION_HINT));
+				}
+			}
+		}
+		if (!sourceWindows.isEmpty()) answer.put("sourceWindows", com.alibaba.fastjson2.JSON.parseArray(sourceWindows.toJSONString()));
 	}
 
 }

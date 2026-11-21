@@ -26,6 +26,12 @@ export const graphRecord = {
   addedNodes: [] as any[],
   zoom: 1,
   zoomTo: [] as unknown[][],
+  focusElement: [] as unknown[][],
+  states: [] as unknown[][],
+  dataBatches: [] as any[],
+  layouts: [] as unknown[][],
+  nodeUpdates: [] as any[],
+  edgeUpdates: [] as any[],
 };
 
 export class GraphDouble {
@@ -48,9 +54,40 @@ export class GraphDouble {
             };
           }
           if (key === "getZoom") return () => graphRecord.zoom;
+          if (key === "getNodeData") return (id?: string) => {
+            const nodes = graphRecord.dataBatches.flatMap((batch) => batch.nodes || []);
+            return id ? nodes.find((node) => node.id === id) : nodes;
+          };
+          if (key === "getEdgeData") return () => graphRecord.dataBatches.flatMap((batch) => batch.edges || []);
+          if (key === "removeEdgeData") return (ids: string[]) => {
+            for (const batch of graphRecord.dataBatches) {
+              if (batch.edges) batch.edges = batch.edges.filter((edge: any) => !ids.includes(edge.id));
+            }
+          };
           if (key === "zoomTo") {
             return (...args: unknown[]) => {
               graphRecord.zoomTo.push(args);
+              return base;
+            };
+          }
+          if (key === "focusElement" || key === "setElementState") {
+            return (...args: unknown[]) => {
+              graphRecord[key === "focusElement" ? "focusElement" : "states"].push(args);
+              return base;
+            };
+          }
+          if (key === "addData" || key === "updateNodeData" || key === "updateEdgeData" || key === "layout") {
+            return (...args: unknown[]) => {
+              if (key === "updateEdgeData") {
+                for (const update of args[0] as any[]) {
+                  for (const batch of graphRecord.dataBatches) {
+                    const edge = batch.edges?.find((item: any) => item.id === update.id);
+                    if (edge) Object.assign(edge, update, { style: { ...edge.style, ...update.style } });
+                  }
+                }
+              }
+              if (key === "layout") graphRecord.layouts.push(args);
+              else graphRecord[key === "addData" ? "dataBatches" : key === "updateEdgeData" ? "edgeUpdates" : "nodeUpdates"].push(args[0]);
               return base;
             };
           }

@@ -171,6 +171,8 @@ export async function* streamChatCompletion(
   );
   const outputTokenLimit =
     maxTokenCandidates.length > 0 ? Math.min(...maxTokenCandidates) : undefined;
+  const timeoutMs = typeof modelConfig.timeoutMs === "number" && Number.isFinite(modelConfig.timeoutMs) && modelConfig.timeoutMs > 0
+    ? Math.floor(modelConfig.timeoutMs) : DEFAULT_TIMEOUT_MS;
   const llm = useApproximateTokenCounter(
     new ChatOpenAI({
       configuration: {
@@ -179,7 +181,8 @@ export async function* streamChatCompletion(
         ...(fetch ? { fetch } : {}),
       },
       modelName: modelConfig.modelName,
-      timeout: DEFAULT_TIMEOUT_MS,
+      timeout: timeoutMs,
+      ...(modelConfig.maxRetries !== undefined ? { maxRetries: modelConfig.maxRetries } : {}),
       ...(outputTokenLimit ? { maxTokens: outputTokenLimit } : {}),
     })
   );
@@ -227,7 +230,7 @@ export async function* streamChatCompletion(
   }
 
   // Combine timeout + user abort signal
-  const timeoutSignal = AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 
   // This adapter builds its own ChatOpenAI (streaming tool loops cannot use the

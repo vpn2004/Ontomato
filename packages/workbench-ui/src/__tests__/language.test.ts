@@ -45,7 +45,7 @@ describe("app language profile", () => {
     expect(document.documentElement.lang).toBe("zh-CN");
   });
 
-  it("an app without persistence (open source) writes no storage when switching locale", async () => {
+  it("an app without persistence writes no storage when switching locale", async () => {
     localStorage.clear();
     const locale = await mountWithLocale("en", null);
     locale().value = "zh-CN";

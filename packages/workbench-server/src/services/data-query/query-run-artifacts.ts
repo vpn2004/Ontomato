@@ -1,8 +1,10 @@
 import type { AbcProgramDashboard, AbcProgramOutKeyRef } from "@ontomato/contracts/dashboard";
+import type { ResultTruncation } from "@ontomato/contracts/query-execution";
 import type { QueryRun } from "./query-run-store";
 import { t } from "../../i18n";
 
-export interface QueryRunDatasetArtifact {
+/** A saved dataset; a partial one keeps the truncation marker it was saved with. */
+export interface QueryRunDatasetArtifact extends Partial<ResultTruncation> {
   datasetKey: string;
   title: string;
   rows: Array<Record<string, unknown>>;
@@ -87,7 +89,8 @@ export function extractDatasetsFromQueryRun(run: QueryRun): QueryRunDatasetArtif
   return datasets
     .map((dataset: any, index: number) => {
       const rows = asRows(dataset?.data);
-      if (rows.length === 0) return null;
+      // Zero rows of a partial result are not "no data", so that dataset stays with its marker.
+      if (rows.length === 0 && dataset?.truncated !== true) return null;
       const subQuestion =
         dataset?.subQuestion || dataset?.name || dataset?.description || run.question;
       return {
@@ -103,6 +106,13 @@ export function extractDatasetsFromQueryRun(run: QueryRun): QueryRunDatasetArtif
             subQuestion || t("response.dataTable", { n: index + 1 })
           ),
         subQuestion,
+        ...(dataset?.truncated === true
+          ? {
+              truncated: true,
+              rowLimit: dataset.rowLimit,
+              truncationHint: dataset.truncationHint,
+            }
+          : {}),
       } satisfies QueryRunDatasetArtifact;
     })
     .filter(Boolean) as QueryRunDatasetArtifact[];

@@ -39,7 +39,7 @@ public class LangServiceImpl implements LangService {
 	}
 
 	// The requested pack, then the installed English pack, then the key itself: an edition installs only
-	// the packs it ships (open source: en only), so a request for another language must not fail.
+	// the packs it ships (English and Simplified Chinese in this app), so a request for another language must not fail.
 	@Override
 	public String get(String lang, String key) {
 		String value = find(langMap.get(lang), key);

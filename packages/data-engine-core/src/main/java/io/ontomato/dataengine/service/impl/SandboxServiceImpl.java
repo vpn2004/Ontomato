@@ -12,6 +12,7 @@ import com.alibaba.fastjson2.JSONObject;
 
 import io.ontomato.dataengine.config.BusinessConfig;
 import io.ontomato.dataengine.config.DataRagConfig;
+import io.ontomato.dataengine.dao.JSONRuleDao;
 import io.ontomato.dataengine.dao.VectorResourceDao;
 import io.ontomato.dataengine.dataAdapter.DataAdapter;
 import io.ontomato.dataengine.dataAdapter.DataAdapterRegistry;
@@ -35,10 +36,14 @@ public class SandboxServiceImpl implements SandboxService {
 	
 	@Autowired
 	private VectorResourceDao vectorResourceDao;
+
+	@Autowired
+	private JSONRuleDao jsonRuleDao;
 	
 	@Override
 	public void createNamespace(String tmpNamespace, String domainId) {
 		DataAdapter adapter = getDataAdapter(domainId);
+		adapter.capabilities().requireSchemaWrite();
 		adapter.createNamespace(tmpNamespace);
 	}
 
@@ -59,6 +64,7 @@ public class SandboxServiceImpl implements SandboxService {
 	@Override
 	public void createClass(String tmpNamespace, Map<String, Object> classDef, String domainId) {
 		DataAdapter adapter = getDataAdapter(domainId);
+		adapter.capabilities().requireSchemaWrite();
 		adapter.createClass(tmpNamespace, classDef);
 		String vectorTableName = adapter.sandboxClassName(tmpNamespace, ((String) classDef.get("className")).trim());
 		for (String attrName : getVectorAttrNames(classDef)) {
@@ -91,23 +97,26 @@ public class SandboxServiceImpl implements SandboxService {
 	@Override
 	public void createEdge(String tmpNamespace, String edgeName, String domainId) {
 		DataAdapter adapter = getDataAdapter(domainId);
+		adapter.capabilities().requireSchemaWrite();
 		adapter.createEdgeType(tmpNamespace, edgeName);
 	}
 
 	@Override
 	public void insertObjects(String tmpNamespace, Map<String, Object> classDef, JSONArray objs, String domainId) throws Exception {
+		DataAdapter adapter = getDataAdapter(domainId);
+		adapter.capabilities().requireObjectWrite();
 		if (objs == null || objs.size() == 0) {
 			return;
 		}
 		
-		DataAdapter adapter = getDataAdapter(domainId);
 		adapter.insertObjects(tmpNamespace, classDef, objs);
 	}
 
 	@Override
 	public void insertRelations(String tmpNamespace, JSONArray rels, String domainId) throws Exception {
+		DataAdapter adapter = getDataAdapter(domainId);
+		adapter.capabilities().requireEdgeWrite();
 		if (rels != null) {
-			DataAdapter adapter = getDataAdapter(domainId);
 			
 			for (int i = 0; i < rels.size(); i++) {
 				JSONObject rel = rels.getJSONObject(i);
@@ -121,9 +130,11 @@ public class SandboxServiceImpl implements SandboxService {
 		}
 	}
 	
+	/** The domain's adapter with its ontomap: writing an edge needs the relationship definitions. */
 	private DataAdapter getDataAdapter(String domainId) {
 		BusinessConfig businessConfig = businessConfigService.get(domainId);
-		DataAdapter adapter = dataAdapterRegistry.create(businessConfig, null);
+		DataAdapter adapter = dataAdapterRegistry.create(businessConfig, jsonRuleDao.query(domainId));
+		adapter.capabilities().requireSandbox();
 		return adapter;
 	}
 

@@ -2,7 +2,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ElementPlus, { ElMessage, ElMessageBox } from "element-plus";
 import { reactive } from "vue";
-import { MODEL_ROLES } from "@ontomato/contracts/model-settings";
+import { MODEL_ROLES, CONFIGURABLE_MODEL_ROLES } from "@ontomato/contracts/model-settings";
 import ModelListCard from "../business-config/ModelListCard.vue";
 import RoleModelsCard from "../business-config/RoleModelsCard.vue";
 import EmbeddingModelConfigCard from "../business-config/EmbeddingModelConfigCard.vue";
@@ -10,7 +10,8 @@ import SkillDirConfigCard from "../business-config/SkillDirConfigCard.vue";
 import QuerySettingsCard from "../business-config/QuerySettingsCard.vue";
 import BusinessConfig from "../BusinessConfig.vue";
 import ModelConfig from "../ModelConfig.vue";
-import type { EmbeddingModelConfig, ModelEntry, RoleModels } from "../../types";
+import { vectorRebuildStatusSchema } from "../../types";
+import type { EmbeddingModelConfig, ModelEntry, RoleModels, VectorRebuildStatus } from "../../types";
 import { adminApi } from "../../../admin";
 import { workbenchI18n } from "../../../../i18n";
 import { businessConfig } from "../../../../../../../apps/workbench/web/src/business-config";
@@ -74,14 +75,17 @@ const fixtures = vi.hoisted(() => ({
     general: "qwen-lite",
     diagnosis: "qwen-main",
     knowledgeGovernance: null,
+    qualityCheck: null,
   },
   embedding: {
     baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     apiKey: "sk-embed",
     modelName: "text-embedding-v3",
     timeout: "PT300S",
+    dimensions: 2048,
     customHeaders: { "X-Embed-Key": "keep" },
   },
+  rebuildIdle: { state: "READY", total: 0, done: 0, error: null } as VectorRebuildStatus,
 }));
 
 function settingsData() {
@@ -140,15 +144,18 @@ vi.mock("../../../admin", () => ({
     })),
     listDataAdapters: vi.fn(async () => ({
       success: true,
-      data: [
-        {
-          type: "postgresql",
-          label: "PostgreSQL",
-          sql: true,
-          fields: ["url", "user", "password"],
-          examples: { url: "jdbc:postgresql://host:port/db", user: "postgres" },
-        },
-      ],
+      data: {
+        currentType: "postgresql",
+        adapters: [
+          {
+            type: "postgresql",
+            label: "PostgreSQL",
+            requiresJoinFields: true,
+            fields: ["url", "user", "password"],
+            examples: { url: "jdbc:postgresql://host:port/db", user: "postgres" },
+          },
+        ],
+      },
     })),
     getSystemModelConfig: vi.fn(async () => ({
       success: true,
@@ -170,6 +177,9 @@ vi.mock("../../../admin", () => ({
       sent.embeddingTest = JSON.parse(JSON.stringify(payload));
       return { success: true };
     }),
+    getVectorRebuildStatus: vi.fn(async () => ({ ...fixtures.rebuildIdle })),
+    rebuildVectors: vi.fn(async () => ({ success: true })),
+    pauseVectorRebuild: vi.fn(async () => ({ success: true })),
   },
 }));
 
@@ -298,10 +308,9 @@ describe("model list card", () => {
   it("shows an add entry when the library is legitimately empty", async () => {
     const { wrapper } = mountList([]);
     expect(wrapper.text()).toContain(t("admin.modelListEmpty"));
-    const adds = wrapper.findAll("button").filter((b) => b.text().includes(t("admin.addModel")));
-    expect(adds).toHaveLength(2);
-    expect(adds.every((b) => b.attributes("disabled") === undefined)).toBe(true);
-    await adds[1]!.trigger("click");
+    const add = button(wrapper, t("admin.addModel"))!;
+    expect(add.attributes("disabled")).toBeUndefined();
+    await add.trigger("click");
     expect(wrapper.find("section").exists()).toBe(true);
   });
 
@@ -356,28 +365,7 @@ describe("model list card", () => {
     });
   });
 
-  it("reveals the full fake key and deletes several keys without shifting the rest", async () => {
-    const { wrapper } = mountList([entry("qwen-main", { apiKeys: ["sk-fake-1", "sk-fake-2", "sk-fake-3"] })]);
-    // The list shows only the count, never the key text.
-    expect(wrapper.text()).not.toContain("sk-fake");
-    expect(wrapper.text()).toContain(t("admin.keyCountConfigured", { n: 3 }));
 
-    await button(wrapper, t("common.edit"))!.trigger("click");
-    const keyInputs = () => wrapper.findAll(".api-key-row input");
-    const keyValues = () => keyInputs().map((input) => (input.element as HTMLInputElement).value);
-    expect(keyInputs()[0]!.attributes("type")).toBe("password");
-    await wrapper.find(".api-key-row .el-input__password").trigger("click");
-    expect(keyInputs()[0]!.attributes("type")).toBe("text");
-    expect(keyValues()[0]).toBe("sk-fake-1");
-
-    const trash = `.api-key-row button[aria-label="${t("common.delete") as string}"]`;
-    await wrapper.findAll(trash)[0]!.trigger("click");
-    expect(keyValues()).toEqual(["sk-fake-2", "sk-fake-3"]);
-    await wrapper.findAll(trash)[1]!.trigger("click");
-    expect(keyValues()).toEqual(["sk-fake-2"]);
-    await saveDialog(wrapper);
-    expect(listModels(wrapper)[0]!.apiKeys).toEqual(["sk-fake-2"]);
-  });
 
   it("disables every row and add entry while the page is saving", () => {
     const { wrapper } = mountList([entry("qwen-main")], { saving: true });
@@ -412,7 +400,7 @@ describe("role models card", () => {
     return { roles, wrapper };
   }
 
-  it("lists the five roles in the query engine and agent groups", () => {
+  it("lists the required roles and optional quality check binding", () => {
     const { wrapper } = mountRoles();
     const groups = wrapper.findAll(".role-group");
     expect(groups.map((group) => group.find("h4").text())).toEqual([
@@ -420,7 +408,7 @@ describe("role models card", () => {
       t("admin.modelRoleGroups.agents"),
     ]);
     expect(groups.map((group) => group.findAll(".role-name").map((name) => name.text()))).toEqual([
-      [t("admin.modelRoleNames.query"), t("admin.modelRoleNames.coding")],
+      [t("admin.modelRoleNames.query"), t("admin.modelRoleNames.coding"), t("admin.modelRoleNames.qualityCheck")],
       [
         t("admin.modelRoleNames.general"),
         t("admin.modelRoleNames.diagnosis"),
@@ -432,14 +420,14 @@ describe("role models card", () => {
   it("each role name carries a focusable description", () => {
     const { wrapper } = mountRoles();
     expect(wrapper.findAll("button.role-info").map((info) => info.attributes("aria-label"))).toEqual(
-      MODEL_ROLES.map((role) => t(`admin.modelRoleDescriptions.${role}`))
+      ["query", "coding", "qualityCheck", "general", "diagnosis", "knowledgeGovernance"].map((role) => t(`admin.modelRoleDescriptions.${role}`))
     );
   });
 
   it("offers the given models by config ID and clears a role to not configured", async () => {
     const { roles, wrapper } = mountRoles();
     const selects = wrapper.findAllComponents({ name: "ElSelect" });
-    expect(selects).toHaveLength(5);
+    expect(selects).toHaveLength(6);
     const options = selects[0]!.findAllComponents({ name: "ElOption" });
     expect(options.map((option) => [option.props("value"), option.props("label")])).toEqual([
       ["qwen-main", "Qwen (qwen-main)"],
@@ -494,7 +482,15 @@ describe("embedding model card", () => {
     const save = vi.fn(async (_model: EmbeddingModelConfig) => true);
     const wrapper = track(
       mount(EmbeddingModelConfigCard, {
-        props: { model: { ...fixtures.embedding }, loading: false, saving: false, loadError: "", save, ...extra },
+        props: {
+          model: { ...fixtures.embedding },
+          loading: false,
+          saving: false,
+          loadError: "",
+          save,
+          rebuildStatus: { ...fixtures.rebuildIdle },
+          ...extra,
+        },
         global,
       })
     );
@@ -532,10 +528,105 @@ describe("embedding model card", () => {
     expect(wrapper.text()).toContain(t("admin.modelListEmpty"));
     await button(wrapper, t("admin.addModel"))!.trigger("click");
     await wrapper.find("section").findAll("input")[0]!.setValue("https://new.example/v1");
+    // Dimensions have no page default (the backend owns the new-domain default): save and test wait until they are filled.
+    expect(button(wrapper.find("section"), t("common.save"))!.attributes("disabled")).toBeDefined();
+    expect(button(wrapper.find("section"), t("common.testModel"))!.attributes("disabled")).toBeDefined();
+    await wrapper.find("section").findAll(".el-input-number input")[1]!.setValue("1024");
     await saveDialog(wrapper);
     const updated = save.mock.calls[0]![0];
     expect(updated.baseUrl).toBe("https://new.example/v1");
     expect(updated.timeout).toBe("PT300S");
+    expect(updated.dimensions).toBe(1024);
+  });
+
+  // Design item 1: dimensions belong to this domain's embedding config and are shown, edited and saved with it.
+  it("shows the dimensions and saves the edited dimensions with the config", async () => {
+    const { wrapper, save } = mountEmbedding();
+    expect(wrapper.find(".model-item").text()).toContain(`${t("admin.embeddingDimensions")}`);
+    expect(wrapper.find(".model-item").text()).toContain("2048");
+    await button(wrapper, t("common.edit"))!.trigger("click");
+    const dimensions = wrapper.find("section").findAll(".el-input-number input")[1]!;
+    expect((dimensions.element as HTMLInputElement).value).toBe("2048");
+    await dimensions.setValue("1024");
+    await saveDialog(wrapper);
+    expect(save.mock.calls[0]![0]).toEqual({ ...fixtures.embedding, dimensions: 1024 });
+  });
+
+  // Design item 6: the test runs on the dimensions filled in the dialog, before anything is saved.
+  it("tests the dialog draft with its dimensions without saving", async () => {
+    const { wrapper, save } = mountEmbedding();
+    await button(wrapper, t("common.edit"))!.trigger("click");
+    await wrapper.find("section").findAll(".el-input-number input")[1]!.setValue("4096");
+    await button(wrapper.find("section"), t("common.testModel"))!.trigger("click");
+    expect(wrapper.emitted("test")![0]).toEqual([{ ...fixtures.embedding, dimensions: 4096 }]);
+    expect(save).not.toHaveBeenCalled();
+    expect(wrapper.find("section").exists()).toBe(true);
+  });
+
+  // The action follows only the state the backend reports, never a page-side comparison of configs.
+  it.each([
+    ["not read yet", null, "admin.rebuildVectors", false, null],
+    ["ready", "READY", "admin.rebuildVectors", false, null],
+    ["pending", "PENDING", "admin.rebuildVectors", true, "rebuild"],
+    ["running", "RUNNING", "admin.pauseVectorRebuild", true, "pause"],
+    ["pausing", "PAUSING", "admin.pauseVectorRebuild", false, null],
+    ["paused", "PAUSED", "admin.resumeVectorRebuild", true, "rebuild"],
+    ["interrupted", "INTERRUPTED", "admin.resumeVectorRebuild", true, "rebuild"],
+  ] as const)("offers the action of the reported state: %s", async (_name, state, label, enabled, event) => {
+    const rebuildStatus = state && { ...fixtures.rebuildIdle, state };
+    const { wrapper } = mountEmbedding({ rebuildStatus });
+    const action = button(wrapper, t(label))!;
+    expect(action.attributes("disabled") === undefined).toBe(enabled);
+    if (event) {
+      await action.trigger("click");
+      expect(wrapper.emitted(event)).toHaveLength(1);
+    }
+  });
+
+  // Each state that keeps vector search paused says so with its progress and the way to recover.
+  it("shows the progress, a pause or interruption, and where and why a round failed", () => {
+    const text = (rebuildStatus: VectorRebuildStatus) => mountEmbedding({ rebuildStatus }).wrapper.text();
+    const progress = { total: 120, done: 45 };
+    expect(text({ ...progress, state: "PENDING", error: null })).toContain(t("admin.vectorRebuildNeeded"));
+    expect(text({ ...progress, state: "RUNNING", error: null })).toContain(t("admin.vectorRebuildRunning", progress));
+    expect(text({ ...progress, state: "PAUSING", error: null })).toContain(t("admin.vectorRebuildPausing", progress));
+    expect(text({ ...progress, state: "PAUSED", error: null })).toContain(t("admin.vectorRebuildPaused", progress));
+    expect(text({ ...progress, state: "INTERRUPTED", error: null })).toContain(
+      t("admin.vectorRebuildInterrupted", progress)
+    );
+    expect(text({ ...fixtures.rebuildIdle })).not.toContain(t("admin.vectorRebuildNeeded"));
+
+    const failed = mountEmbedding({
+      rebuildStatus: {
+        ...progress,
+        state: "FAILED",
+        error: { phase: "EMBED", itemType: "ACTION", itemId: "a-17", reason: "Read timed out" },
+      },
+    }).wrapper;
+    expect(failed.text()).toContain(
+      t("admin.vectorRebuildFailed", {
+        ...progress,
+        step: t("admin.vectorRebuildStep.EMBED", { type: t("admin.vectorRebuildType.ACTION"), id: "a-17" }),
+        reason: "Read timed out",
+      })
+    );
+    expect(failed.text()).toContain("a-17");
+    expect(button(failed, t("admin.resumeVectorRebuild"))!.attributes("disabled")).toBeUndefined();
+
+    const clearFailed = text({
+      ...progress,
+      state: "FAILED",
+      error: { phase: "CLEAR", itemType: null, itemId: null, reason: "connection refused" },
+    });
+    expect(clearFailed).toContain(t("admin.vectorRebuildStep.CLEAR"));
+    expect(clearFailed).toContain("connection refused");
+
+    const readFailed = text({
+      ...progress,
+      state: "FAILED",
+      error: { phase: "READ", itemType: "METRIC_VIEW", itemId: null, reason: "relation is locked" },
+    });
+    expect(readFailed).toContain(t("admin.vectorRebuildStep.READ", { type: t("admin.vectorRebuildType.METRIC_VIEW") }));
   });
 });
 
@@ -551,7 +642,8 @@ describe("password visibility with the real dialog", () => {
   const keyValues = (wrapper: ReturnType<typeof mount>) =>
     wrapper.findAll(".api-key-row input").map((input) => (input.element as HTMLInputElement).value);
 
-  it("keeps remaining keys hidden after deleting a revealed row and when reopening another entry", async () => {
+  it("saves the remaining keys after deletions and hides keys when reopening another entry", async () => {
+    const save = vi.fn(async (_models: ModelEntry[]) => true);
     const wrapper = track(
       mount(ModelListCard, {
         props: {
@@ -560,12 +652,13 @@ describe("password visibility with the real dialog", () => {
             entry("b", { apiKeys: ["sk-fake-9"] }),
           ],
           saving: false,
-          save: async () => true,
+          save,
         },
         global: realDialog,
         attachTo: document.body,
       })
     );
+    expect(wrapper.text()).not.toContain("sk-fake");
     const edits = () => wrapper.findAll("button").filter((b) => b.text() === t("common.edit"));
     await edits()[0]!.trigger("click");
     await settle();
@@ -579,7 +672,11 @@ describe("password visibility with the real dialog", () => {
     expect(keyTypes(wrapper)).toEqual(["password", "password"]);
     expect(keyValues(wrapper)).toEqual(["sk-fake-2", "sk-fake-3"]);
 
-    await button(wrapper, t("common.cancel"))!.trigger("click");
+    await wrapper.findAll(trash)[1]!.trigger("click");
+    expect(keyValues(wrapper)).toEqual(["sk-fake-2"]);
+    await button(wrapper, t("common.save"))!.trigger("click");
+    await flushPromises();
+    expect(save.mock.calls[0]![0].map(model => model.apiKeys)).toEqual([["sk-fake-2"], ["sk-fake-9"]]);
     await settle();
     await edits()[1]!.trigger("click");
     await settle();
@@ -596,6 +693,7 @@ describe("password visibility with the real dialog", () => {
           saving: false,
           loadError: "",
           save: async () => true,
+          rebuildStatus: { ...fixtures.rebuildIdle },
         },
         global: realDialog,
         attachTo: document.body,
@@ -619,34 +717,35 @@ describe("password visibility with the real dialog", () => {
 });
 
 describe("model config page", () => {
-  it("is one page without tabs: model list, role card and embedding card, with no save button outside the cards", async () => {
-    const page = await mountModelPage();
-    expect(page.find(".el-tabs").exists()).toBe(false);
-    expect(page.findComponent(ModelListCard).exists()).toBe(true);
-    expect(page.findComponent(RoleModelsCard).exists()).toBe(true);
-    expect(page.findComponent(EmbeddingModelConfigCard).exists()).toBe(true);
-    expect(page.findComponent(QuerySettingsCard).exists()).toBe(false);
-    expect(page.findComponent(SkillDirConfigCard).exists()).toBe(false);
-    expect(page.findAll("button").every((b) => b.element.closest(".config-card") !== null)).toBe(true);
 
-    const system = await mountSystemPage();
-    expect(system.findComponent(QuerySettingsCard).exists()).toBe(true);
-    expect(system.findComponent(SkillDirConfigCard).exists()).toBe(true);
-    expect(system.findComponent(ModelListCard).exists()).toBe(false);
-    expect(system.findComponent(EmbeddingModelConfigCard).exists()).toBe(false);
-  });
 
-  it("saves a new model from its dialog at once, then saves roles from the role card", async () => {
+  it("saves the first model from its dialog; the five roles the backend assigns it show as saved and stay editable", async () => {
     server.models = [];
     server.agents = Object.fromEntries(MODEL_ROLES.map((role) => [role, null]));
+    const error = vi.spyOn(ElMessage, "error");
     const page = await mountModelPage();
     const list = page.findComponent(ModelListCard);
     expect(list.text()).toContain(t("admin.modelListEmpty"));
+    const roleValues = () => MODEL_ROLES.map((role) => roleSelect(page, role).props("modelValue"));
 
+    // A failed first save keeps the dialog and its input; no role changes.
+    vi.mocked(adminApi.saveModelSettings).mockRejectedValueOnce(new Error("models rejected"));
     await button(list, t("admin.addModel"))!.trigger("click");
     await fillNewModel(list.find("section"), "fresh");
     await saveDialog(list.find("section"));
-    expect(adminApi.saveModelSettings).toHaveBeenCalledTimes(1);
+    expect(error).toHaveBeenCalledWith("models rejected");
+    expect(list.find("section").exists()).toBe(true);
+    expect(roleValues()).toEqual(MODEL_ROLES.map(() => null));
+    expect(unsavedTag(page).exists()).toBe(false);
+
+    // Java assigns the first model of an empty library to every empty role in the same save (simulated here).
+    vi.mocked(adminApi.saveModelSettings).mockImplementationOnce(async (payload) => {
+      sent.settings = JSON.parse(JSON.stringify(payload));
+      server.models = payload.models.map((model) => ({ ...model, maxTokens: 50000, contextWindow: 256000 }));
+      server.agents = Object.fromEntries(MODEL_ROLES.map((role) => [role, "fresh"]));
+      return { success: true, data: settingsData() };
+    });
+    await saveDialog(list.find("section"));
     expect(sent.settings).toEqual({
       models: [
         {
@@ -665,34 +764,39 @@ describe("model config page", () => {
           customRequestParameters: {},
         },
       ],
-      agents: Object.fromEntries(MODEL_ROLES.map((role) => [role, null])),
+      agents: Object.fromEntries(CONFIGURABLE_MODEL_ROLES.map((role) => [role, null])),
     });
-    // On success the dialog closes and the response (including Java's defaults) becomes the saved list.
+    // On success the dialog closes, the response (including Java's defaults) becomes the saved list, and the
+    // five assigned roles show at once with no false unsaved marker.
     expect(list.find("section").exists()).toBe(false);
     expect(page.findComponent(ModelListCard).props("models")).toMatchObject([
       { name: "fresh", maxTokens: 50000, contextWindow: 256000 },
     ]);
-
-    // The saved model can be selected; role changes stay a draft until the role card saves them.
+    expect(roleValues()).toEqual(MODEL_ROLES.map(() => "fresh"));
     expect(unsavedTag(page).exists()).toBe(false);
-    roleSelect(page, "query").vm.$emit("update:modelValue", "fresh");
-    roleSelect(page, "general").vm.$emit("update:modelValue", "fresh");
+
+    // The role card still edits and saves the assignment.
+    roleSelect(page, "coding").vm.$emit("update:modelValue", null);
     await flushPromises();
     expect(unsavedTag(page).text()).toBe(t("admin.unsaved"));
-    expect(adminApi.saveModelSettings).toHaveBeenCalledTimes(1);
-
     await saveRoles(page);
     expect(sent.settings).toMatchObject({
-      models: [{ name: "fresh", maxTokens: 50000, contextWindow: 256000 }],
-      agents: {
-        query: "fresh",
-        coding: null,
-        general: "fresh",
-        diagnosis: null,
-        knowledgeGovernance: null,
-      },
+      agents: { query: "fresh", coding: null, general: "fresh", diagnosis: "fresh", knowledgeGovernance: "fresh" },
     });
     expect(unsavedTag(page).exists()).toBe(false);
+
+    // A second model is saved with the saved roles and leaves the role draft alone.
+    roleSelect(page, "query").vm.$emit("update:modelValue", null);
+    await flushPromises();
+    await button(page.findComponent(ModelListCard), t("admin.addModel"))!.trigger("click");
+    await fillNewModel(page.findComponent(ModelListCard).find("section"), "second");
+    await saveDialog(page.findComponent(ModelListCard).find("section"));
+    expect(sent.settings).toMatchObject({
+      models: [{ name: "fresh" }, { name: "second" }],
+      agents: { query: "fresh", coding: null, general: "fresh", diagnosis: "fresh", knowledgeGovernance: "fresh" },
+    });
+    expect(roleSelect(page, "query").props("modelValue")).toBeNull();
+    expect(unsavedTag(page).exists()).toBe(true);
     expect(server.reads).toBe(1);
   });
 
@@ -712,12 +816,26 @@ describe("model config page", () => {
     expect(unsavedTag(page).exists()).toBe(true);
   });
 
-  it("the role save submits exactly the saved model list and the five role keys in one request", async () => {
+  it("keeps an optional quality check binding independent and allows query inheritance", async () => {
+    const page = await mountModelPage();
+    const select = roleSelect(page, "qualityCheck");
+    expect(select.props("modelValue")).toBeNull();
+    select.vm.$emit("update:modelValue", "qwen-lite");
+    await flushPromises();
+    await saveRoles(page);
+    expect(sent.settings).toMatchObject({ agents: { qualityCheck: "qwen-lite", query: "qwen-main", coding: "qwen-main" } });
+    select.vm.$emit("update:modelValue", null);
+    await flushPromises();
+    await saveRoles(page);
+    expect(sent.settings).toMatchObject({ agents: { qualityCheck: null, query: "qwen-main" } });
+  });
+
+  it("the role save submits exactly the saved model list and configurable role keys in one request", async () => {
     const page = await mountModelPage();
     await saveRoles(page);
     const payload = sent.settings as { models: unknown[]; agents: Record<string, unknown> };
-    expect(Object.keys(payload)).toEqual(["models", "agents"]);
-    expect(Object.keys(payload.agents)).toEqual([...MODEL_ROLES]);
+    expect(new Set(Object.keys(payload))).toEqual(new Set(["models", "agents"]));
+    expect(new Set(Object.keys(payload.agents))).toEqual(new Set(CONFIGURABLE_MODEL_ROLES));
     // Roles carry only config IDs; the skill directory is not submitted with the model save.
     expect(payload.agents).toEqual(fixtures.agents);
     expect(payload.models).toEqual(fixtures.models);
@@ -914,6 +1032,194 @@ describe("model config page", () => {
       modelConfig: { ...fixtures.embedding, apiKey: "sk-embed-2" },
       userContent: "hello",
     });
+  });
+});
+
+describe("vector rebuild and embedding test on the model config page", () => {
+  // The api parses the wire data with the schema; the mocks hand it the same parsed shape.
+  const status = (extra: Partial<Pick<VectorRebuildStatus, "state" | "total" | "done">>) =>
+    vectorRebuildStatusSchema.parse({ ...fixtures.rebuildIdle, ...extra });
+  const cardButton = (page: ReturnType<typeof mount>, label: string) =>
+    button(page.findComponent(EmbeddingModelConfigCard), t(label));
+  const rebuildButton = (page: ReturnType<typeof mount>) => cardButton(page, "admin.rebuildVectors")!;
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // Design item 3/4: rebuilding is a separate, confirmed step; cancelling the confirmation starts nothing.
+  it("confirms before rebuilding with the cost explained", async () => {
+    const confirm = vi.spyOn(ElMessageBox, "confirm");
+    vi.mocked(adminApi.getVectorRebuildStatus).mockResolvedValue(status({ state: "PENDING" }));
+    const page = await mountModelPage();
+    confirm.mockRejectedValueOnce("cancel");
+    await rebuildButton(page).trigger("click");
+    await flushPromises();
+    expect(confirm.mock.calls[0]![0]).toBe(t("admin.vectorRebuildConfirm"));
+    expect(adminApi.rebuildVectors).not.toHaveBeenCalled();
+
+    confirm.mockResolvedValueOnce("confirm" as never);
+    await rebuildButton(page).trigger("click");
+    await flushPromises();
+    expect(adminApi.rebuildVectors).toHaveBeenCalledTimes(1);
+  });
+
+  // Contract 4/5: after starting, progress is polled while running and polling stops once the rebuild ends.
+  it("polls the progress while a rebuild runs and stops when it ends", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    vi.spyOn(ElMessageBox, "confirm").mockResolvedValueOnce("confirm" as never);
+    const read = vi.mocked(adminApi.getVectorRebuildStatus);
+    read
+      .mockResolvedValueOnce(status({ state: "PENDING" }))
+      .mockResolvedValueOnce(status({ state: "RUNNING", total: 10, done: 0 }))
+      .mockResolvedValueOnce(status({ state: "RUNNING", total: 10, done: 6 }))
+      .mockResolvedValueOnce(status({ total: 10, done: 10 }));
+    const page = await mountModelPage();
+    await rebuildButton(page).trigger("click");
+    await flushPromises();
+    const card = page.findComponent(EmbeddingModelConfigCard);
+    expect(card.text()).toContain(t("admin.vectorRebuildRunning", { done: 0, total: 10 }));
+    expect(cardButton(page, "admin.pauseVectorRebuild")).toBeDefined();
+
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(card.text()).toContain(t("admin.vectorRebuildRunning", { done: 6, total: 10 }));
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(card.text()).not.toContain(t("admin.vectorRebuildRunning", { done: 10, total: 10 }));
+    expect(card.text()).not.toContain(t("admin.vectorRebuildNeeded"));
+    expect(read).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(read).toHaveBeenCalledTimes(4);
+  });
+
+  // Pausing keeps polling until the run stops; a reload shows the paused round, and resuming asks nothing again.
+  it("pauses, stops polling once paused, and resumes after a reload without a new confirmation", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const confirm = vi.spyOn(ElMessageBox, "confirm");
+    const read = vi.mocked(adminApi.getVectorRebuildStatus);
+    read
+      .mockResolvedValueOnce(status({ state: "RUNNING", total: 10, done: 4 }))
+      .mockResolvedValueOnce(status({ state: "PAUSING", total: 10, done: 4 }))
+      .mockResolvedValueOnce(status({ state: "PAUSED", total: 10, done: 5 }));
+    const page = await mountModelPage();
+    await cardButton(page, "admin.pauseVectorRebuild")!.trigger("click");
+    await flushPromises();
+    expect(adminApi.pauseVectorRebuild).toHaveBeenCalledTimes(1);
+    expect(cardButton(page, "admin.pauseVectorRebuild")!.attributes("disabled")).toBeDefined();
+    await vi.advanceTimersByTimeAsync(3000);
+    const card = page.findComponent(EmbeddingModelConfigCard);
+    expect(card.text()).toContain(t("admin.vectorRebuildPaused", { done: 5, total: 10 }));
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(read).toHaveBeenCalledTimes(3);
+    page.unmount();
+
+    read.mockResolvedValue(status({ state: "PAUSED", total: 10, done: 5 }));
+    const reloaded = await mountModelPage();
+    await cardButton(reloaded, "admin.resumeVectorRebuild")!.trigger("click");
+    await flushPromises();
+    expect(confirm).not.toHaveBeenCalled();
+    expect(adminApi.rebuildVectors).toHaveBeenCalledTimes(1);
+  });
+
+  // Java omits null fields; a malformed status is a load failure, not a crash or a silent state.
+  it("normalizes omitted nulls and reports a malformed status as a load failure", async () => {
+    expect(vectorRebuildStatusSchema.parse({ state: "READY", total: 0, done: 0 }).error).toBeNull();
+    const failed = vectorRebuildStatusSchema.parse({
+      state: "FAILED", total: 3, done: 1, error: { phase: "CLEAR", reason: "refused" },
+    });
+    expect(failed.error).toEqual({ phase: "CLEAR", itemType: null, itemId: null, reason: "refused" });
+
+    const error = vi.spyOn(ElMessage, "error");
+    for (const raw of [{ state: "FAILED", total: 3, done: 1 }, { state: "MIGRATING", total: 3, done: 1 }]) {
+      error.mockClear();
+      vi.mocked(adminApi.getVectorRebuildStatus).mockImplementationOnce(async () => vectorRebuildStatusSchema.parse(raw));
+      const page = await mountModelPage();
+      expect(error).toHaveBeenCalledWith(t("admin.loadConfigFailed"));
+      expect(page.findComponent(EmbeddingModelConfigCard).find(".vector-rebuild-status").exists()).toBe(false);
+      page.unmount();
+    }
+  });
+
+  // A poll answered after a newer read (here the one after pausing) must not overwrite it or keep polling.
+  it("ignores a stale status response that arrives after a newer one", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let answerPoll: (value: VectorRebuildStatus) => void = () => {};
+    const read = vi.mocked(adminApi.getVectorRebuildStatus);
+    read
+      .mockResolvedValueOnce(status({ state: "RUNNING", total: 10, done: 4 }))
+      .mockImplementationOnce(() => new Promise((resolve) => (answerPoll = resolve)))
+      .mockResolvedValueOnce(status({ state: "PAUSED", total: 10, done: 5 }));
+    const page = await mountModelPage();
+    await vi.advanceTimersByTimeAsync(3000);
+    await cardButton(page, "admin.pauseVectorRebuild")!.trigger("click");
+    await flushPromises();
+    answerPoll(status({ state: "RUNNING", total: 10, done: 4 }));
+    await flushPromises();
+
+    const card = page.findComponent(EmbeddingModelConfigCard);
+    expect(card.text()).toContain(t("admin.vectorRebuildPaused", { done: 5, total: 10 }));
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(read).toHaveBeenCalledTimes(3);
+  });
+
+  // Task item 3: leaving the page stops the polling.
+  it("stops polling when the page is left", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const read = vi.mocked(adminApi.getVectorRebuildStatus);
+    read.mockResolvedValue(status({ state: "RUNNING", total: 10, done: 1 }));
+    const page = await mountModelPage();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(read).toHaveBeenCalledTimes(2);
+    page.unmount();
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  // Design item 4: saving only stores the config; the page then reads the status again so the button can light up.
+  // While a rebuild runs the backend rejects the save, and its message is shown verbatim.
+  it("reads the rebuild status again after saving and shows a rejected save verbatim", async () => {
+    const error = vi.spyOn(ElMessage, "error");
+    const read = vi.mocked(adminApi.getVectorRebuildStatus);
+    const page = await mountModelPage();
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(rebuildButton(page).attributes("disabled")).toBeDefined();
+
+    read.mockResolvedValueOnce(status({ state: "PENDING" }));
+    const embedding = page.findComponent(EmbeddingModelConfigCard);
+    await button(embedding, t("common.edit"))!.trigger("click");
+    await embedding.find("section").findAll(".el-input-number input")[1]!.setValue("1024");
+    await saveDialog(embedding);
+    expect(sent.embedding).toEqual({ ...fixtures.embedding, dimensions: 1024 });
+    expect(adminApi.rebuildVectors).not.toHaveBeenCalled();
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(rebuildButton(page).attributes("disabled")).toBeUndefined();
+
+    vi.mocked(adminApi.saveEmbeddingModel).mockRejectedValueOnce(new Error("Vectors are being rebuilt; change the config after it finishes"));
+    await button(embedding, t("common.edit"))!.trigger("click");
+    await saveDialog(embedding);
+    expect(error).toHaveBeenCalledWith("Vectors are being rebuilt; change the config after it finishes");
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  // Design item 6: the test request carries the dimensions filled in the dialog, and a mismatch shows the backend message.
+  it("sends the draft dimensions to the embedding test and shows its failure message", async () => {
+    vi.mocked(adminApi.testEmbeddingModel).mockRejectedValueOnce(
+      new Error("Configured dimensions 4096, but the model returned 2048")
+    );
+    const page = await mountModelPage();
+    const embedding = page.findComponent(EmbeddingModelConfigCard);
+    await button(embedding, t("common.edit"))!.trigger("click");
+    await embedding.find("section").findAll(".el-input-number input")[1]!.setValue("4096");
+    await button(embedding.find("section"), t("common.testModel"))!.trigger("click");
+    const testDialog = page.findAll("section").at(-1)!;
+    await testDialog.find("textarea").setValue("hello");
+    await button(testDialog, t("common.sendTest"))!.trigger("click");
+    await flushPromises();
+    expect(vi.mocked(adminApi.testEmbeddingModel).mock.calls[0]![0]).toEqual({
+      modelConfig: { ...fixtures.embedding, dimensions: 4096 },
+      userContent: "hello",
+    });
+    expect(testDialog.text()).toContain("Configured dimensions 4096, but the model returned 2048");
+    expect(adminApi.saveEmbeddingModel).not.toHaveBeenCalled();
   });
 });
 

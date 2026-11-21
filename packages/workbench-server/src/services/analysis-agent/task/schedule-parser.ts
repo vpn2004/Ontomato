@@ -52,6 +52,19 @@ function getLastDayOfMonthInTz(year: number, month: number): number {
   return parts.day;
 }
 
+function getOffsetMsInTz(ts: number): number {
+  const parts = getDatePartsInTz(ts);
+  const wallClockAsUtc = Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hours,
+    parts.minutes,
+    parts.seconds
+  );
+  return wallClockAsUtc - ts;
+}
+
 function utcFromTzParts(
   year: number,
   month: number,
@@ -62,17 +75,14 @@ function utcFromTzParts(
   const naiveMs = Date.UTC(year, month - 1, day, hours, minutes, 0);
   if (isNaN(naiveMs)) return 0;
 
-  const tzParts = getDatePartsInTz(naiveMs);
-
-  const d = new Date(naiveMs);
-  const naiveUtcHours = d.getUTCHours();
-  const naiveUtcMinutes = d.getUTCMinutes();
-
-  let offsetMinutes = naiveUtcHours * 60 + naiveUtcMinutes - (tzParts.hours * 60 + tzParts.minutes);
-  if (offsetMinutes < -720) offsetMinutes += 1440;
-  if (offsetMinutes > 720) offsetMinutes -= 1440;
-
-  return naiveMs + offsetMinutes * 60 * 1000;
+  // The zone offset exists only together with an instant, and the offset at the naive instant can
+  // still belong to the other side of a DST change, so resolve the wall clock against the offset
+  // that the first pass lands on. Only a wall clock skipped by a DST change has no fixed point
+  // there; keep the first pass for it, the instant the offset before the change implies.
+  const firstPass = naiveMs - getOffsetMsInTz(naiveMs);
+  const firstPassOffset = getOffsetMsInTz(firstPass);
+  const secondPass = naiveMs - firstPassOffset;
+  return getOffsetMsInTz(secondPass) === firstPassOffset ? secondPass : firstPass;
 }
 
 function nextTimeOfDayWithOffset(
@@ -128,6 +138,37 @@ function nextDayOfMonth(base: number, targetDay: number, hours: number, minutes:
   }
 
   return candidateTs;
+}
+
+const INTERVAL_UNIT_MS = { m: 60_000, h: 3_600_000, d: 86_400_000 } as const;
+
+/** Step of a pure interval (`30m`, `2h`, `3d`, `*\/15`); null for times of day, weeks and months. */
+function intervalStepMs(expression: string): number | null {
+  const simple = expression.match(/^(\d+)\s*(m|h|d)$/i);
+  if (simple) {
+    const unit = simple[2].toLowerCase() as keyof typeof INTERVAL_UNIT_MS;
+    return parseInt(simple[1], 10) * INTERVAL_UNIT_MS[unit];
+  }
+  const cron = expression.match(/^\*\/(\d+)$/);
+  return cron ? parseInt(cron[1], 10) * INTERVAL_UNIT_MS.m : null;
+}
+
+/**
+ * The slot after a due slot fires at `now`. An interval keeps its cadence anchored at the previous slot: the next
+ * slot is the first `previous + k * interval` strictly after now, so the scheduler's polling delay does not push the
+ * schedule back and an outage fires once instead of once per missed slot. A manual run before the slot is due, and
+ * every other expression, follows `now`.
+ */
+export function nextRunAfterSlot(
+  expression: string,
+  previousSlot: number | undefined,
+  now: number
+): number | null {
+  const step = intervalStepMs(expression);
+  if (!step || previousSlot === undefined || previousSlot > now) {
+    return parseScheduleToNextRun(expression, now);
+  }
+  return previousSlot + Math.max(1, Math.floor((now - previousSlot) / step) + 1) * step;
 }
 
 export function parseScheduleToNextRun(expression: string, lastRunAt?: number): number | null {
