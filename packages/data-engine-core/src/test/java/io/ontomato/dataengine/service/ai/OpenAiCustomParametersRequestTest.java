@@ -33,7 +33,9 @@ import com.sun.net.httpserver.HttpServer;
 import io.ontomato.dataengine.config.CustomRequestParameters;
 import io.ontomato.dataengine.config.ModelConfig;
 
+import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.agent.tool.ToolSpecification;
+import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.http.client.HttpClient;
@@ -300,6 +302,33 @@ class OpenAiCustomParametersRequestTest {
         assertTrue(assistant.containsKey("content"));
         assertEquals("", assistant.getString("content"));
         assertEquals("reasoning", assistant.getString("reasoning_content"));
+    }
+
+    @Test
+    void mixedToolHistoryPreservesReasoningAtTheWireOnlyForCompatibleModels() {
+        var first = ToolExecutionRequest.builder().id("c1").name("lookup").arguments("{}").build();
+        var second = ToolExecutionRequest.builder().id("c2").name("lookup").arguments("{}").build();
+        var history = ChatRequest.builder().messages(UserMessage.from("trace this"),
+                AiMessage.builder().text("Looking up").toolExecutionRequests(List.of(first)).build(),
+                ToolExecutionResultMessage.from(first, "a"),
+                AiMessage.builder().thinking("prior reasoning").toolExecutionRequests(List.of(second)).build(),
+                ToolExecutionResultMessage.from(second, "b")).build();
+        for (String modelName : List.of("test-model", "deepseek-flash")) {
+            var config = productionModel();
+            config.setModelName(modelName);
+            MultiThreadAIChatService.buildChatModel(config, false, null).chat(history);
+            var messages = JSON.parseObject(requestBody.get()).getJSONArray("messages");
+            var earlier = messages.getJSONObject(1);
+            assertEquals("Looking up", earlier.getString("content"));
+            assertEquals("prior reasoning", messages.getJSONObject(3).getString("reasoning_content"));
+            assertFalse(messages.getJSONObject(2).containsKey("reasoning_content"));
+            assertEquals("c2", messages.getJSONObject(4).getString("tool_call_id"));
+            if (modelName.equals("deepseek-flash")) {
+                assertEquals("", earlier.getString("reasoning_content"));
+            } else {
+                assertFalse(earlier.containsKey("reasoning_content"));
+            }
+        }
     }
 
     private ModelConfig productionModel() {

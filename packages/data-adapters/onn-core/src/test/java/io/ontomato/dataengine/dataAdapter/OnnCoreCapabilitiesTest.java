@@ -3,6 +3,7 @@ package io.ontomato.dataengine.dataAdapter;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
 import java.util.List;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -83,5 +84,26 @@ class OnnCoreCapabilitiesTest {
         assertFalse(queryOnlyDisabled.edgeAttributeAnalytics());
         wire.getJSONArray("features").getJSONObject(5).put("contract_version", "v2");
         assertFalse(OnnCoreCapabilities.parse(wire).edgeAttributeAnalytics());
+    }
+
+    @Test void negotiatesFactorizedAggregatesOnlyForTheCompleteKnownContract() {
+        JSONObject wire = OnnCoreT30Test.manifest();
+        for (String id : List.of("edge_attribute_query", "edge_attribute_analytics"))
+            wire.getJSONArray("features").add(JSONObject.of("id", id, "enabled", true, "contract_version", "v1"));
+        JSONObject push = wire.getJSONArray("features").getJSONObject(5).getJSONObject("query_pushdown");
+        JSONObject factor = JSONObject.of("enabled", true, "result_kind", "return", "shape", "mandatory_single_edge_tree",
+            "distinct_classes_required", true, "group_by_scope", "single_variable", "operators", List.of("count_paths"),
+            "fallback", "materialized_with_existing_budgets");
+        push.put("factorized_aggregate", factor);
+        assertEquals(Set.of("count_paths"), OnnCoreCapabilities.parse(wire).edgeAggregateOperators());
+        for (String key : factor.keySet()) {
+            JSONObject bad = JSONObject.from(factor.clone());
+            bad.remove(key);
+            push.put("factorized_aggregate", bad);
+            assertTrue(OnnCoreCapabilities.parse(wire).edgeAggregateOperators().isEmpty(), key);
+        }
+        push.put("factorized_aggregate", factor);
+        wire.getJSONArray("features").getJSONObject(7).put("enabled", false);
+        assertTrue(OnnCoreCapabilities.parse(wire).edgeAggregateOperators().isEmpty());
     }
 }

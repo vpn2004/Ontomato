@@ -260,6 +260,27 @@ class OnnCoreSnapshotReaderTest {
         }
     }
 
+    @Test void edgeAggregateReturnsGroupedRowsWithoutRequestingPerPathEdgeBindings() throws Exception {
+        JSONObject metric = JSONObject.of("name", "slots", "type", "count", "of", "$e", "attribute", "$e.slot_no", "over", "paths");
+        JSONObject query = JSONObject.of("steps", JSONArray.of(JSONObject.of("graph", JSONObject.of("traverse", JSONObject.of("edge_as", "e")))),
+            "return", JSONObject.of("group_by", List.of("$e.slot_no"), "metrics", List.of(metric)));
+        JSONObject response = page(new JSONArray(), 1, null, "snap", 17);
+        response.remove("data");
+        response.getJSONObject("pagination").put("page_count", 1);
+        response.getJSONObject("pagination").put("result_kind", "return");
+        response.put("return", JSONObject.of("rows", JSONArray.of(JSONObject.of("$e.slot_no", 2, "slots", 3))));
+        try (Fixture fixture = new Fixture(List.of(new Reply(200, response)))) {
+            var result = fixture.reader().readNative(query, 5, "return", true, null, true, true);
+            assertEquals(3, result.rows().getFirst().getIntValue("slots"));
+            assertEquals(List.of("snap"), fixture.closed);
+        }
+        try (Fixture fixture = new Fixture(List.of(new Reply(403, JSONObject.of("code", "FIELD_FORBIDDEN"))))) {
+            assertThrows(OnnCoreHttpClient.OnnHttpException.class, () ->
+                fixture.reader().readNative(query, 5, "return", true, null, true, true));
+            assertEquals(1, fixture.requests.size());
+        }
+    }
+
     @Test void bindingPaginationRejectsMissingVariablesDuplicatesAndIncompletePagesAndReleasesSnapshot() throws Exception {
         var bindings = java.util.Map.of("a", OnnCoreGraphCompilerTest.A, "b", OnnCoreGraphCompilerTest.B);
         for (String fault : List.of("duplicate", "missing", "class", "null", "attributes", "total", "version", "exact", "snapshot", "kind", "count", "terminal")) {

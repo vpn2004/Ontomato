@@ -119,6 +119,17 @@ describe("stored evidence tools", () => {
     const legacy = createReportEvidenceTools(() => evidence, new Map()).find((tool) => tool.name === "read_report_ontology")!;
     expect(JSON.parse((await legacy.execute("missing", {})).content[0]!.text).available).toBe(false);
   });
+  it("bounds oversized ontology reads and lets the caller finish from the exact next offset", async () => {
+    const markdown = "x".repeat(24446);
+    const bundle = { ...evidence, ontology: { capturedAt: "2026-11-13T00:00:00Z", markdown } };
+    const tool = createReportEvidenceTools(() => bundle, new Map()).find((tool) => tool.name === "read_report_ontology")!;
+    const page = JSON.parse((await tool.execute("middle", { offset: 12000, limit: 12446 })).content[0]!.text);
+    expect(page.text).toHaveLength(12000);
+    expect(page.nextOffset).toBe(24000);
+    const tail = JSON.parse((await tool.execute("tail", { offset: page.nextOffset })).content[0]!.text);
+    expect(tail.text).toHaveLength(446);
+    expect(tail.nextOffset).toBeNull();
+  });
   it("returns raw values and projected display metadata once, with display rows only on request", async () => {
     const bundle = createReportEvidence({ queryRunId: "display", completed: true, datasets: [{ data: [
       { status: "running", quantity: 7 },
@@ -134,6 +145,21 @@ describe("stored evidence tools", () => {
     expect(displayed.displayRows).toEqual([{ status: "running" }]);
     expect(displayed.rows).toEqual(page.rows);
     expect(bundle).toEqual(before);
+  });
+  it("keeps every value and absolute row reference in a wide evidence page", async () => {
+    const rows = Array.from({ length: 51 }, (_, index) => ({
+      source_material_batch_number: index,
+      downstream_product_business_key: index % 2 ? null : "A",
+      nested_measurement_reading: [false, 0],
+    }));
+    const bundle = createReportEvidence({ queryRunId: "rows", completed: true, datasets: [{ data: rows }] as any });
+    const tool = createReportEvidenceTools(() => bundle, new Map())[0]!;
+    const response = await tool.execute("read", { datasetId: bundle.datasets[0]!.id, offset: 1 });
+    const page = JSON.parse(response.content[0]!.text);
+    expect(page.offset).toBe(1);
+    expect(page.nextOffset).toBeNull();
+    expect(page.rowValues.map((row: unknown[]) => Object.fromEntries(page.columns.map((key: string, i: number) => [key, row[i]])))).toEqual(rows.slice(1));
+    expect(response.content[0]!.text.length).toBeLessThan(JSON.stringify(rows.slice(1)).length);
   });
   it("inspects provenance without returning data and leaves a valid cursor for later row reads", async () => {
     const bundle = createReportEvidence({ queryRunId: "provenance", completed: true, datasets: [{

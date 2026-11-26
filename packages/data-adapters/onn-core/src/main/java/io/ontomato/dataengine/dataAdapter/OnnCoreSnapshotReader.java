@@ -95,7 +95,7 @@ final class OnnCoreSnapshotReader {
         boolean complete = false;
         JSONObject metrics = null;
         List<JSONObject> profiles = new ArrayList<>();
-        Set<String> requestedEdgeVariables = edgeVariables(original);
+        Set<String> requestedEdgeVariables = kind.equals("bindings") ? edgeVariables(original) : Set.of();
         try {
             while (true) {
                 JSONObject response = client.page(query, remaining(deadline), pipeline, profile);
@@ -126,7 +126,7 @@ final class OnnCoreSnapshotReader {
                 if (data == null || data.size() > pageSize || count(meta.get("page_count")) != data.size())
                     throw incomplete("page count does not match data");
                 JSONArray edgeBindings = response.getJSONArray("edge_bindings");
-                if (!requestedEdgeVariables.isEmpty() && (kind.equals("return") || edgeBindings == null || edgeBindings.size() != data.size()))
+                if (!requestedEdgeVariables.isEmpty() && (edgeBindings == null || edgeBindings.size() != data.size()))
                     throw incomplete("edge binding count does not match object binding count");
                 boolean noSession = currentId == null || currentId.isBlank();
                 if (noSession && (pages > 0 || meta.getBooleanValue("has_more")

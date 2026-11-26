@@ -12,6 +12,16 @@ beforeEach(() => {
   io.run.mockResolvedValue({ markdown: "Checked report", status: "verified", issues: [] });
 });
 describe("explicit report recovery", () => {
+  it("forwards persisted verification context along with the original evidence", async () => {
+    const review = { passed: false, issues: ["Correct the interpretation"], memory: {
+      policy: "saved-policy", contractVersion: "contract", scope: { evidenceVersion: "immutable" },
+      final: { verdict: { issues: ["Correct the interpretation"] } },
+    } };
+    io.read.mockResolvedValue({ contract: { originalQuestion: "Original full scope", instruction: "Report" }, evidence: { version: "immutable" }, review });
+    await resumeSavedReport(input);
+    expect(io.run.mock.calls[0]![0].seed.review).toEqual(review);
+    expect(io.run.mock.calls[0]![0].collect).toBeUndefined();
+  });
   it("revalidates ownership and uses the original evidence without a collection tool", async () => {
     const content = await resumeSavedReport(input);
     expect(io.access).toHaveBeenCalledWith("thread", "user", "domain");

@@ -1,5 +1,21 @@
 import type { ReportSubmission } from "./contract";
 import { evidenceValueKey, type EvidenceStatistic } from "./evidence";
+import type { ReportScopeReview } from "./scope-review";
+
+export interface ReviewedSubmission {
+  report: ReportSubmission;
+  evidenceVersion: string;
+  evidenceIds: string[];
+  statistics: EvidenceStatistic[];
+  verdict: { checks: Array<{ id: string; passed: boolean; reason: string }>; issues: string[] };
+}
+
+export interface ReportVerificationMemory {
+  policy: string;
+  contractVersion: string;
+  scope?: ReportScopeReview;
+  final?: ReviewedSubmission;
+}
 
 /** Describe actual changes without copying the entire previous report into another review. */
 export function buildReportReviewChanges(

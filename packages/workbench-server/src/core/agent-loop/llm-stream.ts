@@ -156,7 +156,7 @@ export async function* streamChatCompletion(
   tools: AgentTool[],
   signal?: AbortSignal,
   maxTokens?: number
-): AsyncGenerator<AssistantStreamEvent, AssistantMessage> {
+): AsyncGenerator<AssistantStreamEvent, AssistantMessage & { timedOut?: boolean }> {
   const langChainMessages = convertMessagesToLangChain(systemPrompt, messages);
   // Reasoning replays first (outer), custom override wins last (inner): without
   // custom messages the replay survives, with custom messages the whole array
@@ -358,7 +358,8 @@ export async function* streamChatCompletion(
     }
     if (aborted) tracker?.cancel();
     else tracker?.fail(err);
-    return buildErrorMessage(aborted ? "aborted" : "error", errMsg);
+    const failure = buildErrorMessage(aborted ? "aborted" : "error", errMsg);
+    return !aborted && timeoutSignal.aborted ? { ...failure, timedOut: true } : failure;
   }
 
   // Also detect stop reason from accumulated tool calls

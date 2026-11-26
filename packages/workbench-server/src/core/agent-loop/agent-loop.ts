@@ -16,6 +16,8 @@ import type {
 
 const logger = createLogger("agent-loop");
 
+export class ModelTimeoutRetryExhausted extends Error {}
+
 export interface AgentLoopHooks {
   /**
    * Called before every model turn, including the first, after the current
@@ -23,6 +25,8 @@ export interface AgentLoopHooks {
    * for their own prompt refresh. Context compaction is not a hook.
    */
   beforeTurn?: (state: AgentState) => Promise<void>;
+  /** Allow a single model deadline retry across the run, before any tool dispatch. */
+  retryModelTimeoutOnce?: boolean;
   /** A task owner may reject premature completion with specific, persisted feedback. */
   onStop?: (state: AgentState) => Promise<string | undefined>;
   /** Present for every production agent. Persistence and the 80% check run inside the loop. */
@@ -42,6 +46,7 @@ export async function runAgentLoop(
   hooks?: AgentLoopHooks
 ): Promise<AgentMessage[]> {
   const newMessages: AgentMessage[] = [];
+  let timeoutRetried = false;
   const session = hooks?.session;
   if (session) {
     state.messages = [...session.context.messages];
@@ -112,7 +117,7 @@ export async function runAgentLoop(
       );
 
       // Stream the assistant's response
-      let assistantMsg: AssistantMessage | undefined;
+      let assistantMsg: (AssistantMessage & { timedOut?: boolean }) | undefined;
       while (true) {
         const { done, value } = await stream.next();
         if (done) {
@@ -137,6 +142,13 @@ export async function runAgentLoop(
           errorMessage: "No response from LLM",
           timestamp: Date.now(),
         };
+      }
+
+      if (hooks?.retryModelTimeoutOnce && assistantMsg.timedOut && !signal?.aborted) {
+        if (timeoutRetried) throw new ModelTimeoutRetryExhausted("Model request timed out after retry.");
+        timeoutRetried = true;
+        logger.warn("Retrying timed-out model request before tool execution");
+        continue;
       }
 
       state.messages.push(assistantMsg);

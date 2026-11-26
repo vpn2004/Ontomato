@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { resolveModelForRole } from "../../../config/model-resolver";
-import { runAgentLoop } from "../../../core/agent-loop/agent-loop";
+import { ModelTimeoutRetryExhausted, runAgentLoop } from "../../../core/agent-loop/agent-loop";
 import { createHarnessRun } from "../../../core/agent-loop/session-run";
 import type { AgentState, AgentTool, ModelConfig } from "../../../core/agent-loop/types";
-import { renderPrompt } from "../../../core/prompts/loader";
+import { getPromptTemplate, renderPrompt } from "../../../core/prompts/loader";
 import { harnessSessions } from "../../../infrastructure/harness-sessions";
 import { measureStage } from "../../../logging/stage-timing";
 import { buildReportContract, exactIdIssues, REPORT_SUBMISSION_PARAMETERS, reviseReportSubmission, validateReportSubmission, type ReportContract, type ReportSubmission } from "./contract";
@@ -13,7 +13,7 @@ import { openReportCheckpoint, saveReportCheckpoint, type ReportCheckpoint } fro
 import { reviewReportScope, type ReportScopeReview } from "./scope-review";
 import { createReportBudget } from "./budget";
 import { buildCollectionContext, collectionSelectionsParameter } from "./collection-context";
-import { buildReportReviewChanges } from "./review-memory";
+import { buildReportReviewChanges, type ReviewedSubmission, type ReportVerificationMemory } from "./review-memory";
 
 const compactionPromptKeys = {
   system: "standard-chat.report.compaction.system",
@@ -22,13 +22,6 @@ const compactionPromptKeys = {
 };
 const reviewSchema = z.object({ checks: z.array(z.object({ id: z.string(), passed: z.boolean(), reason: z.string() })), issues: z.array(z.string()) });
 type ReportReview = z.infer<typeof reviewSchema>;
-interface ReviewedSubmission {
-  report: ReportSubmission;
-  evidenceVersion: string;
-  evidenceIds: string[];
-  statistics: EvidenceStatistic[];
-  verdict: ReportReview;
-}
 export interface ReportHarnessInput {
   threadId: string;
   requestSeq: number;
@@ -69,16 +62,24 @@ export async function runReportHarness(input: ReportHarnessInput): Promise<Repor
   let evidence = checkpoint.evidence;
   const statistics = new Map((checkpoint.statistics.length ? checkpoint.statistics : input.seed?.statistics ?? []).map((s) => [s.id, s]));
   let draft = checkpoint.report ?? input.seed?.report;
-  let lastReview = checkpoint.review ?? input.seed?.review;
+  const savedReview = checkpoint.review ?? input.seed?.review;
+  let lastReview = savedReview ? { passed: savedReview.passed, issues: savedReview.issues } : undefined;
   let result: ReportHarnessResult | undefined;
   const rejectedSubmissions = new Map<string, number>();
   const reviewCache = new Map<string, ReportReview>();
   let previousFinal: ReviewedSubmission | undefined;
+  let previousScope: ReportScopeReview | undefined;
+  let verificationPolicy: string | undefined;
+  const persistedReview = (): ReportCheckpoint["review"] => {
+    const memory: ReportVerificationMemory | undefined = verificationPolicy && (previousScope || previousFinal)
+      ? { policy: verificationPolicy, contractVersion: contract.version, scope: previousScope, final: previousFinal } : undefined;
+    return memory ? { passed: lastReview?.passed ?? false, issues: lastReview?.issues ?? [], memory } : lastReview;
+  };
   const save = async (phase: string, review?: { passed: boolean; issues: string[] }) => {
     signal.throwIfAborted();
     if (review) lastReview = review;
     try {
-      await saveReportCheckpoint(sessionId, turnId, { contract, evidence, statistics: [...statistics.values()], phase, report: draft, review: lastReview });
+      await saveReportCheckpoint(sessionId, turnId, { contract, evidence, statistics: [...statistics.values()], phase, report: draft, review: persistedReview() });
     } catch (error) { failure.abort(error); throw error; }
     signal.throwIfAborted();
     input.onCheckpoint?.(phase !== "completed");
@@ -91,7 +92,23 @@ export async function runReportHarness(input: ReportHarnessInput): Promise<Repor
       timeoutMs: resolved.timeoutSeconds ? resolved.timeoutSeconds * 1000 : 600_000, maxRetries: resolved.maxRetries,
       llmLog: { agentName: "report-investigator", agentRunId: turnId } };
     const scopeCache = new Map<string, ReportScopeReview>();
-    let previousScope: ReportScopeReview | undefined;
+    // Bump this semantic version when verification or evidence-tool behavior changes.
+    // Hash prompt templates instead of rendered prompts so runtime clock changes do not invalidate recovery.
+    verificationPolicy = evidenceHash([1, config.baseUrl, config.modelName, config.modelKwargs, config.maxTokens, resolved.contextWindow,
+      input.locale ?? "follow the original user question",
+      ...["scope-review", "review", "system"].map((name) => getPromptTemplate(`standard-chat.report.${name}`)),
+      createReportEvidenceTools(() => evidence, statistics, input.locale).map(({ name, description, parameters }) => ({ name, description, parameters })),
+    ]);
+    const memory = savedReview?.memory;
+    if (memory?.policy === verificationPolicy && memory.contractVersion === contract.version) {
+      previousScope = memory.scope;
+      previousFinal = memory.final?.report.contractVersion === contract.version ? memory.final : undefined;
+      if (previousScope?.evidenceVersion === evidence.version &&
+        exactIdIssues(previousScope.evidenceIds, evidence.datasets.map((d) => d.id), "evidence").length === 0 &&
+        exactIdIssues(previousScope.checks.map((c) => c.id), contract.requirements.map((r) => r.id), "requirement").length === 0) {
+        scopeCache.set(evidence.version, previousScope);
+      }
+    }
     const checkScope = async () => {
       const cached = scopeCache.get(evidence.version);
       if (cached) return cached;
@@ -106,6 +123,15 @@ export async function runReportHarness(input: ReportHarnessInput): Promise<Repor
       return checked;
     };
     const initialScope = await checkScope();
+    // Saved-evidence recovery cannot expand an immutable, incomplete evidence set.
+    if (input.seed && !input.collect && !draft && initialScope.issues.length) {
+      const markdown = input.locale?.startsWith("zh")
+        ? "现有证据仍缺少核验所需的记录。请针对下列缺口发起补查。"
+        : "The saved evidence has gaps. Run a follow-up query for the records listed below.";
+      await save("partial", { passed: false, issues: initialScope.issues });
+      await harnessSessions.finishTurn(sessionId, turnId, "completed");
+      return { status: "partial", markdown, issues: initialScope.issues };
+    }
     const tools = createReportEvidenceTools(() => evidence, statistics, input.locale);
     tools.push({
       name: "check_report_scope", executionMode: "sequential",
@@ -227,6 +253,7 @@ export async function runReportHarness(input: ReportHarnessInput): Promise<Repor
       `${reportEvidenceContext(evidence, input.locale)}\nEvidence readiness checks: ${JSON.stringify(initialScope)}\nResolve missing required collection scopes before drafting long prose. Scope approval is not final report approval.\n${statistics.size ? `Saved computation receipts (reuse their IDs; do not recompute unchanged evidence):\n${JSON.stringify([...statistics.values()])}\n` : ""}${draft ? `Previous submission (requires revalidation; use revise_report to repair it):\n${JSON.stringify(draft)}` : ""}\n${lastReview ? `Previous verification feedback:\n${JSON.stringify(lastReview)}` : ""}`,
       state, config, () => {}, signal, {
         session: await createHarnessRun(harnessSessions, { sessionId, turnId, contextWindow: resolved.contextWindow, promptKeys: compactionPromptKeys }),
+        retryModelTimeoutOnce: true,
         onStop: async () => {
           if (result) return undefined;
           if (++prematureStops > 2) throw new Error("Report stopped without submitting its evidence and completion checks.");
@@ -239,11 +266,28 @@ export async function runReportHarness(input: ReportHarnessInput): Promise<Repor
     await harnessSessions.finishTurn(sessionId, turnId, "completed");
     return result!;
   } catch (error) {
+    const timedOut = error instanceof ModelTimeoutRetryExhausted
+      && !input.signal?.aborted && !budget.signal.aborted && evidence.datasets.length > 0;
+    const zh = input.locale?.startsWith("zh");
+    const issue = zh ? "报告模型请求超时，核验尚未完成。" : "The report model timed out before verification finished.";
+    if (timedOut) lastReview = { passed: false, issues: [...new Set([issue, ...(lastReview?.issues ?? [])])] };
+    const phase = input.signal?.aborted ? "cancelled" : timedOut ? "partial" : "failed";
+    let saved = false;
     try {
-      await saveReportCheckpoint(sessionId, turnId, { contract, evidence, statistics: [...statistics.values()], phase: input.signal?.aborted ? "cancelled" : "failed",
-        report: draft, review: lastReview, error: error instanceof Error ? error.message : String(error) });
+      await saveReportCheckpoint(sessionId, turnId, { contract, evidence, statistics: [...statistics.values()], phase,
+        report: draft, review: persistedReview(), error: error instanceof Error ? error.message : String(error) });
+      saved = true;
     } finally {
-      await harnessSessions.finishTurn(sessionId, turnId, input.signal?.aborted ? "cancelled" : "failed");
+      await harnessSessions.finishTurn(sessionId, turnId, timedOut && saved ? "completed" : input.signal?.aborted ? "cancelled" : "failed");
+    }
+    if (timedOut) {
+      input.signal?.throwIfAborted();
+      input.onCheckpoint?.(true);
+      const count = evidence.datasets.length;
+      const markdown = zh
+        ? `本次调查已保存 ${count} 张查询结果表。可以下载证据逐项核对，或选择“继续整理已保存证据”恢复报告。`
+        : `The investigation saved ${count} result tables. Download the evidence for inspection or resume the report from the saved evidence.`;
+      return { markdown, status: "partial", issues: lastReview!.issues };
     }
     throw error;
   } finally { budget.dispose(); }
@@ -290,6 +334,7 @@ async function reviewReport(input: { contract: ReportContract; report: ReportSub
       { systemPrompt: renderPrompt("standard-chat.report.review", { currentTime: new Date().toISOString(), locale: input.locale ?? "follow the original user question" }), messages: [], tools, isStreaming: false },
       { ...input.config, llmLog: { agentName: "report-reviewer", agentRunId: turnId } }, () => {}, input.signal, {
         session: await createHarnessRun(harnessSessions, { sessionId, turnId, contextWindow: input.contextWindow, promptKeys: compactionPromptKeys }),
+        retryModelTimeoutOnce: true,
         onStop: async () => { if (++stops > 1) throw new Error("Report reviewer did not return structured checks."); return "Return the per-requirement verdict using finish_report_review."; },
       });
     input.signal.throwIfAborted();

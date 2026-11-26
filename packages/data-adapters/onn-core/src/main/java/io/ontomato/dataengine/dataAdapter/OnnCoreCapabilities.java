@@ -4,13 +4,16 @@ import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.HashSet;
+import java.util.Set;
 
 /** Negotiates only explicitly enabled, understood contracts; it never grants write access. */
 record OnnCoreCapabilities(String commit, boolean snapshotReads, int pageSize, boolean bindingReads,
         boolean pushdown, boolean inlinePages, boolean returnReads, String buildIdentity, boolean windowReads,
-        boolean edgeAttributeQuery, boolean edgeAttributeAnalytics) {
+        boolean edgeAttributeQuery, boolean edgeAttributeAnalytics, Set<String> edgeAggregateOperators) {
     OnnCoreCapabilities(String commit, boolean snapshotReads, int pageSize, boolean bindingReads) {
-        this(commit, snapshotReads, pageSize, bindingReads, false, false, false, commit, false, false, false);
+        this(commit, snapshotReads, pageSize, bindingReads, false, false, false, commit, false, false, false,
+            Set.of());
     }
     static OnnCoreCapabilities discover(OnnCoreHttpClient client) throws Exception {
         try { return parse(client.capabilities()); }
@@ -64,9 +67,28 @@ record OnnCoreCapabilities(String commit, boolean snapshotReads, int pageSize, b
             && "/api/v1/query/windows/close".equals(window.getString("close_endpoint"));
         boolean edgeQuery = bindings && enabled(byId.get("edge_attribute_query"), "v1");
         boolean edgeAnalytics = edgeQuery && enabled(byId.get("edge_attribute_analytics"), "v1");
+        boolean returns = pushdown && bindings && contains(pagination, "result_kinds", "return");
+        Set<String> edgeOperators = returns && edgeAnalytics
+            ? edgeAggregateOperators(contract.get("factorized_aggregate")) : Set.of();
         return new OnnCoreCapabilities(commit, true, Math.min(500, max), bindings, pushdown,
             pushdown && Boolean.TRUE.equals(contract.get("single_page_elision")),
-            pushdown && bindings && contains(pagination, "result_kinds", "return"), build, windowReads, edgeQuery, edgeAnalytics);
+            returns, build, windowReads, edgeQuery, edgeAnalytics, edgeOperators);
+    }
+
+    private static Set<String> edgeAggregateOperators(Object claim) {
+        if (!(claim instanceof JSONObject factorized) || !Boolean.TRUE.equals(factorized.get("enabled"))
+            || !"return".equals(factorized.get("result_kind"))
+            || !"mandatory_single_edge_tree".equals(factorized.get("shape"))
+            || !Boolean.TRUE.equals(factorized.get("distinct_classes_required"))
+            || !"single_variable".equals(factorized.get("group_by_scope"))
+            || !"materialized_with_existing_budgets".equals(factorized.get("fallback"))
+            || !(factorized.get("operators") instanceof java.util.List<?> operators) || operators.isEmpty()) return Set.of();
+        Set<String> supported = new HashSet<>();
+        for (Object op : operators) {
+            if (!(op instanceof String name)) return Set.of();
+            supported.add(name);
+        }
+        return Set.copyOf(supported);
     }
 
     private static boolean contains(JSONObject object, String key, String value) {

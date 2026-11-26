@@ -237,18 +237,29 @@ public class OntomatoHttpClientBuilder implements HttpClientBuilder {
 					.build();
 		}
 
-		private static HttpRequest withAssistantContent(HttpRequest request) {
+		private HttpRequest withAssistantContent(HttpRequest request) {
 			String requestBody = request.body();
 			if (requestBody == null) {
 				return request;
 			}
 			JSONObject body = JSON.parseObject(requestBody, JSONReader.Feature.DisableReferenceDetect);
 			JSONArray messages = body.getJSONArray("messages");
+			// Look at the model that will actually be sent after top-level overrides.
+			Object model = customOverrides != null && customOverrides.containsKey("model")
+					? customOverrides.get("model") : body.get("model");
+			boolean deepSeek = model instanceof String name
+					&& name.toLowerCase(java.util.Locale.ROOT).matches("(?:deepseek-ai/)?deepseek(?:[-/].*)?");
 			boolean changed = false;
 			for (Object item : messages) {
 				JSONObject message = (JSONObject) item;
-				if ("assistant".equals(message.getString("role"))
-						&& !message.containsKey("content")) {
+				if (!"assistant".equals(message.getString("role"))) continue;
+				if (deepSeek && message.get("tool_calls") instanceof JSONArray calls && !calls.isEmpty()
+						&& message.get("reasoning_content") == null) {
+					// Some compatible gateways require the key even when the tool turn returned no reasoning.
+					message.put("reasoning_content", "");
+					changed = true;
+				}
+				if (!message.containsKey("content")) {
 					message.put("content", "");
 					changed = true;
 				}

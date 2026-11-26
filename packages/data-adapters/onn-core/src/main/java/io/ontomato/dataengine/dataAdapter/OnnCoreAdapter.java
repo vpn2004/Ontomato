@@ -192,7 +192,7 @@ public final class OnnCoreAdapter implements DataAdapter, ConditionalObjectWrite
         OnnCoreCapabilities negotiated = OnnCoreMetadataCache.capabilities(measured, generated);
         timing.add("capabilities", stageStart);
         stageStart = System.nanoTime();
-        OnnCoreGraphCompiler plan = new OnnCoreGraphCompiler(dsl, schema, mapping, negotiated.pushdown(), timing);
+        OnnCoreGraphCompiler plan = new OnnCoreGraphCompiler(dsl, schema, mapping, negotiated.pushdown(), timing, negotiated.edgeAggregateOperators());
         timing.add("compile", stageStart);
         if (!negotiated.bindingReads()) throw new UnsupportedOperationException("ONN graph queries require enabled v1 pipeline bindings and v2 materialized binding pagination");
         if (plan.requiresEdgeAttributes() && !negotiated.edgeAttributeQuery())

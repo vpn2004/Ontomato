@@ -1,5 +1,5 @@
 /** Collection has its own query deadline; it must not consume the report's reasoning allowance. */
-export function createReportBudget(options = { reasoningMs: 1_200_000, totalMs: 3_600_000 }) {
+export function createReportBudget(options = { reasoningMs: 2_700_000, totalMs: 3_600_000 }) {
   const abort = new AbortController();
   let remaining = options.reasoningMs;
   let started = performance.now();

@@ -1,6 +1,7 @@
 import { getPostgresPool, qualifiedTable } from "../../../infrastructure/postgres";
 import type { ReportContract, ReportSubmission } from "./contract";
 import { evidenceHash, type EvidenceStatistic, type ReportEvidence } from "./evidence";
+import type { ReportVerificationMemory } from "./review-memory";
 
 export interface ReportCheckpoint {
   contract: ReportContract;
@@ -8,7 +9,7 @@ export interface ReportCheckpoint {
   statistics: EvidenceStatistic[];
   phase: string;
   report?: ReportSubmission;
-  review?: { passed: boolean; issues: string[] };
+  review?: { passed: boolean; issues: string[]; memory?: ReportVerificationMemory };
   error?: string;
 }
 

@@ -16,6 +16,10 @@ final class OnnCoreAggregatePlan {
         this.returns = returns; this.finish = finish; this.keys = keys; this.grouped = grouped;
     }
     static OnnCoreAggregatePlan compile(JSONObject dsl, OnnCoreSchema schema, Map<String, String> classes) {
+        return compile(dsl, schema, classes, Map.of(), Set.of());
+    }
+    static OnnCoreAggregatePlan compile(JSONObject dsl, OnnCoreSchema schema, Map<String, String> classes,
+            Map<String, String> edges, Set<String> edgeOperators) {
         if (classes.keySet().stream().anyMatch(variable -> !variable.matches("[A-Za-z_][A-Za-z0-9_]{0,63}"))) return null;
         JSONObject output = dsl.getJSONObject("answer").getJSONArray("steps").getJSONObject(0).getJSONObject("output");
         JSONArray fields = output.getJSONArray("fields");
@@ -24,20 +28,23 @@ final class OnnCoreAggregatePlan {
         JSONArray groups = grouping == null ? new JSONArray() : grouping.getJSONArray("fields");
         if (groups == null) groups = new JSONArray();
         if (grouping != null && grouping.getJSONArray("having") != null && !grouping.getJSONArray("having").isEmpty()) return null;
+        Set<String> groupingVariables = new HashSet<>();
         // ONN currently merges numeric-looking strings and does not normalize datetime group keys.
         for (Object raw : groups) {
             JSONObject field = JSONObject.from(raw);
-            String type = schema.dataType(classes.get(variable(field, classes)), field.getString("field"));
+            groupingVariables.add(variable(field, classes));
+            String type = bindingField(field, schema, classes, edges).type();
             if (!Set.of("int", "boolean").contains(type)) return null;
         }
+        if (!edges.isEmpty() && groupingVariables.size() > 1) return null;
         JSONObject sort = output.getJSONObject("sort");
         JSONArray sorts = sort == null ? new JSONArray() : sort.getJSONArray("fields");
         if (sorts == null) sorts = new JSONArray();
         // Full group-key order is needed to retain deterministic window semantics without binding IDs.
         if (!groups.isEmpty()) {
             Set<String> ordered = new HashSet<>();
-            for (Object raw : sorts) { JSONObject f = JSONObject.from(raw); if (f.getString("function") == null) ordered.add(ref(f, schema, classes)); }
-            for (Object raw : groups) if (!ordered.contains(ref(JSONObject.from(raw), schema, classes))) return null;
+            for (Object raw : sorts) { JSONObject f = JSONObject.from(raw); if (f.getString("function") == null) ordered.add(bindingField(f, schema, classes, edges).reference()); }
+            for (Object raw : groups) if (!ordered.contains(bindingField(JSONObject.from(raw), schema, classes, edges).reference())) return null;
         }
         JSONArray metrics = new JSONArray(), groupRefs = new JSONArray(), attrs = new JSONArray();
         Map<String, String> keys = new LinkedHashMap<>(), remap = new LinkedHashMap<>();
@@ -45,19 +52,19 @@ final class OnnCoreAggregatePlan {
         fields.forEach(raw -> dependencies.add(JSONObject.from(raw)));
         sorts.forEach(raw -> dependencies.add(JSONObject.from(raw)));
         for (Object raw : groups) {
-            JSONObject field = JSONObject.from(raw); String reference = ref(field, schema, classes);
+            JSONObject field = JSONObject.from(raw); String reference = bindingField(field, schema, classes, edges).reference();
             if (!groupRefs.contains(reference)) groupRefs.add(reference);
         }
         for (JSONObject field : dependencies) {
             String signature = signature(field, classes);
             if (remap.containsKey(signature)) continue;
             String column = "v" + remap.size(), fn = field.getString("function");
-            String variable = variable(field, classes), cls = classes.get(variable), name = field.getString("field");
-            String source = schema.sourceField(cls, name), type = schema.dataType(cls, name);
+            BindingField binding = bindingField(field, schema, classes, edges);
+            String variable = binding.variable(), source = binding.source(), type = binding.type();
             if ("id".equals(source)) return null;
             String nativeKey;
             if (fn == null || fn.isBlank()) {
-                nativeKey = ref(field, schema, classes);
+                nativeKey = binding.reference();
                 if (!groupRefs.contains(nativeKey)) return null;
             } else {
                 if (!fn.equals("count")) return null;
@@ -66,7 +73,11 @@ final class OnnCoreAggregatePlan {
                 if (distinct && source != null && !Set.of("int", "boolean").contains(type)) return null;
                 JSONObject metric = JSONObject.of("name", column, "type", distinct && source != null ? "count_distinct" : "count",
                     "of", "$" + variable, "over", distinct && source == null ? "objects" : "paths");
-                if (source != null) metric.put("attribute", "$" + variable + "." + source);
+                if (!edges.isEmpty()) {
+                    String operator = distinct && source != null ? "count_distinct" : "count_" + metric.getString("over");
+                    if (!edgeOperators.contains(operator)) return null;
+                }
+                if (source != null) metric.put("attribute", binding.reference());
                 metrics.add(metric); nativeKey = column; type = "int";
             }
             keys.put(column, nativeKey); remap.put(signature, column);
@@ -119,8 +130,15 @@ final class OnnCoreAggregatePlan {
         if (variable == null && classes.size() == 1) return classes.keySet().iterator().next();
         return variable;
     }
-    private static String ref(JSONObject field, OnnCoreSchema schema, Map<String, String> classes) {
-        String variable = variable(field, classes), source = schema.sourceField(classes.get(variable), field.getString("field"));
-        return "$" + variable + (source == null ? "" : "." + source);
+    private record BindingField(String variable, String source, String type) {
+        String reference() { return "$" + variable + (source == null ? "" : "." + source); }
+    }
+    private static BindingField bindingField(JSONObject field, OnnCoreSchema schema, Map<String, String> classes,
+            Map<String, String> edges) {
+        String variable = variable(field, classes), name = field.getString("field");
+        String relation = edges.get(variable);
+        if (relation != null) return new BindingField(variable, schema.relationSourceField(relation, name), schema.relationDataType(relation, name));
+        String cls = classes.get(variable);
+        return new BindingField(variable, schema.sourceField(cls, name), schema.dataType(cls, name));
     }
 }

@@ -16,6 +16,11 @@ import java.util.UUID;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterEach;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
+import io.ontomato.dataengine.service.BackendSessionEntrance;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -44,6 +49,18 @@ class PythonExecuteServiceImplQueryStatusTest {
 	private static PythonExecuteServiceImpl service;
 	@TempDir
 	Path workspace;
+
+	private MockedStatic<BackendSessionEntrance> cancellation;
+
+	@BeforeEach
+	void stubSessionCancellation() {
+		cancellation = Mockito.mockStatic(BackendSessionEntrance.class);
+	}
+
+	@AfterEach
+	void restoreSessionCancellation() {
+		cancellation.close();
+	}
 
 	@BeforeAll
 	static void startEngineStandIn() throws Exception {
@@ -99,6 +116,43 @@ class PythonExecuteServiceImplQueryStatusTest {
 			server.stop(0);
 			foreignServer.stop(0);
 		}
+	}
+
+	@Test
+	void downstreamTraversalKeepsAllEvidenceAndExpandsEachNodeOnce() throws Exception {
+		String code = """
+				import json
+				edges = [(1, 3, 'a'), (1, 3, 'a'), (2, 3, 'b'), (2, 3, 'c'),
+				         (3, 1, 'cycle'), (3, 3, 'self')] + [(i, i+1, str(i)) for i in range(3, 70)]
+				calls = []
+				def expand(frontier):
+				    calls.extend(frontier)
+				    return (edge for edge in reversed(edges) if edge[0] in frontier)
+				trace = trace_reachable([2, 1, 2], expand)
+				assert trace['layers'] == [[1, 2]] + [[i] for i in range(3, 71)]
+				assert calls == list(range(1, 71))
+				assert set(trace['edges']) == set(edges) and len(trace['edges']) == len(set(edges))
+				assert trace_reachable([], lambda _: 1/0)['layers'] == []
+				print(json.dumps({"answer": [{"nodes": len(calls)}]}))
+				""";
+		PythonExecuteResult result = run(code);
+		assertNull(result.getError(), result.getError());
+		assertEquals(70, JSONObject.parseObject(result.getResult()).getJSONArray("answer").getJSONObject(0).getIntValue("nodes"));
+	}
+
+	@Test
+	void exhaustingObservedEdgesKeepsUnderlyingTruncationEvidence() throws Exception {
+		String code = """
+				import json, requests
+				data = requests.post('http://127.0.0.1:%s/dsl/execute', json={'dsl': {'mode': 'partial'}}).json()['data'][0]
+				ids = [r['id'] for r in data['answer']]
+				trace = trace_reachable(ids, lambda frontier: [])
+				print(json.dumps({'answer': [{'depths': len(trace['layers']), 'scope': trace['termination']}]}))
+				""".formatted(port());
+		PythonExecuteResult result = run(code);
+		assertNull(result.getError(), result.getError());
+		assertTrue(result.getPartialQuery().getBooleanValue("truncated"));
+		assertTrue(result.getResult().contains("supplied_edges_exhausted"));
 	}
 
 	@Test

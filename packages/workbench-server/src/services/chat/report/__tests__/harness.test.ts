@@ -6,7 +6,10 @@ const fake = vi.hoisted(() => ({
   mode: "valid", calls: [] as string[], prompts: [] as string[], reviewInputs: [] as any[], scopeCalls: 0, scopeSizes: [] as number[], scopeInputs: [] as any[], saves: [] as any[], stages: [] as Array<{ name: string; outcome: string }>, seq: 0, submission: {} as any,
 }));
 vi.mock("../../../../config/model-resolver", () => ({ resolveModelForRole: async () => ({ contextWindow: 100000, maxTokens: 10000 }) }));
-vi.mock("../../../../core/prompts/loader", () => ({ renderPrompt: (key: string, args: any) => `${key} ${JSON.stringify(args)}` }));
+vi.mock("../../../../core/prompts/loader", () => ({
+  getPromptTemplate: (key: string) => `${key} template`,
+  renderPrompt: (key: string, args: any) => `${key} ${JSON.stringify(args)}`,
+}));
 vi.mock("../../../../logging/stage-timing", () => ({ measureStage: async (name: string, run: () => unknown) => {
   try { const result = await run(); fake.stages.push({ name, outcome: "completed" }); return result; }
   catch (error) { fake.stages.push({ name, outcome: "failed" }); throw error; }
@@ -27,6 +30,7 @@ vi.mock("../../../../core/agent-loop/llm-stream", () => ({
     yield { type: "thinking_delta", delta: "checking" };
     if (config.llmLog.agentName === "report-scope-reviewer") {
       fake.scopeCalls++;
+      if (fake.mode === "scope-timeout") return { role: "assistant", content: [], stopReason: "error", timedOut: true };
       const input = JSON.parse(messages[0].content[0].text);
       expect(input).not.toHaveProperty("report");
       fake.scopeSizes.push(input.evidence.datasets.length);
@@ -38,6 +42,9 @@ vi.mock("../../../../core/agent-loop/llm-stream", () => ({
       } }], stopReason: "tool_calls" };
     }
     fake.calls.push(config.llmLog.agentName);
+    if (fake.mode === "persistent-timeout" || (fake.mode === "single-timeout" && fake.calls.length === 1)) {
+      return { role: "assistant", content: [], stopReason: "error", errorMessage: "The operation was aborted due to timeout", timedOut: true };
+    }
     if (fake.mode === "model-error" || (fake.mode === "collect-fails" && fake.calls.length > 1)) return { role: "assistant", content: [], stopReason: "error", errorMessage: "Model unavailable" };
     if (fake.mode === "premature" && fake.calls.length === 1) return { role: "assistant", content: [{ type: "text", text: "Done" }], stopReason: "stop" };
     if (["collect", "collect-new", "collect-fails", "scope-regression"].includes(fake.mode) && fake.calls.length === 1) return { role: "assistant", content: [{ type: "toolCall", id: "collect", name: "collect_report_evidence",
@@ -105,6 +112,73 @@ beforeEach(() => {
 });
 
 describe("real report loop with deterministic model responses", () => {
+  it("resumes saved scope and review context while independently checking revised prose", async () => {
+    fake.mode = "review-fails";
+    expect((await runReportHarness({ ...input, methodology: "Supplemental writing guidance" })).status).toBe("partial");
+    const saved = structuredClone(fake.saves.at(-1));
+    expect(saved.review.memory.scope.evidenceVersion).toBe(evidence.version);
+    expect(saved.review.memory.final.verdict.issues).not.toHaveLength(0);
+    fake.mode = "valid";
+    fake.submission.markdown = "Recall is running; supplier scope is included.";
+    expect((await runReportHarness({ ...input, requestSeq: 1, seed: saved })).status).toBe("verified");
+    expect(fake.scopeCalls).toBe(1);
+    expect(fake.reviewInputs).toHaveLength(2);
+    expect(fake.reviewInputs[1].previousReview.issues).toEqual(saved.review.memory.final.verdict.issues);
+    expect(fake.reviewInputs[1].changes.markdownChanged).toBe(true);
+    expect(fake.saves.at(-1).review.memory.final.report.markdown).toBe(fake.submission.markdown);
+  });
+  it("keeps the verification policy stable when the runtime clock changes", async () => {
+    await runReportHarness(input);
+    const saved = structuredClone(fake.saves.at(-1));
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2027-01-02T03:04:05Z"));
+      fake.scopeCalls = 0;
+      fake.reviewInputs = [];
+      expect((await runReportHarness({ ...input, requestSeq: 1, seed: saved })).status).toBe("verified");
+      expect(fake.scopeCalls).toBe(0);
+      expect(fake.reviewInputs[0].previousReview).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("does not reuse saved scope approval after evidence changes", async () => {
+    await runReportHarness(input);
+    const saved = structuredClone(fake.saves.at(-1));
+    const newer = createReportEvidence({ queryRunId: "new-source", completed: true, datasets: [{ data: [{ status: "running" }] }] } as any);
+    fake.submission.evidenceUse = [{ id: newer.datasets[0]!.id, reason: "New source" }];
+    fake.submission.requirements[0].evidenceIds = [newer.datasets[0]!.id];
+    fake.submission.claims[0].datasetId = newer.datasets[0]!.id;
+    expect((await runReportHarness({ ...input, requestSeq: 1, evidence: newer, seed: saved })).status).toBe("verified");
+    expect(fake.scopeCalls).toBe(2);
+    expect(fake.scopeInputs[1].previousReview.evidenceVersion).toBe(evidence.version);
+    expect(fake.reviewInputs[1].scopeReview.evidenceVersion).toBe(newer.version);
+  });
+  it("discards persisted review memory when its policy or contract no longer matches", async () => {
+    await runReportHarness(input);
+    const saved = structuredClone(fake.saves.at(-1));
+    expect(saved.review.memory).toBeDefined();
+    for (const key of ["policy", "contractVersion"]) {
+      const stale = structuredClone(saved);
+      stale.review.memory[key] = "obsolete";
+      await runReportHarness({ ...input, requestSeq: 1, seed: stale });
+      expect(fake.scopeInputs.at(-1).previousReview).toBeUndefined();
+      expect(fake.reviewInputs.at(-1).previousReview).toBeUndefined();
+    }
+    expect(fake.scopeCalls).toBe(3);
+  });
+  it("persists a completed scope check if drafting fails, without pretending final verification passed", async () => {
+    fake.mode = "model-error";
+    await expect(runReportHarness(input)).rejects.toThrow();
+    const saved = fake.saves.at(-1);
+    expect(saved.review.passed).toBe(false);
+    expect(saved.review.memory.scope.evidenceVersion).toBe(evidence.version);
+    expect(saved.review.memory.final).toBeUndefined();
+    fake.mode = "review-fails";
+    expect((await runReportHarness({ ...input, requestSeq: 1, seed: saved })).status).toBe("partial");
+    expect(fake.scopeCalls).toBe(1);
+    expect(fake.reviewInputs).toHaveLength(1);
+  });
   it("passes the request language preference through collection review, drafting and final review", async () => {
     expect((await runReportHarness({ ...input, locale: "zh-CN" })).status).toBe("verified");
     expect(fake.prompts).toHaveLength(3);
@@ -128,6 +202,16 @@ describe("real report loop with deterministic model responses", () => {
     expect(result.issues.join(" ")).toContain("downstream termination");
     expect(fake.scopeCalls).toBe(1);
     expect(fake.calls).not.toContain("report-reviewer");
+  });
+  it("returns the verified scope gaps when a saved-evidence-only recovery cannot collect missing records", async () => {
+    fake.mode = "scope-gap";
+    const result = await runReportHarness({ ...input, seed: { statistics: [] }, locale: "zh-CN" });
+    expect(result.status).toBe("partial");
+    expect(result.issues.join(" ")).toContain("downstream termination");
+    expect(result.markdown).toContain("补查");
+    expect(fake.scopeCalls).toBe(1);
+    expect(fake.calls).toEqual([]);
+    expect(fake.saves.at(-1)).toMatchObject({ phase: "partial", review: { passed: false }, evidence });
   });
   it("checks scope once after a batch of collections and reuses it at submission", async () => {
     fake.mode = "collect-batch";
@@ -208,7 +292,7 @@ describe("real report loop with deterministic model responses", () => {
     const review = { passed: false, issues: ["Unresolved downstream scope"] };
     await expect(runReportHarness({ ...input, seed: { statistics: [], report: fake.submission, review } })).rejects.toThrow();
     expect(fake.saves[0].review).toEqual(review);
-    expect(fake.saves.at(-1).review).toEqual(review);
+    expect(fake.saves.at(-1).review).toMatchObject(review);
   });
   it("rechecks full semantics after a targeted prose edit while reusing unchanged scope", async () => {
     fake.mode = "prose-repair";
@@ -243,6 +327,22 @@ describe("real report loop with deterministic model responses", () => {
     expect(result).toEqual({ markdown: fake.submission.markdown, status: "verified", issues: [] });
     expect(fake.calls).toEqual(["report-investigator", "report-investigator", "report-reviewer"]);
     expect(fake.saves.at(-1).report.requirements).toEqual(fake.submission.requirements);
+  });
+  it("retries an interrupted report model request once without restarting the scope review", async () => {
+    fake.mode = "single-timeout";
+    expect((await runReportHarness(input)).status).toBe("verified");
+    expect(fake.scopeCalls).toBe(1);
+    expect(fake.calls).toEqual(["report-investigator", "report-investigator", "report-reviewer"]);
+  });
+  it.each(["scope-timeout", "persistent-timeout"])("returns a resumable evidence summary when %s exhausts the retry", async (mode) => {
+    fake.mode = mode;
+    const result = await runReportHarness({ ...input, locale: "zh-CN" });
+    expect(result.status).toBe("partial");
+    expect(result.markdown).toContain("1 张");
+    expect(result.issues.join(" ")).toContain("超时");
+    expect(fake.saves.at(-1)).toMatchObject({ phase: "partial", review: { passed: false }, evidence });
+    if (mode === "scope-timeout") expect(fake.scopeCalls).toBe(2);
+    else expect(fake.calls).toEqual(["report-investigator", "report-investigator"]);
   });
   it("records a failed report stage when the model ends without a submitted result", async () => {
     fake.mode = "model-error";

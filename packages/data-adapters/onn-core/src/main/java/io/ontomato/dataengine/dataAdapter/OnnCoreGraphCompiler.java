@@ -45,6 +45,10 @@ final class OnnCoreGraphCompiler {
         this(original, schema, mapping, extended, new OnnCoreTiming());
     }
     OnnCoreGraphCompiler(JSONObject original, OnnCoreSchema schema, Map<String, Object> mapping, boolean extended, OnnCoreTiming timing) {
+        this(original, schema, mapping, extended, timing, Set.of());
+    }
+    OnnCoreGraphCompiler(JSONObject original, OnnCoreSchema schema, Map<String, Object> mapping, boolean extended,
+            OnnCoreTiming timing, Set<String> edgeAggregateOperators) {
         this.schema = schema;
         this.extended = extended;
         this.timing = timing;
@@ -115,8 +119,8 @@ final class OnnCoreGraphCompiler {
         pipeline = JSONObject.of("steps", steps);
         window = eligibleWindow(step.getJSONObject("output"), pattern, steps);
         if (pattern.getJSONObject("conditions") != null && !pattern.getJSONObject("conditions").isEmpty()) exactFilters = false;
-        aggregatePlan = extended && exactFilters && edgeRelations.isEmpty()
-            ? OnnCoreAggregatePlan.compile(original, schema, classes) : null;
+        aggregatePlan = extended && exactFilters && (edgeRelations.isEmpty() || !edgeAggregateOperators.isEmpty())
+            ? OnnCoreAggregatePlan.compile(original, schema, classes, edgeRelations, edgeAggregateOperators) : null;
 
         // Qualify every field into a collision-free logical binding column. All final filtering,
         // aggregates (including path multiplicity), grouping, sorting and windows remain local.
@@ -195,7 +199,7 @@ final class OnnCoreGraphCompiler {
 
     Window window() { return window; }
     private Window eligibleWindow(JSONObject output, JSONObject pattern, JSONArray steps) {
-        if (!extended || output == null || output.containsKey("group_by") || output.containsKey("sort")
+        if (!extended || !edgeRelations.isEmpty() || output == null || output.containsKey("group_by") || output.containsKey("sort")
             || pattern.getJSONObject("conditions") != null && !pattern.getJSONObject("conditions").isEmpty()) return null;
         for (JSONObject object : objects.values()) if (object.getJSONObject("conditions") != null && !object.getJSONObject("conditions").isEmpty()) return null;
         for (Object raw : output.getJSONArray("fields")) {

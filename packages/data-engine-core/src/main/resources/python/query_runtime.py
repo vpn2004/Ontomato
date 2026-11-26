@@ -57,8 +57,45 @@ def _record_partial_queries():
     requests.Response.json = json_with_query_status
 
 
+def trace_reachable(seeds, expand):
+    """Expand each reachable identity once; retain all directed evidence in the supplied graph."""
+    def identity(value):
+        if type(value) not in (str, int) or value == "":
+            raise ValueError("Trace identities must be non-empty strings or integers")
+        return value
+
+    def sort_key(value):
+        return (isinstance(value, str), value)
+
+    if isinstance(seeds, (str, bytes)):
+        raise ValueError("Pass a collection of seed identities")
+    frontier = {identity(seed) for seed in seeds}
+    visited = set(frontier)
+    layers = []
+    edges = set()
+    while frontier:
+        layer = sorted(frontier, key=sort_key)
+        layers.append(layer)
+        discovered = set()
+        for edge in expand(tuple(layer)):
+            if not isinstance(edge, (list, tuple)) or len(edge) != 3:
+                raise ValueError("A trace edge needs source, target and evidence identities")
+            source, target, evidence = map(identity, edge)
+            if source not in frontier:
+                raise ValueError("Trace expansion returned a source outside the current frontier")
+            edges.add((source, target, evidence))
+            if target not in visited:
+                discovered.add(target)
+        visited.update(discovered)
+        frontier = discovered
+
+    return {"layers": layers,
+            "edges": sorted(edges, key=lambda edge: tuple(map(sort_key, edge))),
+            "termination": "supplied_edges_exhausted"}
+
+
 _record_partial_queries()
 program = os.path.abspath(sys.argv[1])
 sys.argv = sys.argv[1:]
 sys.path[0] = os.path.dirname(program)
-runpy.run_path(program, run_name="__main__")
+runpy.run_path(program, run_name="__main__", init_globals={"trace_reachable": trace_reachable})

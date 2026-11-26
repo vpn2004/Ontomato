@@ -4,6 +4,31 @@ import { createReportBudget } from "../budget";
 afterEach(() => { vi.useRealTimers(); });
 
 describe("separate report reasoning and collection budgets", () => {
+  it("allows the observed long report duration while preserving the one-hour total limit", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+    const budget = createReportBudget();
+    try {
+      await vi.advanceTimersByTimeAsync(2_700_000 - 1);
+      expect(budget.signal.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(budget.signal.aborted).toBe(true);
+      expect(budget.signal.reason.message).toContain("reasoning");
+      budget.dispose();
+
+      const overall = createReportBudget();
+      try {
+        const collection = overall.collect(() => new Promise<void>(() => {}));
+        const rejected = expect(collection).rejects.toThrow("total");
+        await vi.advanceTimersByTimeAsync(2_700_000);
+        expect(overall.signal.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(900_000);
+        expect(overall.signal.aborted).toBe(true);
+        expect(overall.signal.reason.message).toContain("total");
+        await rejected;
+      } finally { overall.dispose(); }
+    } finally { budget.dispose(); }
+  });
+
   it("lets a long bounded collection finish without consuming the report reasoning allowance", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
     const budget = createReportBudget({ reasoningMs: 20_000, totalMs: 60_000 });

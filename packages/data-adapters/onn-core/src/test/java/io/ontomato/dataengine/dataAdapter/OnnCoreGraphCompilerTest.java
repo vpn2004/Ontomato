@@ -134,7 +134,8 @@ class OnnCoreGraphCompilerTest {
             field("a", "id", "source"), field("assembly", "slot_no", "slot")));
 
         OnnCoreSchema schema = new OnnCoreSchema(schemaWire());
-        OnnCoreGraphCompiler compiler = new OnnCoreGraphCompiler(query, schema, schema.ontology());
+        OnnCoreGraphCompiler compiler = new OnnCoreGraphCompiler(query, schema, schema.ontology(), true);
+        assertNull(compiler.window(), "the binding window cannot return per-path edge attributes");
         JSONObject traversal = compiler.nativePipeline().getJSONArray("steps").getJSONObject(1).getJSONObject("graph").getJSONObject("traverse");
         assertEquals("assembly", traversal.getString("edge_as"));
         assertTrue(compiler.requiresEdgeAttributes());
@@ -164,8 +165,40 @@ class OnnCoreGraphCompilerTest {
             rows.add(row);
         }
 
-        assertFalse(compiler.nativeAggregate(), "edge aggregates must retain complete local evaluation until native edge analytics is compiled");
+        assertFalse(compiler.nativeAggregate(), "edge predicates require complete local evaluation");
         assertEquals(2L, compiler.evaluate(rows).getJSONObject(0).getLongValue("count"));
+    }
+
+    @Test void negotiatesEveryCountAndKeepsUnsafeEdgeAggregatesLocal() {
+        var schema = new OnnCoreSchema(schemaWire());
+        var q = query();
+        pattern(q).getJSONArray("relationship").getJSONObject(0).put("edge_as", "assembly");
+        var slot = field("assembly", "slot_no", "unique_slots");
+        slot.put("function", "count"); slot.put("distinct", true);
+        var paths = field("a", "id", "paths"); paths.put("function", "count");
+        var objects = field("a", "id", "objects"); objects.put("function", "count"); objects.put("distinct", true);
+        step(q).getJSONObject("output").put("fields", JSONArray.of(slot, paths, objects));
+        Set<String> operators = Set.of("count_paths", "count_objects", "count_distinct");
+        var plan = new OnnCoreGraphCompiler(q, schema, schema.ontology(), true, new OnnCoreTiming(), operators);
+        assertTrue(plan.nativeAggregate());
+        var metrics = plan.aggregatePipeline().getJSONObject("return").getJSONArray("metrics");
+        assertEquals("$assembly.slot_no", metrics.getJSONObject(0).getString("attribute"));
+        assertEquals("count_distinct", metrics.getJSONObject(0).getString("type"));
+        assertEquals("paths", metrics.getJSONObject(0).getString("over"));
+        assertEquals("paths", metrics.getJSONObject(1).getString("over"));
+        assertEquals("objects", metrics.getJSONObject(2).getString("over"));
+        for (String missing : operators) {
+            var partial = new HashSet<>(operators); partial.remove(missing);
+            assertFalse(new OnnCoreGraphCompiler(q, schema, schema.ontology(), true, new OnnCoreTiming(), partial).nativeAggregate());
+        }
+        for (String function : List.of("sum", "avg", "min", "max")) {
+            slot.put("function", function);
+            assertFalse(new OnnCoreGraphCompiler(q, schema, schema.ontology(), true, new OnnCoreTiming(), operators).nativeAggregate());
+        }
+        slot.put("function", "count");
+        pattern(q).put("conditions", JSONObject.of("properties", JSONObject.of(
+            "variable", "assembly", "field", "slot_no", "operator", ">=", "value", 2)));
+        assertFalse(new OnnCoreGraphCompiler(q, schema, schema.ontology(), true, new OnnCoreTiming(), operators).nativeAggregate());
     }
 
     @Test void rejectsEdgeVariablesThatCollideWithObjectVariablesDeclaredLater() {

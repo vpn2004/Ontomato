@@ -119,6 +119,19 @@ except Exception as e:
     traceback.print_exc()
 ```
 
+## Downstream propagation to a fixed point
+For a recursive scope ("all downstream batches", "transitive impact", or equivalent), use the built-in Python function `trace_reachable(seeds, expand)` in the tested program. Both test and replay provide it directly. Select all requested starting identities and the permitted propagation relationships from the ontology. Keep the singled-out seed's results separate when the user also asks for a narrower scope.
+
+`expand(frontier)` receives one tuple of identities and must return all outgoing `(source_id, target_id, evidence_id)` triples for them in the business direction. For example, when a process consumes an input batch and produces an output batch, return (input batch, output batch, process event ID) for each verified input/output pairing. Use stable non-empty string or integer identities. Read all required pages via DSL, filtered to the current frontier, or index a verified complete small edge table once. Include the relation or slot in the evidence ID if distinct facts would otherwise collide. Empty results end a branch. Missing keys, failed requests or unread pages must remain explicit gaps.
+
+The helper returns `layers` (layer 0 is the distinct seeds), `edges` (including alternate parents, parallel events and back edges) and `termination`. Exhausting supplied edges only proves closure within the supplied inputs. Preserve the seed selection, source filters, page coverage and any partial-result evidence before claiming full scope. For example:
+```python
+trace = trace_reachable(seed_ids, expand)
+batch_depths = [{"batch": key, "depth": depth}
+               for depth, layer in enumerate(trace["layers"]) for key in layer]
+```
+Use the reached identities to query terminal events. Keep assembly, replacement installation, removal and inspection evidence distinct according to the ontology. Count distinct products by product identity and events by the requested event or relation granularity. Output flat tables per the existing result contract.
+
 ## DSL Syntax
 The DSL syntax is represented in JSON, so boolean values and null are written as `true`, `false`, `null`. When writing the DSL into a Python program dictionary, they must be rewritten as Python's `True`, `False`, `None` respectively.
 
